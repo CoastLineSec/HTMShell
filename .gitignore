@@ -1,0 +1,14 @@
+# Private project working material
+/.internal/
+
+# Local repository instructions
+/AGENTS.md
+
+# Research and feasibility material must remain internal
+/docs/research/
+
+# Rust build output
+/target/
+
+# Generated example output
+/examples/*/output/

@@ -1,0 +1,19 @@
+[package]
+name = "htm-runtime"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyrender.workspace = true
+anyrender_vello_cpu.workspace = true
+blitz-dom.workspace = true
+blitz-html.workspace = true
+blitz-paint.workspace = true
+blitz-traits.workspace = true
+png.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+skrifa.workspace = true
+stylo.workspace = true

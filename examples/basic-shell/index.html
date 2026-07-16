@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>HTMShell Gate A fixture</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main id="desktop-root" class="desktop">
+      <header id="top-panel" class="top-panel">
+        <div class="brand">
+          <img class="brand-mark" src="assets/mark.svg" alt="HTMShell mark">
+          <div>
+            <strong>HTMShell</strong>
+            <span class="subtitle">Headless runtime spike</span>
+          </div>
+        </div>
+        <nav class="workspace-list" aria-label="Workspaces">
+          <span class="workspace active-workspace">1</span>
+          <span class="workspace">2</span>
+          <span class="workspace">3</span>
+        </nav>
+        <div class="status-row">
+          <span>NET</span>
+          <span>72%</span>
+          <time>10:42</time>
+        </div>
+      </header>
+
+      <section class="desktop-content">
+        <article id="launcher-card" class="card launcher-card">
+          <span class="absolute-badge">LOCAL</span>
+          <p class="eyebrow">APPLICATIONS</p>
+          <h1>Good morning</h1>
+          <p class="description">A native shell scene authored with local HTML and CSS.</p>
+          <button id="primary-action" class="primary-action" type="button">
+            Open launcher
+          </button>
+        </article>
+
+        <aside id="quick-grid" class="quick-grid" aria-label="Quick controls">
+          <div class="quick-tile"><strong>Audio</strong><span>Speakers · 48%</span></div>
+          <div class="quick-tile"><strong>Network</strong><span>CoastLine</span></div>
+          <div class="quick-tile"><strong>Power</strong><span>Balanced</span></div>
+          <div class="quick-tile"><strong>Theme</strong><span>Night</span></div>
+        </aside>
+
+        <section id="clip-card" class="card clip-card">
+          <h2>Retained scene</h2>
+          <div class="clip-window">
+            <div class="clipped-child">This child intentionally extends beyond its clip.</div>
+          </div>
+        </section>
+      </section>
+    </main>
+  </body>
+</html>

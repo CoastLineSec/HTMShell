@@ -1,0 +1,24 @@
+[workspace]
+members = ["crates/htm-runtime", "tools/htm-headless"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[workspace.dependencies]
+anyrender = { version = "=0.11.0" }
+anyrender_vello_cpu = { version = "=0.14.0", default-features = false }
+blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "389e3762fc0ac19f6de7c0cec7201d0c8bde393a", default-features = false, features = ["incremental", "svg", "system-fonts"] }
+blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "389e3762fc0ac19f6de7c0cec7201d0c8bde393a", default-features = false }
+blitz-paint = { git = "https://github.com/DioxusLabs/blitz", rev = "389e3762fc0ac19f6de7c0cec7201d0c8bde393a", default-features = false, features = ["svg"] }
+blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "389e3762fc0ac19f6de7c0cec7201d0c8bde393a", default-features = false }
+png = "=0.18.1"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+skrifa = "=0.42.1"
+stylo = { version = "=0.19.0", package = "stylo" }
+
+[profile.release]
+strip = false
