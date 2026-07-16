@@ -15,8 +15,8 @@
   <interface name="htm_shell_manager_v1" version="1">
     <description summary="authorized shell controller">
       The manager grants shell-root authority to one authorized client. The
-      authenticate request is a provisional Gate B.0 bootstrap mechanism, not a
-      commitment to a production authentication policy.
+      authenticate request is a provisional development bootstrap mechanism,
+      not a commitment to a production authentication policy.
 
       A compositor must withhold shell authority until authorization succeeds.
       Authorization is scoped to the Wayland client connection and disappears
@@ -59,8 +59,8 @@
     <enum name="role">
       <description summary="semantic root placement">
         Roles specify desktop semantics rather than a render stage or numeric
-        z-index. Version 1 defines only the role exercised by this feasibility
-        gate. When several overlay roots share an output, later get_root
+        z-index. Version 1 defines only the overlay role. When several overlay
+        roots share an output, later get_root
         requests are placed above earlier requests without crossing secure
         compositor ordering boundaries.
       </description>
@@ -73,8 +73,8 @@
         The token is an opaque, single-session test capability. A production
         authorization mechanism may instead restrict global visibility, inherit
         authority from the compositor, or use session-manager integration. This
-        request remains solely to exercise the Gate B reference host and may be
-        removed by a breaking experimental revision before stabilization.
+        request remains solely to exercise the development reference host and
+        may be removed by a breaking experimental revision before stabilization.
       </description>
       <arg name="token" type="string" summary="opaque provisional capability"/>
     </request>

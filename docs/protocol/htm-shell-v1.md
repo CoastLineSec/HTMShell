@@ -11,7 +11,7 @@ The current interface names remain `htm_shell_manager_v1` and
 `htm_shell_root_v1`. The project-specific `htm_` prefix avoids namespace
 collision, while the documentation and XML clearly mark the protocol as
 experimental. A rename would not improve its semantics and would create churn
-for the reference probe. Interface names do not promise future compatibility
+for the development tools. Interface names do not promise future compatibility
 while the protocol is explicitly experimental.
 
 ## Object model
@@ -32,7 +32,8 @@ workspace, or compositor object identifier is added.
 1. The compositor decides whether a client connection may receive shell
    authority.
 2. The client binds `htm_shell_manager_v1` version 1.
-3. The current reference host uses `authenticate` as a provisional bootstrap.
+3. The development reference implementation uses `authenticate` as a
+   provisional bootstrap.
 4. After authority is granted, the compositor sends zero or more `capability`
    events followed by exactly one `ready` event.
 5. No capability event follows `ready` on that manager object.
@@ -68,6 +69,8 @@ render a root.
 Future facilities already represented by separate Wayland globals are
 discovered through those globals instead of duplicated as HTMShell capability
 events.
+
+Version 1 guarantees no unadvertised or future optional capability.
 
 ## Role rules
 
@@ -258,7 +261,8 @@ compositor-launched client or inherited connection capability is stronger than
 same-user access, executable-name matching, a public first-client-wins global,
 or reusable authentication bytes.
 
-The current bootstrap request exists only for the nested reference host. Its
+The current bootstrap request exists only for the development reference
+implementation. Its
 bytes are never part of conformance output. A future stable protocol may assume
 that binding the restricted global is sufficient and remove the request.
 
