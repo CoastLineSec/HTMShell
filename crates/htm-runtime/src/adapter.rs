@@ -286,7 +286,7 @@ fn validate_viewport(options: &ExperimentOptions) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-fn validate_document_limits(document: &HtmlDocument) -> Result<(), RuntimeError> {
+pub(crate) fn validate_document_limits(document: &HtmlDocument) -> Result<(), RuntimeError> {
     if document.tree().len() > MAX_DOM_NODES {
         return Err(RuntimeError::LimitExceeded(format!(
             "parsed DOM contains {} nodes; limit is {MAX_DOM_NODES}",
@@ -344,7 +344,7 @@ fn inspect_document_profile(document: &HtmlDocument) -> Vec<DiagnosticMessage> {
     messages
 }
 
-fn resolve_resources(
+pub(crate) fn resolve_resources(
     document: &mut HtmlDocument,
     audit: &ResourceAudit,
     time: f64,
@@ -369,17 +369,25 @@ fn resolve_resources(
     });
 }
 
-fn render_png(
+pub(crate) fn render_png(
     document: &mut HtmlDocument,
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, RuntimeError> {
+    let rgba = render_rgba(document, width, height);
+    encode_png(&rgba, width, height)
+}
+
+pub(crate) fn render_rgba(document: &mut HtmlDocument, width: u32, height: u32) -> Vec<u8> {
     let scale = document.viewport().scale_f64();
-    let rgba = render_to_buffer::<VelloCpuImageRenderer, _>(
+    render_to_buffer::<VelloCpuImageRenderer, _>(
         |scene| paint_scene(scene, document, scale, width, height, 0, 0),
         width,
         height,
-    );
+    )
+}
+
+pub(crate) fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, RuntimeError> {
     let mut encoded = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut encoded, width, height);
@@ -389,7 +397,7 @@ fn render_png(
             .write_header()
             .map_err(|error| RuntimeError::Png(error.to_string()))?;
         writer
-            .write_image_data(&rgba)
+            .write_image_data(rgba)
             .map_err(|error| RuntimeError::Png(error.to_string()))?;
         writer
             .finish()
@@ -554,7 +562,7 @@ fn build_node(
     }
 }
 
-fn border_radii(node: &Node) -> Option<CornerRadii> {
+pub(crate) fn border_radii(node: &Node) -> Option<CornerRadii> {
     let styles = node.primary_styles()?;
     let width = CSSPixelLength::new(node.final_layout.size.width);
     let height = CSSPixelLength::new(node.final_layout.size.height);
@@ -583,7 +591,7 @@ fn border_radii(node: &Node) -> Option<CornerRadii> {
     any_nonzero.then_some(radii)
 }
 
-fn text_diagnostic(node: &Node) -> Option<TextDiagnostic> {
+pub(crate) fn text_diagnostic(node: &Node) -> Option<TextDiagnostic> {
     let element = node.element_data()?;
     let layout = element.inline_layout_data.as_ref()?;
     let content = node.text_content();
@@ -608,7 +616,7 @@ fn text_diagnostic(node: &Node) -> Option<TextDiagnostic> {
     })
 }
 
-fn image_diagnostic(node: &Node) -> Option<ImageDiagnostic> {
+pub(crate) fn image_diagnostic(node: &Node) -> Option<ImageDiagnostic> {
     let element = node.element_data()?;
     let source = element.attr(blitz_dom::local_name!("src"))?.to_owned();
     let decoded_kind = match element.image_data() {
@@ -653,7 +661,7 @@ fn collect_fonts(document: &HtmlDocument) -> Vec<FontRecord> {
     fonts.into_iter().collect()
 }
 
-fn collect_retained_paint_order(document: &HtmlDocument) -> Vec<usize> {
+pub(crate) fn collect_retained_paint_order(document: &HtmlDocument) -> Vec<usize> {
     let mut order = Vec::new();
     let mut seen = BTreeSet::new();
     if let Some(root) = document.try_root_element() {
@@ -717,7 +725,7 @@ fn pointer_event(x: f32, y: f32, pressed: bool) -> BlitzPointerEvent {
     }
 }
 
-fn count_dirty_descendants(document: &HtmlDocument) -> usize {
+pub(crate) fn count_dirty_descendants(document: &HtmlDocument) -> usize {
     document
         .tree()
         .iter()
@@ -725,7 +733,7 @@ fn count_dirty_descendants(document: &HtmlDocument) -> usize {
         .count()
 }
 
-fn count_damaged_nodes(document: &HtmlDocument) -> usize {
+pub(crate) fn count_damaged_nodes(document: &HtmlDocument) -> usize {
     document
         .tree()
         .iter()
@@ -861,7 +869,7 @@ fn write_artifacts(
     Ok(())
 }
 
-fn safe_rect(x: f32, y: f32, width: f32, height: f32) -> LogicalRect {
+pub(crate) fn safe_rect(x: f32, y: f32, width: f32, height: f32) -> LogicalRect {
     LogicalRect {
         x: safe_float(x),
         y: safe_float(y),
@@ -874,10 +882,10 @@ fn safe_float(value: f32) -> f32 {
     if value.is_finite() { round(value) } else { 0.0 }
 }
 
-fn round(value: f32) -> f32 {
+pub(crate) fn round(value: f32) -> f32 {
     (value * 1000.0).round() / 1000.0
 }
 
-fn elapsed_ms(started: Instant) -> f64 {
+pub(crate) fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
 }

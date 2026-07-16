@@ -12,6 +12,12 @@ pub enum RuntimeError {
     },
     Serialization(serde_json::Error),
     Png(String),
+    InvalidMutationTarget(String),
+    StaleIdentity {
+        slot: usize,
+        generation: u64,
+    },
+    StylesheetRejected(String),
     EnginePanic(String),
 }
 
@@ -41,6 +47,14 @@ impl fmt::Display for RuntimeError {
             } => write!(f, "failed to {operation} {}: {source}", path.display()),
             Self::Serialization(source) => write!(f, "failed to serialize diagnostics: {source}"),
             Self::Png(message) => write!(f, "failed to encode PNG: {message}"),
+            Self::InvalidMutationTarget(message) => {
+                write!(f, "invalid mutation target: {message}")
+            }
+            Self::StaleIdentity { slot, generation } => write!(
+                f,
+                "stale experimental node identity: slot {slot}, generation {generation}"
+            ),
+            Self::StylesheetRejected(message) => write!(f, "stylesheet rejected: {message}"),
             Self::EnginePanic(message) => write!(f, "Blitz runtime panicked: {message}"),
         }
     }

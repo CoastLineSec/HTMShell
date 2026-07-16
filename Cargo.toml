@@ -14,11 +14,14 @@ blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "389e3762fc0ac1
 blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "389e3762fc0ac19f6de7c0cec7201d0c8bde393a", default-features = false }
 blitz-paint = { git = "https://github.com/DioxusLabs/blitz", rev = "389e3762fc0ac19f6de7c0cec7201d0c8bde393a", default-features = false, features = ["svg"] }
 blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "389e3762fc0ac19f6de7c0cec7201d0c8bde393a", default-features = false }
+cssparser = "=0.37.0"
 png = "=0.18.1"
+selectors = "=0.39.0"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
 skrifa = "=0.42.1"
 stylo = { version = "=0.19.0", package = "stylo" }
+url = "=2.5.8"
 
 [profile.release]
 strip = false

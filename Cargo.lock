@@ -709,11 +709,14 @@ dependencies = [
  "blitz-html",
  "blitz-paint",
  "blitz-traits",
+ "cssparser",
  "png 0.18.1",
+ "selectors",
  "serde",
  "serde_json",
  "skrifa",
  "stylo",
+ "url",
 ]
 
 [[package]]

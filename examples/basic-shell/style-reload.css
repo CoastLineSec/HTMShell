@@ -1,12 +1,12 @@
 :root {
-  --desktop: #0b1020;
-  --panel: rgba(25, 33, 58, 0.94);
-  --card: #18223c;
-  --card-strong: #202d4c;
-  --text: #edf2ff;
-  --muted: #9aa8c7;
-  --accent: #7c9cff;
-  --border: #344263;
+  --desktop: #101326;
+  --panel: rgba(29, 40, 68, 0.96);
+  --card: #24345b;
+  --card-strong: #2b3e69;
+  --text: #f4f7ff;
+  --muted: #acb9d8;
+  --accent: #91b7ff;
+  --border: #58709f;
 }
 
 * {
@@ -32,7 +32,7 @@ body {
   width: 100%;
   min-height: 900px;
   padding: 24px;
-  background: linear-gradient(145deg, #0b1020, #111a31);
+  background: linear-gradient(145deg, #101326, #172241);
 }
 
 .top-panel {
@@ -78,12 +78,12 @@ body {
   padding: 7px 10px;
   border-radius: 10px;
   text-align: center;
-  background: #10182c;
+  background: #15203a;
 }
 
 .active-workspace {
-  background: var(--accent);
   color: #0b1020;
+  background: var(--accent);
 }
 
 .status-row {
@@ -111,9 +111,9 @@ body {
 }
 
 .launcher-card.mutation-highlight {
-  border-color: #91a9ff;
-  border-radius: 30px;
-  background: #24365f;
+  border-color: #b1c8ff;
+  border-radius: 34px;
+  background: #314a7d;
 }
 
 .launcher-card h1 {
@@ -134,15 +134,15 @@ body {
   right: 24px;
   padding: 6px 9px;
   border-radius: 8px;
-  background: #10182c;
   color: var(--muted);
+  background: #15203a;
   font-size: 11px;
 }
 
 .primary-action {
   margin-top: 28px;
   padding: 13px 20px;
-  border: 1px solid #91a9ff;
+  border: 1px solid #b1c8ff;
   border-radius: 14px;
   color: #071024;
   background: var(--accent);
@@ -151,12 +151,12 @@ body {
 }
 
 .primary-action:hover {
-  background: #a9bbff;
+  background: #bed0ff;
   transform: translateY(-2px);
 }
 
 .primary-action:active {
-  background: #5978df;
+  background: #668be2;
   transform: translateY(1px);
 }
 
@@ -196,7 +196,7 @@ body {
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 18px;
-  background: #10182c;
+  background: #15203a;
 }
 
 .clipped-child {
@@ -204,5 +204,5 @@ body {
   margin: 20px;
   padding: 18px;
   border-radius: 12px;
-  background: #293a63;
+  background: #365185;
 }
