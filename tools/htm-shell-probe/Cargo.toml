@@ -1,0 +1,12 @@
+[package]
+name = "htm-shell-probe"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+htm-compositor-client = { path = "../../crates/htm-compositor-client" }
+rustix = { version = "=1.1.4", features = ["fs"] }
+wayland-client.workspace = true
+wayland-protocols.workspace = true

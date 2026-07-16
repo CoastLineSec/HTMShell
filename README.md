@@ -13,4 +13,12 @@ Both commands use a fixed 1440 × 900 logical-pixel, scale-1.0 SDR/sRGB viewport
 
 The scene diff is an HTMShell-owned diagnostic artifact, not evidence of retained Blitz painting. Every accepted painted mutation phase currently invokes `blitz-paint` again and reconstructs the full AnyRender scene.
 
-There is no Wayland, layer-shell, Hyprland, or compositor integration in this phase. Blitz is under evaluation and is not the permanent HTMShell engine unless later gates justify that decision.
+Gate B.0 adds an independent experimental compositor-contract probe. It uses a normal `wl_surface`, `wl_shm`, standard frame and buffer lifecycles, and a small HTMShell protocol for provisional shell ownership and one semantic `overlay` root. The Rust probe is compositor-neutral. A temporary Hyprland host exists only to test whether a compositor can implement the same contract; it is not a permanent backend architecture and is never used by the HTML/CSS runtime.
+
+```sh
+cargo build -p htm-shell-probe --release --locked
+cmake -S prototypes/compositor-host -B .internal/build/compositor-host -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build .internal/build/compositor-host
+```
+
+The host must be built against the exact headers for the running Hyprland commit and loaded only in a nested development session. Machine-specific configuration, session authorization, logs, and measurements remain private under `.internal/`. There is no usable desktop shell, layer-shell integration, or production compositor support yet. Blitz and the experimental compositor contract both remain under evaluation.

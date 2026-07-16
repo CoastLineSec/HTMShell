@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="htm_shell_v1">
+  <description summary="experimental HTMShell compositor contract">
+    This protocol assigns an authorized HTMShell controller a semantic shell-root
+    role on an ordinary wl_surface. Surface content, buffers, damage, frame
+    callbacks, output information, and input continue to use standard Wayland
+    protocols.
+
+    Version 1 is an experimental feasibility contract. It is not a standard and
+    is not part of wayland-protocols.
+  </description>
+
+  <interface name="htm_shell_manager_v1" version="1">
+    <description summary="authorized shell controller">
+      The manager grants shell-root authority to one authorized client. The
+      authenticate request is a provisional Gate B.0 bootstrap mechanism, not a
+      commitment to a production authentication policy.
+
+      A compositor must withhold shell authority until authorization succeeds.
+      Authorization is scoped to the Wayland client connection and disappears
+      when that connection is destroyed.
+    </description>
+
+    <enum name="error">
+      <entry name="already_authenticated" value="1"
+             summary="this manager has already authenticated"/>
+      <entry name="unauthorized" value="2"
+             summary="authorization failed or was not completed"/>
+      <entry name="controller_exists" value="3"
+             summary="another client already controls HTMShell roots"/>
+      <entry name="invalid_surface" value="4"
+             summary="the surface is invalid or already has a role"/>
+      <entry name="invalid_output" value="5"
+             summary="the output is invalid or unavailable"/>
+      <entry name="invalid_role" value="6"
+             summary="the semantic role is unsupported"/>
+      <entry name="duplicate_root" value="7"
+             summary="the surface already owns an HTMShell root"/>
+    </enum>
+
+    <enum name="capability">
+      <description summary="compositor-neutral HTMShell capabilities">
+        Capability identifiers describe contract semantics, never compositor
+        implementation details. Unknown values must be ignored by clients.
+      </description>
+      <entry name="root_overlay" value="1"
+             summary="semantic overlay roots are supported"/>
+      <entry name="standard_pointer_focus" value="2"
+             summary="shell roots participate in normal Wayland pointer targeting"/>
+    </enum>
+
+    <enum name="role">
+      <description summary="semantic root placement">
+        Roles specify desktop semantics rather than a render stage or numeric
+        z-index. Version 1 defines only the role exercised by this feasibility
+        gate.
+      </description>
+      <entry name="overlay" value="1"
+             summary="above ordinary applications and below secure lock content"/>
+    </enum>
+
+    <request name="authenticate">
+      <description summary="complete provisional authorization">
+        The token is an opaque, single-session test capability. A production
+        authorization mechanism may instead restrict global visibility, inherit
+        authority from the compositor, or use session-manager integration.
+      </description>
+      <arg name="token" type="string" summary="opaque provisional capability"/>
+    </request>
+
+    <request name="get_root">
+      <description summary="assign a semantic shell-root role">
+        This request permanently assigns a shell-root role to surface. The role
+        remains attached to the wl_surface for its lifetime, even after the root
+        object is destroyed. The client must not attach a buffer until it has
+        acknowledged the initial configure event.
+      </description>
+      <arg name="id" type="new_id" interface="htm_shell_root_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="output" type="object" interface="wl_output"/>
+      <arg name="role" type="uint" enum="role"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager binding">
+        Destroying this object does not destroy roots already created by this
+        client. Client disconnection always revokes controller authority and
+        destroys all associated roots.
+      </description>
+    </request>
+
+    <event name="capability">
+      <description summary="advertise one supported contract capability">
+        This event is sent after successful authorization and before ready.
+      </description>
+      <arg name="capability" type="uint" enum="capability"/>
+    </event>
+
+    <event name="ready">
+      <description summary="capability advertisement is complete">
+        After this event, the client may create roots using advertised roles.
+      </description>
+    </event>
+  </interface>
+
+  <interface name="htm_shell_root_v1" version="1">
+    <description summary="one output-associated semantic shell root">
+      The root owns semantic placement for one wl_surface on one wl_output. The
+      compositor chooses its internal scene placement. The client continues to
+      use wl_surface requests for content and standard seat objects for input.
+    </description>
+
+    <enum name="error">
+      <entry name="invalid_ack" value="1"
+             summary="the configure serial is unknown or stale"/>
+      <entry name="buffer_before_ack" value="2"
+             summary="a buffer was committed before the initial configure ack"/>
+      <entry name="invalid_size" value="3"
+             summary="committed surface dimensions exceed implementation limits"/>
+    </enum>
+
+    <request name="ack_configure">
+      <description summary="acknowledge a configure">
+        The client acknowledges that subsequent surface state is based on this
+        configure. A client must acknowledge the initial configure before
+        attaching its first buffer.
+      </description>
+      <arg name="serial" type="uint" summary="serial from configure"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="unmap and destroy this root">
+        The compositor must immediately remove the root from presentation and
+        input targeting. The wl_surface keeps its permanent role and cannot be
+        reused for an incompatible role.
+      </description>
+    </request>
+
+    <event name="configure">
+      <description summary="configure logical root dimensions">
+        Width and height are output-local logical dimensions. Buffer scale and
+        fractional-scale behavior use existing Wayland protocols.
+      </description>
+      <arg name="serial" type="uint" summary="configure serial"/>
+      <arg name="logical_width" type="uint" summary="surface-local logical width"/>
+      <arg name="logical_height" type="uint" summary="surface-local logical height"/>
+    </event>
+  </interface>
+</protocol>
