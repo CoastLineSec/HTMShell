@@ -3,6 +3,7 @@ members = [
     "crates/htm-compositor-client",
     "crates/htm-runtime",
     "tools/htm-headless",
+    "tools/htm-shell-conformance",
     "tools/htm-shell-probe",
 ]
 resolver = "2"

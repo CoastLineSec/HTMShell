@@ -198,6 +198,10 @@ namespace {
                 wl_resource_post_error(binding->resource, HTM_SHELL_MANAGER_V1_ERROR_INVALID_SURFACE, "invalid wl_surface");
                 return;
             }
+            if (surface->m_current.texture || surface->m_pending.buffer) {
+                wl_resource_post_error(binding->resource, HTM_SHELL_MANAGER_V1_ERROR_INVALID_SURFACE, "wl_surface already has an attached buffer");
+                return;
+            }
             if (!output || output->client() != binding->client || !output->m_monitor || !g_pCompositor->monitorExists(output->m_monitor.lock())) {
                 wl_resource_post_error(binding->resource, HTM_SHELL_MANAGER_V1_ERROR_INVALID_OUTPUT, "invalid wl_output");
                 return;
