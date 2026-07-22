@@ -6,7 +6,7 @@ use crate::model::{
 };
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
 use crate::{BLITZ_REVISION, DIAGNOSTIC_SCHEMA_VERSION};
-use anyrender::render_to_buffer;
+use anyrender::{PaintScene, Scene, render_to_buffer};
 use anyrender_vello_cpu::VelloCpuImageRenderer;
 use blitz_dom::node::ImageData;
 use blitz_dom::{Document, DocumentConfig, Node, StyleThreading};
@@ -17,6 +17,7 @@ use blitz_traits::events::{
     PointerDetails, UiEvent,
 };
 use blitz_traits::shell::{ColorScheme, Viewport};
+use kurbo::Affine;
 use skrifa::string::StringId;
 use skrifa::{FontRef, MetadataProvider};
 use std::collections::{BTreeMap, BTreeSet};
@@ -384,6 +385,35 @@ pub(crate) fn render_rgba(document: &mut HtmlDocument, width: u32, height: u32) 
         |scene| paint_scene(scene, document, scale, width, height, 0, 0),
         width,
         height,
+    )
+}
+
+pub(crate) fn render_rgba_scaled(
+    document: &mut HtmlDocument,
+    logical_width: u32,
+    logical_height: u32,
+    buffer_width: u32,
+    buffer_height: u32,
+    scale: f64,
+) -> Vec<u8> {
+    if logical_width == buffer_width && logical_height == buffer_height && scale == 1.0 {
+        return render_rgba(document, buffer_width, buffer_height);
+    }
+
+    let mut logical_scene = Scene::new();
+    paint_scene(
+        &mut logical_scene,
+        document,
+        1.0,
+        logical_width,
+        logical_height,
+        0,
+        0,
+    );
+    render_to_buffer::<VelloCpuImageRenderer, _>(
+        |scene| scene.append_scene(logical_scene, Affine::scale(scale)),
+        buffer_width,
+        buffer_height,
     )
 }
 

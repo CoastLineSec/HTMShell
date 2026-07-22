@@ -1,4 +1,4 @@
-use crate::{FrameScheduler, OutputKey, ScheduleDecision};
+use crate::{FrameScheduler, OutputKey, ScheduleDecision, SurfaceScaleState};
 use std::collections::BTreeMap;
 
 const TEST_BUDGET: usize = 64 * 1024 * 1024;
@@ -22,6 +22,7 @@ struct ModelSurface {
     scheduler: FrameScheduler,
     busy_buffers: usize,
     mapped_bytes: usize,
+    scale: Option<SurfaceScaleState>,
 }
 
 #[derive(Debug, Default)]
@@ -76,6 +77,8 @@ impl SessionModel {
         self.next_owner += 1;
         self.next_generation += 1;
         self.next_document += 1;
+        let mut scale = SurfaceScaleState::new(self.next_generation, true);
+        scale.set_logical_size(101, 51);
         ModelSurface {
             id: Some(ModelId {
                 template,
@@ -86,6 +89,7 @@ impl SessionModel {
             parse_count: 1,
             document_identity: self.next_document,
             mapped,
+            scale: Some(scale),
             ..ModelSurface::default()
         }
     }
@@ -198,6 +202,23 @@ impl SessionModel {
         } else {
             self.stale_releases += 1;
         }
+    }
+
+    fn preferred_scale(&mut self, owner: u64, numerator: u32) -> bool {
+        let Some(surface) = self.surface_mut(owner) else {
+            return false;
+        };
+        let generation = surface.id.as_ref().unwrap().generation;
+        let changed = surface
+            .scale
+            .as_mut()
+            .unwrap()
+            .receive_preferred(generation, numerator)
+            .unwrap();
+        if changed && surface.mapped {
+            surface.scheduler.mark_dirty();
+        }
+        changed
     }
 }
 
@@ -366,4 +387,61 @@ fn removing_every_output_leaves_an_idle_recoverable_session() {
             .values()
             .all(|output| { output.panel.parse_count == 1 && output.overlay.parse_count == 1 })
     );
+}
+
+#[test]
+fn mixed_scale_changes_are_surface_and_output_local() {
+    let mut session = SessionModel::default();
+    let a = key(1, 1);
+    let b = key(2, 2);
+    session.add_output(a);
+    session.add_output(b);
+    let panel_a = session.outputs[&a].panel.id.as_ref().unwrap().owner;
+    let panel_b = session.outputs[&b].panel.id.as_ref().unwrap().owner;
+    let overlay_b = session.outputs[&b].overlay.id.as_ref().unwrap().owner;
+
+    assert!(session.preferred_scale(panel_b, 180));
+    assert!(session.outputs[&b].panel.scheduler.dirty());
+    assert!(!session.outputs[&a].panel.scheduler.dirty());
+    assert_eq!(
+        session.outputs[&b]
+            .panel
+            .scale
+            .unwrap()
+            .render_request()
+            .unwrap()
+            .unwrap()
+            .buffer_width,
+        152
+    );
+    assert_eq!(
+        session.outputs[&a]
+            .panel
+            .scale
+            .unwrap()
+            .preferred_numerator(),
+        120
+    );
+
+    assert!(session.preferred_scale(overlay_b, 210));
+    assert!(!session.outputs[&b].overlay.scheduler.dirty());
+    assert!(!session.preferred_scale(panel_b, 180));
+    assert!(!session.preferred_scale(panel_a + 10_000, 150));
+}
+
+#[test]
+fn readded_output_does_not_inherit_scale_or_stale_generation() {
+    let mut session = SessionModel::default();
+    let old = key(5, 1);
+    session.add_output(old);
+    let old_owner = session.outputs[&old].panel.id.as_ref().unwrap().owner;
+    assert!(session.preferred_scale(old_owner, 180));
+    session.remove_output(old).unwrap();
+    assert!(!session.preferred_scale(old_owner, 210));
+
+    let fresh = key(5, 2);
+    session.add_output(fresh);
+    let new_scale = session.outputs[&fresh].panel.scale.unwrap();
+    assert_eq!(new_scale.preferred_numerator(), 120);
+    assert_ne!(new_scale.surface_generation(), 0);
 }

@@ -12,4 +12,5 @@ rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 wayland-client.workspace = true
+wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true

@@ -56,6 +56,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         "fractional_scale_advertised={}",
         summary.fractional_scale_advertised
     );
+    println!(
+        "preferred_scale={}/{}",
+        summary.preferred_scale_numerator, summary.scale_denominator
+    );
+    println!(
+        "fractional_viewport_active={}",
+        summary.fractional_viewport_active
+    );
     println!("html_parse_count={}", summary.html_parse_count);
     println!("frames_committed={}", summary.frames_committed);
     println!("full_damage_commits={}", summary.full_damage_commits);
@@ -99,6 +107,7 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     let mut exit_after_initial_frames = false;
     let mut exit_after_output_events = None;
     let mut exit_after_actions = None;
+    let mut exit_after_scale_changes = None;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--validate-only" => validate_only = true,
@@ -117,6 +126,13 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
                         .parse::<u64>()?,
                 );
             }
+            "--exit-after-scale-changes" => {
+                exit_after_scale_changes = Some(
+                    args.next()
+                        .ok_or("--exit-after-scale-changes requires a positive integer")?
+                        .parse::<u64>()?,
+                );
+            }
             _ => return Err(format!("unknown manifest argument: {argument}").into()),
         }
     }
@@ -125,6 +141,9 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     }
     if exit_after_actions == Some(0) {
         return Err("--exit-after-actions must be positive".into());
+    }
+    if exit_after_scale_changes == Some(0) {
+        return Err("--exit-after-scale-changes must be positive".into());
     }
     let manifest = ValidatedManifest::load(&path)?;
     if validate_only {
@@ -149,6 +168,7 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
         exit_after_initial_frames,
         exit_after_output_events,
         exit_after_actions,
+        exit_after_scale_changes,
     })?;
     println!("manifest_live_result=success");
     println!("manifest_id={}", summary.manifest_id);
@@ -156,6 +176,11 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     println!("manifest_parse_us={}", summary.manifest_parse_us);
     println!("manifest_validation_us={}", summary.manifest_validation_us);
     println!("layer_shell_version={}", summary.layer_shell_version);
+    println!("viewporter_advertised={}", summary.viewporter_advertised);
+    println!(
+        "fractional_scale_advertised={}",
+        summary.fractional_scale_advertised
+    );
     println!("output_generations={}", summary.output_generations);
     println!("output_additions={}", summary.output_additions);
     println!("output_removals={}", summary.output_removals);
@@ -192,6 +217,19 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
             println!(
                 "output_{}_panel_parse_count={}",
                 key.generation, panel.metrics.html_parse_count
+            );
+            println!(
+                "output_{}_panel_scale={}/{} fractional={} logical={}x{} physical={}x{} scale_commit_us={} scale_callback_us={}",
+                key.generation,
+                panel.metrics.preferred_scale_numerator,
+                panel.metrics.scale_denominator,
+                panel.metrics.fractional_viewport_active,
+                panel.metrics.logical_width,
+                panel.metrics.logical_height,
+                panel.metrics.buffer_width,
+                panel.metrics.buffer_height,
+                panel.metrics.last_scale_change_to_commit_us,
+                panel.metrics.last_scale_change_to_frame_callback_us
             );
             println!(
                 "output_{}_panel_frames={}",
@@ -233,6 +271,19 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
             println!(
                 "output_{}_overlay_parse_count={}",
                 key.generation, overlay.metrics.html_parse_count
+            );
+            println!(
+                "output_{}_overlay_scale={}/{} fractional={} logical={}x{} physical={}x{} scale_commit_us={} scale_callback_us={}",
+                key.generation,
+                overlay.metrics.preferred_scale_numerator,
+                overlay.metrics.scale_denominator,
+                overlay.metrics.fractional_viewport_active,
+                overlay.metrics.logical_width,
+                overlay.metrics.logical_height,
+                overlay.metrics.buffer_width,
+                overlay.metrics.buffer_height,
+                overlay.metrics.last_scale_change_to_commit_us,
+                overlay.metrics.last_scale_change_to_frame_callback_us
             );
             println!(
                 "output_{}_overlay_frames={}",
@@ -281,6 +332,10 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     println!(
         "stale_releases_contained={}",
         summary.stale_releases_contained
+    );
+    println!(
+        "stale_scale_events_contained={}",
+        summary.stale_scale_events_contained
     );
     println!(
         "first_output_instance_us={}",
@@ -382,6 +437,28 @@ fn print_surface(prefix: &str, summary: &SurfaceHostSummary) {
     println!(
         "{prefix}_logical_size={}x{}",
         summary.logical_width, summary.logical_height
+    );
+    println!(
+        "{prefix}_buffer_size={}x{}",
+        summary.buffer_width, summary.buffer_height
+    );
+    println!(
+        "{prefix}_scale={}/{} fractional={}",
+        summary.preferred_scale_numerator,
+        summary.scale_denominator,
+        summary.fractional_viewport_active
+    );
+    println!(
+        "{prefix}_preferred_scale_changes={}",
+        summary.preferred_scale_changes
+    );
+    println!(
+        "{prefix}_scale_change_to_commit_us={}",
+        summary.last_scale_change_to_commit_us
+    );
+    println!(
+        "{prefix}_scale_change_to_frame_callback_us={}",
+        summary.last_scale_change_to_frame_callback_us
     );
     println!("{prefix}_html_parse_count={}", summary.html_parse_count);
     println!("{prefix}_configure_count={}", summary.configure_count);

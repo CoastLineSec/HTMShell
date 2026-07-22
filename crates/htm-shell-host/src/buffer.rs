@@ -12,6 +12,7 @@ use wayland_client::{
 
 const BUFFER_COUNT: usize = 2;
 const MAX_RETIRED_BUFFERS: usize = 4;
+const MAX_CLOSED_RETIRED_BUFFERS: usize = MAX_RETIRED_BUFFERS + BUFFER_COUNT;
 const MAX_TOTAL_MAPPED_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
@@ -73,6 +74,22 @@ impl ShmBufferPool {
             .byte_len
             .checked_mul(BUFFER_COUNT)
             .ok_or_else(|| ShellHostError::Buffer("total mapped bytes overflow".into()))
+    }
+
+    pub(crate) fn projected_total_mapped_bytes(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<usize, ShellHostError> {
+        let new_active = Self::new_pool_bytes(width, height)?;
+        self.retired
+            .iter()
+            .chain(self.slots.iter().filter(|slot| slot.busy))
+            .try_fold(new_active, |total, slot| {
+                total
+                    .checked_add(slot.mapping.len())
+                    .ok_or_else(|| ShellHostError::Buffer("projected mapped bytes overflow".into()))
+            })
     }
 
     pub(crate) fn all_released(&self) -> bool {
@@ -191,6 +208,19 @@ impl ShmBufferPool {
         }
         self.layout = None;
         self.stats.total_mapped_bytes = 0;
+    }
+
+    pub(crate) fn deactivate(&mut self) {
+        for slot in self.slots.drain(..) {
+            if slot.busy {
+                self.retired.push(slot);
+            } else {
+                slot.proxy.destroy();
+            }
+        }
+        debug_assert!(self.retired.len() <= MAX_CLOSED_RETIRED_BUFFERS);
+        self.layout = None;
+        self.refresh_mapped_bytes();
     }
 
     fn refresh_mapped_bytes(&mut self) {

@@ -23,8 +23,9 @@ pub use incremental::{
     SceneNodeSnapshot, SlotReuseEvidence, StylesheetReloadAttempt,
 };
 pub use live::{
-    LiveAction, LiveDocument, LiveDocumentKind, LiveFrame, LiveFrameRect, LiveInteractionState,
-    LiveRuntimeMeasurements, LiveRuntimeSnapshot,
+    LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind, LiveFrame, LiveFrameRect,
+    LiveInteractionState, LiveRenderRequest, LiveRuntimeMeasurements, LiveRuntimeSnapshot,
+    MAX_LIVE_SCALE_NUMERATOR,
 };
 pub use model::{
     Artifact, DiagnosticNode, DiagnosticReport, ExperimentOptions, ExperimentRun,

@@ -751,6 +751,7 @@ dependencies = [
  "blitz-paint",
  "blitz-traits",
  "cssparser",
+ "kurbo",
  "png 0.18.1",
  "selectors",
  "serde",
@@ -781,6 +782,7 @@ dependencies = [
  "serde",
  "serde_json",
  "wayland-client",
+ "wayland-protocols",
  "wayland-protocols-wlr",
 ]
 

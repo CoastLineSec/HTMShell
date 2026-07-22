@@ -1,4 +1,4 @@
-use crate::adapter::{elapsed_ms, render_rgba, resolve_resources, validate_document_limits};
+use crate::adapter::{elapsed_ms, render_rgba_scaled, resolve_resources, validate_document_limits};
 use crate::identity::IdentityRegistry;
 use crate::model::{DiagnosticMessage, LogicalRect, ViewportSpec};
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
@@ -19,9 +19,51 @@ use std::time::Instant;
 const MAX_HTML_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_LOGICAL_DIMENSION: u32 = 16_384;
 const MAX_PIXEL_BYTES: usize = 256 * 1024 * 1024;
+pub const LIVE_SCALE_DENOMINATOR: u32 = 120;
+pub const MAX_LIVE_SCALE_NUMERATOR: u32 = 480;
 static NEXT_LIVE_DOCUMENT_SERIAL: AtomicU64 = AtomicU64::new(1);
 
 pub type LiveFrameRect = LogicalRect;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveRenderRequest {
+    pub logical_width: u32,
+    pub logical_height: u32,
+    pub buffer_width: u32,
+    pub buffer_height: u32,
+    pub scale_numerator: u32,
+    pub scale_denominator: u32,
+}
+
+impl LiveRenderRequest {
+    pub fn new(
+        logical_width: u32,
+        logical_height: u32,
+        scale_numerator: u32,
+    ) -> Result<Self, RuntimeError> {
+        validate_dimensions(logical_width, logical_height)?;
+        if scale_numerator == 0 || scale_numerator > MAX_LIVE_SCALE_NUMERATOR {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "preferred scale numerator {scale_numerator} is outside 1..={MAX_LIVE_SCALE_NUMERATOR}"
+            )));
+        }
+        let buffer_width = checked_scaled_dimension(logical_width, scale_numerator)?;
+        let buffer_height = checked_scaled_dimension(logical_height, scale_numerator)?;
+        pixel_len(buffer_width, buffer_height)?;
+        Ok(Self {
+            logical_width,
+            logical_height,
+            buffer_width,
+            buffer_height,
+            scale_numerator,
+            scale_denominator: LIVE_SCALE_DENOMINATOR,
+        })
+    }
+
+    pub fn scale_factor(self) -> f64 {
+        f64::from(self.scale_numerator) / f64::from(self.scale_denominator)
+    }
+}
 
 /// A transient in-process frame for the portable live-presentation experiment.
 #[derive(Debug, Clone)]
@@ -355,12 +397,46 @@ impl LiveDocument {
     }
 
     pub fn render(&mut self) -> Result<LiveFrame, RuntimeError> {
-        let width = self.viewport.logical_width;
-        let height = self.viewport.logical_height;
-        validate_dimensions(width, height)?;
+        let request = LiveRenderRequest::new(
+            self.viewport.logical_width,
+            self.viewport.logical_height,
+            LIVE_SCALE_DENOMINATOR,
+        )?;
+        self.render_for(request)
+    }
+
+    pub fn render_for(&mut self, request: LiveRenderRequest) -> Result<LiveFrame, RuntimeError> {
+        if request.logical_width != self.viewport.logical_width
+            || request.logical_height != self.viewport.logical_height
+        {
+            return Err(RuntimeError::InvalidPackage(format!(
+                "render request logical size {}x{} does not match live viewport {}x{}",
+                request.logical_width,
+                request.logical_height,
+                self.viewport.logical_width,
+                self.viewport.logical_height
+            )));
+        }
+        let checked = LiveRenderRequest::new(
+            request.logical_width,
+            request.logical_height,
+            request.scale_numerator,
+        )?;
+        if checked != request {
+            return Err(RuntimeError::InvalidPackage(
+                "render request contains inconsistent physical dimensions".into(),
+            ));
+        }
         let render_started = Instant::now();
-        let premultiplied_rgba = render_rgba(&mut self.document, width, height);
-        let expected = pixel_len(width, height)?;
+        let premultiplied_rgba = render_rgba_scaled(
+            &mut self.document,
+            request.logical_width,
+            request.logical_height,
+            request.buffer_width,
+            request.buffer_height,
+            request.scale_factor(),
+        );
+        let expected = pixel_len(request.buffer_width, request.buffer_height)?;
         if premultiplied_rgba.len() != expected {
             return Err(RuntimeError::InvalidPackage(format!(
                 "renderer returned {} bytes; expected {expected}",
@@ -375,16 +451,16 @@ impl LiveDocument {
         validate_rect(&card)?;
         validate_rect(&action)?;
         Ok(LiveFrame {
-            logical_width: width,
-            logical_height: height,
-            buffer_width: width,
-            buffer_height: height,
+            logical_width: request.logical_width,
+            logical_height: request.logical_height,
+            buffer_width: request.buffer_width,
+            buffer_height: request.buffer_height,
             premultiplied_rgba,
             damage_estimate: LogicalRect {
                 x: 0.0,
                 y: 0.0,
-                width: width as f32,
-                height: height as f32,
+                width: request.logical_width as f32,
+                height: request.logical_height as f32,
             },
             input_regions: vec![card.clone()],
             interactive_region: action,
@@ -602,6 +678,18 @@ impl LiveDocument {
     }
 }
 
+fn checked_scaled_dimension(logical: u32, numerator: u32) -> Result<u32, RuntimeError> {
+    let product = u64::from(logical)
+        .checked_mul(u64::from(numerator))
+        .ok_or_else(|| RuntimeError::LimitExceeded("scaled dimension overflow".into()))?;
+    let scaled = product
+        .checked_add(u64::from(LIVE_SCALE_DENOMINATOR - 1))
+        .ok_or_else(|| RuntimeError::LimitExceeded("scaled ceiling overflow".into()))?
+        / u64::from(LIVE_SCALE_DENOMINATOR);
+    u32::try_from(scaled)
+        .map_err(|_| RuntimeError::LimitExceeded("scaled dimension exceeds u32".into()))
+}
+
 impl LiveDocumentKind {
     fn source_file(self) -> &'static str {
         match self {
@@ -797,6 +885,22 @@ mod tests {
         live.take_action().expect("action emitted")
     }
 
+    fn alpha_bounds(frame: &LiveFrame) -> Option<(u32, u32, u32, u32)> {
+        let mut bounds: Option<(u32, u32, u32, u32)> = None;
+        for (index, pixel) in frame.premultiplied_rgba.chunks_exact(4).enumerate() {
+            if pixel[3] == 0 {
+                continue;
+            }
+            let x = index as u32 % frame.buffer_width;
+            let y = index as u32 / frame.buffer_width;
+            bounds = Some(match bounds {
+                Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                None => (x, y, x, y),
+            });
+        }
+        bounds
+    }
+
     #[test]
     fn live_document_parses_once_across_resize_and_interaction() {
         let mut live = LiveDocument::load(fixture(), 800, 600).unwrap();
@@ -861,6 +965,79 @@ mod tests {
     fn invalid_dimensions_are_rejected() {
         assert!(LiveDocument::load(fixture(), 0, 600).is_err());
         assert!(LiveDocument::load(fixture(), u32::MAX, 600).is_err());
+    }
+
+    #[test]
+    fn checked_fractional_dimensions_use_coverage_preserving_ceiling() {
+        for (logical, numerator, expected) in [
+            ((100, 50), 120, (100, 50)),
+            ((100, 50), 150, (125, 63)),
+            ((100, 50), 180, (150, 75)),
+            ((101, 51), 150, (127, 64)),
+            ((1, 1), 210, (2, 2)),
+            ((101, 51), 240, (202, 102)),
+        ] {
+            let request = LiveRenderRequest::new(logical.0, logical.1, numerator).unwrap();
+            assert_eq!((request.buffer_width, request.buffer_height), expected);
+            assert_eq!(request.scale_denominator, 120);
+        }
+        assert!(LiveRenderRequest::new(8192, 8192, 120).is_ok());
+        assert!(LiveRenderRequest::new(8193, 8193, 120).is_err());
+        assert!(LiveRenderRequest::new(100, 50, 0).is_err());
+        assert!(LiveRenderRequest::new(100, 50, MAX_LIVE_SCALE_NUMERATOR + 1).is_err());
+    }
+
+    #[test]
+    fn fractional_render_changes_pixels_not_logical_layout_or_identity() {
+        let mut live = LiveDocument::load(fixture(), 801, 601).unwrap();
+        let before = live.snapshot().unwrap();
+        for numerator in [120, 150, 180, 210, 240] {
+            let request = LiveRenderRequest::new(801, 601, numerator).unwrap();
+            let frame = live.render_for(request).unwrap();
+            let after = live.snapshot().unwrap();
+            assert_eq!((frame.logical_width, frame.logical_height), (801, 601));
+            assert_eq!(
+                (frame.buffer_width, frame.buffer_height),
+                (request.buffer_width, request.buffer_height)
+            );
+            assert_eq!(before.viewport, after.viewport);
+            assert_eq!(before.card_bounds, after.card_bounds);
+            assert_eq!(before.action_bounds, after.action_bounds);
+            assert_eq!(before.document_identity, after.document_identity);
+            assert_eq!(before.card_identity, after.card_identity);
+            assert_eq!(after.document_parse_count, 1);
+            assert_eq!(
+                frame.premultiplied_rgba.len(),
+                request.buffer_width as usize * request.buffer_height as usize * 4
+            );
+
+            let (x0, y0, x1, y1) = alpha_bounds(&frame).expect("card paints nontransparent pixels");
+            let scale = numerator as f32 / LIVE_SCALE_DENOMINATOR as f32;
+            let expected_x0 = (before.card_bounds.x * scale).floor() as i32;
+            let expected_y0 = (before.card_bounds.y * scale).floor() as i32;
+            let expected_x1 =
+                ((before.card_bounds.x + before.card_bounds.width) * scale).ceil() as i32;
+            let expected_y1 =
+                ((before.card_bounds.y + before.card_bounds.height) * scale).ceil() as i32;
+            assert!((x0 as i32 - expected_x0).abs() <= 2);
+            assert!((y0 as i32 - expected_y0).abs() <= 2);
+            assert!((x1 as i32 + 1 - expected_x1).abs() <= 2);
+            assert!((y1 as i32 + 1 - expected_y1).abs() <= 2);
+        }
+
+        let boundary_x = before.action_bounds.x + before.action_bounds.width - 0.25;
+        let boundary_y = before.action_bounds.y + before.action_bounds.height - 0.25;
+        assert!(
+            live.pointer_move(f64::from(boundary_x), f64::from(boundary_y))
+                .unwrap()
+        );
+        assert!(live.snapshot().unwrap().interaction.hovered);
+        live.render_for(LiveRenderRequest::new(801, 601, 210).unwrap())
+            .unwrap();
+        let after_scaled_hit = live.snapshot().unwrap();
+        assert!(after_scaled_hit.interaction.hovered);
+        assert_eq!(after_scaled_hit.action_bounds, before.action_bounds);
+        assert_eq!(after_scaled_hit.document_parse_count, 1);
     }
 
     #[test]

@@ -87,6 +87,13 @@ The semantic presets derive layer, anchors, requested size, exclusive zone,
 and keyboard-interactivity settings. The manifest does not expose arbitrary
 Wayland layers, anchors, exclusive-zone values, or keyboard modes.
 
+All manifest dimensions are logical pixels. The manifest does not select or
+override output scale. When the compositor advertises both fractional-scale
+and viewporter, each surface uses its compositor-provided preferred scale for
+physical rendering while retaining logical layout and input geometry. If the
+complete protocol pair is unavailable, the host uses its scale-1 presentation
+path.
+
 ## Local path rules
 
 Document paths are resolved relative to the manifest directory. Absolute
@@ -113,8 +120,9 @@ they are not persistent selectors or saved-state keys. If an output is removed
 and later appears again, the host creates fresh output and surface generations
 without rebuilding unrelated outputs.
 
-The process stays connected and idle when no eligible outputs exist. Current
-eligibility requires integer output scale 1. Fractional-scale presentation,
-persistent monitor selection, manifest reload, additional panel edges,
-additional surface kinds, and cross-output state synchronization are not
-supported by this profile.
+The process stays connected and idle when no eligible outputs exist. Outputs
+may use different compositor-provided scales, and every live surface owns its
+own scale state and physical buffer pool. Persistent monitor selection,
+manifest reload, scale overrides, additional panel edges, additional surface
+kinds, and cross-output state synchronization are not supported by this
+profile.

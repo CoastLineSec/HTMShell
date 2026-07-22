@@ -9,6 +9,7 @@ mod lifecycle;
 mod manifest;
 mod output;
 mod pixel;
+mod scale;
 mod scheduler;
 mod wayland;
 
@@ -22,6 +23,7 @@ pub use manifest::{
 };
 pub use output::{OutputCatalog, OutputEligibility, OutputKey, OutputRecord};
 pub use pixel::{Argb8888Layout, convert_premultiplied_rgba_to_argb8888};
+pub use scale::{PresentationProfile, SurfaceScaleState};
 pub use scheduler::{FrameScheduler, ScheduleDecision};
 pub use wayland::{
     LiveHostOptions, LiveHostSummary, ManifestHostOptions, ManifestHostSummary,

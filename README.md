@@ -74,8 +74,10 @@ The project has demonstrated:
 * A validated local surface manifest expanded into independent instances for each eligible output
 * Generation-safe output addition and removal through standard Wayland registry events
 
-The portable live profile currently supports integer scale 1. HTMShell is not
-yet a usable desktop shell, and no stable release is available.
+The portable host renders at the compositor's preferred fractional scale when
+fractional-scale and viewporter are available, with scale 1 as the fallback.
+Presentation remains experimental CPU-rendered `wl_shm`; HTMShell is not yet a
+usable desktop shell, and no stable release is available.
 
 ## Non-goals
 

@@ -3,6 +3,7 @@ use crate::buffer::{BufferData, BufferPoolStats, ShmBufferPool};
 use crate::lifecycle::LayerLifecycle;
 use crate::manifest::{SurfaceKind as ManifestSurfaceKind, ValidatedManifest};
 use crate::output::{OutputCatalog, OutputEligibility, OutputKey};
+use crate::scale::{PresentationProfile, SurfaceScaleState};
 use crate::scheduler::{FrameScheduler, ScheduleDecision};
 use htm_runtime::{LiveAction, LiveDocument, LiveDocumentKind, LiveFrame};
 use std::path::PathBuf;
@@ -13,6 +14,10 @@ use wayland_client::{
         wl_buffer, wl_callback, wl_compositor, wl_output, wl_pointer, wl_region, wl_registry,
         wl_seat, wl_shm, wl_shm_pool, wl_surface,
     },
+};
+use wayland_protocols::wp::{
+    fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
+    viewporter::client::{wp_viewport, wp_viewporter},
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{self, ZwlrLayerShellV1},
@@ -33,6 +38,8 @@ const WL_OUTPUT_RELEASE_VERSION: u32 = 3;
 const WL_POINTER_RELEASE_VERSION: u32 = 3;
 const WL_SEAT_RELEASE_VERSION: u32 = 5;
 const WL_SHM_RELEASE_VERSION: u32 = 2;
+const FRACTIONAL_SCALE_VERSION: u32 = 1;
+const VIEWPORTER_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
 pub struct LiveHostOptions {
@@ -51,6 +58,9 @@ pub struct LiveHostSummary {
     pub output_scale: i32,
     pub viewporter_advertised: bool,
     pub fractional_scale_advertised: bool,
+    pub preferred_scale_numerator: u32,
+    pub scale_denominator: u32,
+    pub fractional_viewport_active: bool,
     pub html_parse_count: u32,
     pub frames_committed: u64,
     pub full_damage_commits: u64,
@@ -93,6 +103,7 @@ pub struct ManifestHostOptions {
     pub exit_after_initial_frames: bool,
     pub exit_after_output_events: Option<u64>,
     pub exit_after_actions: Option<u64>,
+    pub exit_after_scale_changes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -101,6 +112,12 @@ pub struct SurfaceHostSummary {
     pub logical_height: u32,
     pub buffer_width: u32,
     pub buffer_height: u32,
+    pub preferred_scale_numerator: u32,
+    pub scale_denominator: u32,
+    pub fractional_viewport_active: bool,
+    pub preferred_scale_changes: u64,
+    pub last_scale_change_to_commit_us: u64,
+    pub last_scale_change_to_frame_callback_us: u64,
     pub html_parse_count: u32,
     pub configure_count: u64,
     pub frames_committed: u64,
@@ -169,6 +186,8 @@ pub struct ManifestHostSummary {
     pub manifest_parse_us: u64,
     pub manifest_validation_us: u64,
     pub layer_shell_version: u32,
+    pub viewporter_advertised: bool,
+    pub fractional_scale_advertised: bool,
     pub output_generations: u64,
     pub output_additions: u64,
     pub output_removals: u64,
@@ -180,6 +199,7 @@ pub struct ManifestHostSummary {
     pub aggregate_shm_limit: usize,
     pub stale_callbacks_contained: u64,
     pub stale_releases_contained: u64,
+    pub stale_scale_events_contained: u64,
     pub first_output_instance_us: u64,
     pub last_output_teardown_us: u64,
     pub actions: u64,
@@ -232,6 +252,12 @@ struct OutputData {
 #[derive(Debug, Clone, Copy)]
 struct SurfaceData {
     owner: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScaleData {
+    owner: u64,
+    surface_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -393,7 +419,10 @@ struct ShellSurfaceState {
     reserve_space: bool,
     surface: Option<wl_surface::WlSurface>,
     layer_surface: Option<ZwlrLayerSurfaceV1>,
+    viewport: Option<wp_viewport::WpViewport>,
+    fractional_scale: Option<wp_fractional_scale_v1::WpFractionalScaleV1>,
     role_generation: u64,
+    scale_state: SurfaceScaleState,
     runtime: Option<LiveDocument>,
     pool: ShmBufferPool,
     scheduler: FrameScheduler,
@@ -406,6 +435,8 @@ struct ShellSurfaceState {
     maximum_mapped_bytes: usize,
     last_click_count: u64,
     presentation_failed: bool,
+    pending_scale_started: Option<Instant>,
+    scaled_commit_started: Option<Instant>,
 }
 
 impl ShellSurfaceState {
@@ -448,6 +479,8 @@ struct State {
     pointer: Option<wl_pointer::WlPointer>,
     pointer_focus: Option<u64>,
     layer_shell: Option<ZwlrLayerShellV1>,
+    viewporter: Option<wp_viewporter::WpViewporter>,
+    fractional_scale_manager: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
     layer_shell_version: u32,
     surfaces: Vec<ShellSurfaceState>,
     shared: SharedShellState,
@@ -462,6 +495,7 @@ struct State {
     peak_runtime_documents: usize,
     stale_callbacks_contained: u64,
     stale_releases_contained: u64,
+    stale_scale_events_contained: u64,
     first_output_instance_us: u64,
     last_output_teardown_us: u64,
     manifest_actions: u64,
@@ -507,6 +541,8 @@ impl State {
             pointer: None,
             pointer_focus: None,
             layer_shell: None,
+            viewporter: None,
+            fractional_scale_manager: None,
             layer_shell_version: 0,
             surfaces: Vec::new(),
             shared: SharedShellState {
@@ -524,6 +560,7 @@ impl State {
             peak_runtime_documents: 0,
             stale_callbacks_contained: 0,
             stale_releases_contained: 0,
+            stale_scale_events_contained: 0,
             first_output_instance_us: 0,
             last_output_teardown_us: 0,
             manifest_actions: 0,
@@ -563,6 +600,10 @@ impl State {
         .validate(require_output)
     }
 
+    fn fractional_available(&self) -> bool {
+        self.viewporter.is_some() && self.fractional_scale_manager.is_some()
+    }
+
     fn start(&mut self, qh: &QueueHandle<Self>) -> Result<(), ShellHostError> {
         self.output_catalog.finalize_initial();
         self.initial_discovery_complete = true;
@@ -597,10 +638,10 @@ impl State {
     fn select_legacy_output(&mut self) -> Result<(), ShellHostError> {
         let key = self
             .output_catalog
-            .eligible()
+            .eligible(self.fractional_available())
             .first()
             .map(|record| record.key)
-            .ok_or(ShellHostError::MissingGlobal("eligible scale-1 wl_output"))?;
+            .ok_or(ShellHostError::MissingGlobal("eligible wl_output"))?;
         self.selected_output = Some(key);
         Ok(())
     }
@@ -674,7 +715,10 @@ impl State {
             reserve_space,
             surface: None,
             layer_surface: None,
+            viewport: None,
+            fractional_scale: None,
             role_generation: 0,
+            scale_state: SurfaceScaleState::new(0, false),
             runtime: None,
             pool: ShmBufferPool::new(owner),
             scheduler: FrameScheduler::default(),
@@ -687,6 +731,8 @@ impl State {
             maximum_mapped_bytes: 0,
             last_click_count: 0,
             presentation_failed: false,
+            pending_scale_started: None,
+            scaled_commit_started: None,
         });
         if desired_mapped && let Err(error) = self.ensure_surface_role(owner) {
             self.surfaces.retain(|surface| surface.owner != owner);
@@ -701,6 +747,13 @@ impl State {
             .ok_or_else(|| ShellHostError::Wayland("surface instance is stale".into()))?;
         if self.surfaces[index].surface.is_some() {
             return Ok(false);
+        }
+        if self.surfaces[index].viewport.is_some()
+            || self.surfaces[index].fractional_scale.is_some()
+        {
+            return Err(ShellHostError::Wayland(
+                "surface extensions exist without their wl_surface".into(),
+            ));
         }
         let qh = self
             .queue_handle
@@ -718,6 +771,10 @@ impl State {
             .layer_shell
             .as_ref()
             .ok_or(ShellHostError::MissingGlobal("zwlr_layer_shell_v1"))?;
+        let viewporter = self.viewporter.clone();
+        let fractional_manager = self.fractional_scale_manager.clone();
+        let fractional_available = viewporter.is_some() && fractional_manager.is_some();
+        let surface_generation = self.surfaces[index].role_generation.saturating_add(1);
         let kind = self.surfaces[index].kind;
         let panel_height = self.surfaces[index].panel_height;
         let reserve_space = self.surfaces[index].reserve_space;
@@ -747,6 +804,21 @@ impl State {
             ),
         };
         let surface = compositor.create_surface(&qh, SurfaceData { owner });
+        surface.set_buffer_scale(1);
+        let (viewport, fractional_scale) = match (viewporter, fractional_manager) {
+            (Some(viewporter), Some(fractional_manager)) => (
+                Some(viewporter.get_viewport(&surface, &qh, ())),
+                Some(fractional_manager.get_fractional_scale(
+                    &surface,
+                    &qh,
+                    ScaleData {
+                        owner,
+                        surface_generation,
+                    },
+                )),
+            ),
+            _ => (None, None),
+        };
         let layer_surface = layer_shell.get_layer_surface(
             &surface,
             Some(&output),
@@ -773,9 +845,27 @@ impl State {
             .map_err(|error| ShellHostError::Wayland(error.into()))?;
         state.surface = Some(surface);
         state.layer_surface = Some(layer_surface);
-        state.role_generation = state.role_generation.saturating_add(1);
+        state.viewport = viewport;
+        state.fractional_scale = fractional_scale;
+        state.role_generation = surface_generation;
+        state.scale_state = SurfaceScaleState::new(surface_generation, fractional_available);
         state.map_state = SurfaceMapState::AwaitingConfigure;
         Ok(true)
+    }
+
+    fn destroy_surface_protocol_objects(state: &mut ShellSurfaceState) {
+        if let Some(layer_surface) = state.layer_surface.take() {
+            layer_surface.destroy();
+        }
+        if let Some(fractional_scale) = state.fractional_scale.take() {
+            fractional_scale.destroy();
+        }
+        if let Some(viewport) = state.viewport.take() {
+            viewport.destroy();
+        }
+        if let Some(wayland_surface) = state.surface.take() {
+            wayland_surface.destroy();
+        }
     }
 
     fn destroy_transient_surface_role(&mut self, owner: u64) {
@@ -783,17 +873,15 @@ impl State {
             return;
         };
         let state = &mut self.surfaces[index];
-        if let Some(layer_surface) = state.layer_surface.take() {
-            layer_surface.destroy();
-        }
-        if let Some(wayland_surface) = state.surface.take() {
-            wayland_surface.destroy();
-        }
+        Self::destroy_surface_protocol_objects(state);
         state.lifecycle = LayerLifecycle::default();
         state.configures = ConfigureCoalescer::default();
         state.scheduler = FrameScheduler::default();
         state.map_state = SurfaceMapState::AwaitingConfigure;
         state.role_generation = state.role_generation.saturating_add(1);
+        state.scale_state = SurfaceScaleState::new(state.role_generation, false);
+        state.pending_scale_started = None;
+        state.scaled_commit_started = None;
         state.mapped = false;
     }
 
@@ -820,7 +908,7 @@ impl State {
             self.reconcile_output(key, qh);
         }
         if self.output_instances.is_empty() {
-            eprintln!("htmshell-live: no eligible scale-1 output is currently present");
+            eprintln!("htmshell-live: no eligible output is currently present");
         }
     }
 
@@ -831,14 +919,17 @@ impl State {
         let eligibility = self
             .output_catalog
             .get(key)
-            .map(|record| record.eligibility())
+            .map(|record| record.eligibility(self.fractional_available()))
             .unwrap_or(OutputEligibility::Removed);
         let instantiated = self
             .output_instances
             .iter()
             .any(|instance| instance.key == key);
         match (eligibility, instantiated) {
-            (OutputEligibility::EligibleScale1, false) => {
+            (
+                OutputEligibility::EligibleScale1 | OutputEligibility::EligibleFractional(_),
+                false,
+            ) => {
                 if let Err(error) = self.create_manifest_output(key, qh) {
                     eprintln!(
                         "htmshell-live: output {} could not be instantiated: {error}",
@@ -849,7 +940,7 @@ impl State {
             (OutputEligibility::UnsupportedScale(scale), true) => {
                 self.unsupported_scale_outputs = self.unsupported_scale_outputs.saturating_add(1);
                 eprintln!(
-                    "htmshell-live: output {} advertises scale {scale}; scale 1 supported; fractional-scale presentation deferred",
+                    "htmshell-live: output {} advertises scale {scale}; fractional protocols are incomplete, so this output is unavailable",
                     key.global_name
                 );
                 self.destroy_output_instance(key);
@@ -857,7 +948,7 @@ impl State {
             (OutputEligibility::UnsupportedScale(scale), false) => {
                 self.unsupported_scale_outputs = self.unsupported_scale_outputs.saturating_add(1);
                 eprintln!(
-                    "htmshell-live: output {} advertises scale {scale}; scale 1 supported; fractional-scale presentation deferred",
+                    "htmshell-live: output {} advertises scale {scale}; fractional protocols are incomplete, so this output is unavailable",
                     key.global_name
                 );
             }
@@ -879,7 +970,10 @@ impl State {
             .output_catalog
             .get(key)
             .ok_or_else(|| ShellHostError::Wayland("output generation is stale".into()))?;
-        if output.eligibility() != OutputEligibility::EligibleScale1 {
+        if !matches!(
+            output.eligibility(self.fractional_available()),
+            OutputEligibility::EligibleScale1 | OutputEligibility::EligibleFractional(_)
+        ) {
             return Ok(());
         }
         let diagnostic_label = output.diagnostic_label();
@@ -1051,12 +1145,7 @@ impl State {
         surface.scheduler.stop_scheduling();
         surface.map_state.close();
         surface.pool.destroy_all();
-        if let Some(layer_surface) = surface.layer_surface.take() {
-            layer_surface.destroy();
-        }
-        if let Some(wayland_surface) = surface.surface.take() {
-            wayland_surface.destroy();
-        }
+        Self::destroy_surface_protocol_objects(&mut surface);
     }
 
     fn maybe_render_all(&mut self, qh: &QueueHandle<Self>) -> Result<(), ShellHostError> {
@@ -1096,6 +1185,13 @@ impl State {
             .ok_or(ShellHostError::MissingGlobal("wl_compositor"))?
             .clone();
         let started = self.started;
+        let current_total_mapped = self
+            .surfaces
+            .iter()
+            .try_fold(0usize, |total, surface| {
+                total.checked_add(surface.pool.stats().total_mapped_bytes)
+            })
+            .ok_or_else(|| ShellHostError::Buffer("combined mapped bytes overflow".into()))?;
         let surface_state = &mut self.surfaces[index];
         if surface_state.presentation_failed || !surface_state.desired_mapped {
             return Ok(());
@@ -1163,20 +1259,26 @@ impl State {
                 surface_state.scheduler.mark_dirty();
             }
         }
+        surface_state
+            .scale_state
+            .set_logical_size(logical_width, logical_height);
+        let render_request = surface_state
+            .scale_state
+            .render_request()?
+            .ok_or_else(|| ShellHostError::Wayland("presentation size is unavailable".into()))?;
+        let buffer_width = render_request.buffer_width;
+        let buffer_height = render_request.buffer_height;
         if surface_state
             .pool
-            .requires_resize(logical_width, logical_height)?
+            .requires_resize(buffer_width, buffer_height)?
         {
-            let current_total = self
-                .surfaces
-                .iter()
-                .try_fold(0usize, |total, surface| {
-                    total.checked_add(surface.pool.stats().total_mapped_bytes)
-                })
-                .ok_or_else(|| ShellHostError::Buffer("combined mapped bytes overflow".into()))?;
-            let proposed = ShmBufferPool::new_pool_bytes(logical_width, logical_height)?;
-            if current_total
-                .checked_add(proposed)
+            let current_surface = surface_state.pool.stats().total_mapped_bytes;
+            let proposed = surface_state
+                .pool
+                .projected_total_mapped_bytes(buffer_width, buffer_height)?;
+            if current_total_mapped
+                .checked_sub(current_surface)
+                .and_then(|total| total.checked_add(proposed))
                 .is_none_or(|total| total > MAX_SESSION_MAPPED_BYTES)
             {
                 return Err(ShellHostError::Buffer(format!(
@@ -1187,7 +1289,7 @@ impl State {
         let surface_state = &mut self.surfaces[index];
         let size_ready = surface_state
             .pool
-            .ensure_size(&shm, qh, logical_width, logical_height)?;
+            .ensure_size(&shm, qh, buffer_width, buffer_height)?;
         let free_buffer = size_ready && surface_state.pool.has_free();
         match surface_state.scheduler.decision(true, free_buffer) {
             ScheduleDecision::Idle
@@ -1199,7 +1301,7 @@ impl State {
             .runtime
             .as_mut()
             .expect("initialized above")
-            .render()?;
+            .render_for(render_request)?;
         let Some((_id, buffer, conversion_us)) = surface_state
             .pool
             .acquire_and_write(&frame.premultiplied_rgba)?
@@ -1208,7 +1310,14 @@ impl State {
             return Ok(());
         };
         update_input_region(&compositor, &wayland_surface, &frame, qh);
+        if surface_state.scale_state.profile() == PresentationProfile::FractionalViewport {
+            let viewport = surface_state.viewport.as_ref().ok_or_else(|| {
+                ShellHostError::Wayland("fractional profile has no viewport object".into())
+            })?;
+            viewport.set_destination(logical_width as i32, logical_height as i32);
+        }
         wayland_surface.attach(Some(&buffer), 0, 0);
+        // wl_surface.damage is expressed in surface-local logical coordinates.
         wayland_surface.damage(
             0,
             0,
@@ -1227,14 +1336,24 @@ impl State {
         surface_state.mapped = true;
         surface_state.map_state.mapped();
         surface_state.configures.mark_presented();
+        surface_state.scale_state.mark_applied();
         surface_state.summary.frames_committed =
             surface_state.summary.frames_committed.saturating_add(1);
         surface_state.summary.logical_width = logical_width;
         surface_state.summary.logical_height = logical_height;
         surface_state.summary.buffer_width = frame.buffer_width;
         surface_state.summary.buffer_height = frame.buffer_height;
+        surface_state.summary.preferred_scale_numerator =
+            surface_state.scale_state.preferred_numerator();
+        surface_state.summary.scale_denominator = htm_runtime::LIVE_SCALE_DENOMINATOR;
+        surface_state.summary.fractional_viewport_active =
+            surface_state.scale_state.profile() == PresentationProfile::FractionalViewport;
         surface_state.summary.last_render_us = milliseconds_to_microseconds(frame.render_ms);
         surface_state.summary.last_pixel_conversion_us = conversion_us;
+        if let Some(scale_started) = surface_state.pending_scale_started.take() {
+            surface_state.summary.last_scale_change_to_commit_us = elapsed_us(scale_started);
+            surface_state.scaled_commit_started = Some(scale_started);
+        }
         if surface_state.summary.first_commit_us == 0 {
             surface_state.summary.first_commit_us = elapsed_us(started);
         }
@@ -1436,6 +1555,24 @@ impl State {
         }
     }
 
+    fn maybe_stop_after_manifest_scale_changes(&mut self) {
+        let target = match &self.options {
+            SessionOptions::Manifest(options) => options.exit_after_scale_changes,
+            _ => None,
+        };
+        let changes = self.surfaces.iter().fold(0_u64, |total, surface| {
+            total.saturating_add(surface.summary.preferred_scale_changes)
+        });
+        if target.is_some_and(|target| {
+            changes >= target
+                && self.surfaces.iter().all(|surface| {
+                    !surface.scheduler.dirty() && !surface.scheduler.frame_callback_outstanding()
+                })
+        }) {
+            self.running = false;
+        }
+    }
+
     fn open_manifest_overlay(
         &mut self,
         group_index: usize,
@@ -1517,6 +1654,8 @@ impl State {
             } else {
                 surface.map_state.configured(false);
             }
+            surface.pool.deactivate();
+            surface.refresh_pool_summary();
         }
         self.destroy_transient_surface_role(overlay_owner);
         self.update_manifest_panel(panel_owner, false, &last_action)
@@ -1611,6 +1750,8 @@ impl State {
             } else {
                 surface.map_state.configured(false);
             }
+            surface.pool.deactivate();
+            surface.refresh_pool_summary();
         }
         self.update_panel_document()?;
         Ok(())
@@ -1660,6 +1801,11 @@ impl State {
             .summary
             .frame_callbacks
             .saturating_add(1);
+        if let Some(scale_started) = self.surfaces[index].scaled_commit_started.take() {
+            self.surfaces[index]
+                .summary
+                .last_scale_change_to_frame_callback_us = elapsed_us(scale_started);
+        }
         if matches!(self.options, SessionOptions::Manifest(_))
             && kind == SurfaceKind::Panel
             && let Some(group) = self.output_instance_index_by_owner(owner)
@@ -1744,6 +1890,7 @@ impl State {
         }
         self.maybe_stop_after_output_events();
         self.maybe_stop_after_manifest_actions();
+        self.maybe_stop_after_manifest_scale_changes();
     }
 
     fn on_buffer_release(&mut self, owner: u64, id: u64) {
@@ -1819,12 +1966,7 @@ impl State {
     fn destroy_objects(&mut self) {
         for surface in &mut self.surfaces {
             surface.pool.destroy_all();
-            if let Some(layer_surface) = surface.layer_surface.take() {
-                layer_surface.destroy();
-            }
-            if let Some(wayland_surface) = surface.surface.take() {
-                wayland_surface.destroy();
-            }
+            Self::destroy_surface_protocol_objects(surface);
         }
         if let Some(pointer) = self.pointer.take() {
             release_pointer(pointer);
@@ -1842,6 +1984,12 @@ impl State {
             && layer_shell.version() >= 3
         {
             layer_shell.destroy();
+        }
+        if let Some(fractional_manager) = self.fractional_scale_manager.take() {
+            fractional_manager.destroy();
+        }
+        if let Some(viewporter) = self.viewporter.take() {
+            viewporter.destroy();
         }
     }
 
@@ -1869,6 +2017,12 @@ impl State {
             output_scale: self.legacy_output_scale(),
             viewporter_advertised: self.viewporter_advertised,
             fractional_scale_advertised: self.fractional_scale_advertised,
+            preferred_scale_numerator: summary
+                .map(|summary| summary.preferred_scale_numerator)
+                .unwrap_or(htm_runtime::LIVE_SCALE_DENOMINATOR),
+            scale_denominator: htm_runtime::LIVE_SCALE_DENOMINATOR,
+            fractional_viewport_active: summary
+                .is_some_and(|summary| summary.fractional_viewport_active),
             html_parse_count: summary
                 .map(|summary| summary.html_parse_count)
                 .unwrap_or_default(),
@@ -2018,6 +2172,8 @@ impl State {
             manifest_parse_us: measurements.parse_us,
             manifest_validation_us: measurements.validation_us,
             layer_shell_version: self.layer_shell_version,
+            viewporter_advertised: self.viewporter_advertised,
+            fractional_scale_advertised: self.fractional_scale_advertised,
             output_generations: self.output_catalog.generation_count(),
             output_additions: self.output_additions,
             output_removals: self.output_removals,
@@ -2029,6 +2185,7 @@ impl State {
             aggregate_shm_limit: MAX_SESSION_MAPPED_BYTES,
             stale_callbacks_contained: self.stale_callbacks_contained,
             stale_releases_contained: self.stale_releases_contained,
+            stale_scale_events_contained: self.stale_scale_events_contained,
             first_output_instance_us: self.first_output_instance_us,
             last_output_teardown_us: self.last_output_teardown_us,
             actions: self.manifest_actions,
@@ -2243,8 +2400,16 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     state.layer_shell_version = selected;
                     state.layer_shell = Some(registry.bind(name, selected, qh, ()));
                 }
-                "wp_viewporter" => state.viewporter_advertised = true,
-                "wp_fractional_scale_manager_v1" => state.fractional_scale_advertised = true,
+                "wp_viewporter" if state.viewporter.is_none() => {
+                    state.viewporter_advertised = true;
+                    state.viewporter =
+                        Some(registry.bind(name, version.min(VIEWPORTER_VERSION), qh, ()));
+                }
+                "wp_fractional_scale_manager_v1" if state.fractional_scale_manager.is_none() => {
+                    state.fractional_scale_advertised = true;
+                    state.fractional_scale_manager =
+                        Some(registry.bind(name, version.min(FRACTIONAL_SCALE_VERSION), qh, ()));
+                }
                 _ => {}
             },
             wl_registry::Event::GlobalRemove { name }
@@ -2268,7 +2433,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 } else if matches!(state.options, SessionOptions::Manifest(_))
                     && state.output_instances.is_empty()
                 {
-                    eprintln!("htmshell-live: no eligible scale-1 output is currently present");
+                    eprintln!("htmshell-live: no eligible output is currently present");
                 }
             }
             wl_registry::Event::GlobalRemove { name } if state.seat_global_name == Some(name) => {
@@ -2504,6 +2669,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, LayerData> for State {
                     return;
                 }
                 surface.configures.receive(width, height);
+                surface.scale_state.set_logical_size(width, height);
                 surface.map_state.configured(surface.desired_mapped);
                 surface.summary.configure_count = surface.summary.configure_count.saturating_add(1);
                 if surface.desired_mapped {
@@ -2528,6 +2694,66 @@ impl Dispatch<ZwlrLayerSurfaceV1, LayerData> for State {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, ScaleData> for State {
+    fn event(
+        state: &mut Self,
+        fractional_scale: &wp_fractional_scale_v1::WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        data: &ScaleData,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let wp_fractional_scale_v1::Event::PreferredScale { scale } = event else {
+            return;
+        };
+        let Some(index) = state.surface_index_by_owner(data.owner) else {
+            state.stale_scale_events_contained =
+                state.stale_scale_events_contained.saturating_add(1);
+            return;
+        };
+        let current = &state.surfaces[index];
+        if current.role_generation != data.surface_generation
+            || current
+                .fractional_scale
+                .as_ref()
+                .is_none_or(|current| current.id() != fractional_scale.id())
+        {
+            state.stale_scale_events_contained =
+                state.stale_scale_events_contained.saturating_add(1);
+            return;
+        }
+
+        let result = state.surfaces[index]
+            .scale_state
+            .receive_preferred(data.surface_generation, scale);
+        match result {
+            Ok(true) => {
+                let surface = &mut state.surfaces[index];
+                surface.summary.preferred_scale_changes =
+                    surface.summary.preferred_scale_changes.saturating_add(1);
+                surface.pending_scale_started = Some(Instant::now());
+                if surface.desired_mapped {
+                    surface.scheduler.mark_dirty();
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                if matches!(state.options, SessionOptions::Manifest(_)) {
+                    let surface = &mut state.surfaces[index];
+                    surface.presentation_failed = true;
+                    surface.scheduler.stop_scheduling();
+                    eprintln!(
+                        "htmshell-live: surface instance {} rejected preferred scale: {error}",
+                        data.owner
+                    );
+                } else {
+                    state.fail(format!("preferred scale rejected: {error}"));
+                }
+            }
         }
     }
 }
@@ -2585,6 +2811,9 @@ delegate_noop!(State: ignore wl_compositor::WlCompositor);
 delegate_noop!(State: ignore wl_region::WlRegion);
 delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(State: ignore ZwlrLayerShellV1);
+delegate_noop!(State: ignore wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
+delegate_noop!(State: ignore wp_viewporter::WpViewporter);
+delegate_noop!(State: ignore wp_viewport::WpViewport);
 
 #[cfg(test)]
 mod tests {
@@ -2635,6 +2864,39 @@ mod tests {
         assert_eq!(coalescer.presented, 1);
         assert_eq!(coalescer.latest(), Some((1099, 700)));
         assert_eq!(allocations, [(1099, 700)]);
+    }
+
+    #[test]
+    fn configure_and_scale_bursts_share_one_latest_presentation() {
+        for configure_first in [true, false] {
+            let mut scale = SurfaceScaleState::new(9, true);
+            let mut scheduler = FrameScheduler::default();
+            scheduler.mark_dirty();
+            scheduler.frame_committed();
+
+            if configure_first {
+                scale.set_logical_size(100, 50);
+                scale.receive_preferred(9, 150).unwrap();
+            } else {
+                scale.receive_preferred(9, 150).unwrap();
+                scale.set_logical_size(100, 50);
+            }
+            scale.set_logical_size(101, 51);
+            scale.receive_preferred(9, 180).unwrap();
+            scheduler.mark_dirty();
+            assert_eq!(
+                scheduler.decision(true, true),
+                ScheduleDecision::WaitForFrameCallback
+            );
+
+            scheduler.frame_callback_done();
+            let request = scale.render_request().unwrap().unwrap();
+            assert_eq!((request.logical_width, request.logical_height), (101, 51));
+            assert_eq!((request.buffer_width, request.buffer_height), (152, 77));
+            assert_eq!(scheduler.decision(true, true), ScheduleDecision::Render);
+            scale.mark_applied();
+            assert_eq!(scale.pending_revision(), scale.applied_revision());
+        }
     }
 
     #[test]

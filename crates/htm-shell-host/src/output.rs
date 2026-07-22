@@ -13,6 +13,7 @@ pub struct OutputKey {
 pub enum OutputEligibility {
     AwaitingInitialState,
     EligibleScale1,
+    EligibleFractional(i32),
     UnsupportedScale(i32),
     Removed,
 }
@@ -30,13 +31,15 @@ pub struct OutputRecord {
 }
 
 impl OutputRecord {
-    pub fn eligibility(&self) -> OutputEligibility {
+    pub fn eligibility(&self, fractional_available: bool) -> OutputEligibility {
         if !self.present {
             OutputEligibility::Removed
         } else if !self.ready {
             OutputEligibility::AwaitingInitialState
         } else if self.scale == 1 {
             OutputEligibility::EligibleScale1
+        } else if fractional_available {
+            OutputEligibility::EligibleFractional(self.scale)
         } else {
             OutputEligibility::UnsupportedScale(self.scale)
         }
@@ -158,11 +161,16 @@ impl OutputCatalog {
         Some(record)
     }
 
-    pub fn eligible(&self) -> Vec<&OutputRecord> {
+    pub fn eligible(&self, fractional_available: bool) -> Vec<&OutputRecord> {
         let mut records: Vec<_> = self
             .records
             .values()
-            .filter(|record| record.eligibility() == OutputEligibility::EligibleScale1)
+            .filter(|record| {
+                matches!(
+                    record.eligibility(fractional_available),
+                    OutputEligibility::EligibleScale1 | OutputEligibility::EligibleFractional(_)
+                )
+            })
             .collect();
         records.sort_by(|left, right| {
             left.name
@@ -198,7 +206,7 @@ mod tests {
         catalog.set_name(second, "zeta".into());
         catalog.finalize_initial();
         let keys: Vec<_> = catalog
-            .eligible()
+            .eligible(false)
             .iter()
             .map(|record| record.key.global_name)
             .collect();
@@ -230,7 +238,7 @@ mod tests {
         catalog.set_name(first, "DP-1".into());
         catalog.mark_ready(first);
         let removed = catalog.remove(7).unwrap();
-        assert_eq!(removed.eligibility(), OutputEligibility::Removed);
+        assert_eq!(removed.eligibility(false), OutputEligibility::Removed);
         assert!(catalog.get(first).is_none());
         let second = catalog.add(7, 4).unwrap();
         catalog.set_name(second, "DP-1".into());
@@ -248,14 +256,19 @@ mod tests {
         catalog.set_scale(unsupported, 2);
         catalog.finalize_initial();
         assert_eq!(
-            catalog.get(supported).unwrap().eligibility(),
+            catalog.get(supported).unwrap().eligibility(false),
             OutputEligibility::EligibleScale1
         );
         assert_eq!(
-            catalog.get(unsupported).unwrap().eligibility(),
+            catalog.get(unsupported).unwrap().eligibility(false),
             OutputEligibility::UnsupportedScale(2)
         );
-        assert_eq!(catalog.eligible().len(), 1);
+        assert_eq!(catalog.eligible(false).len(), 1);
+        assert_eq!(
+            catalog.get(unsupported).unwrap().eligibility(true),
+            OutputEligibility::EligibleFractional(2)
+        );
+        assert_eq!(catalog.eligible(true).len(), 2);
     }
 
     #[test]
@@ -273,13 +286,13 @@ mod tests {
     #[test]
     fn no_output_state_is_idle_data_not_an_error() {
         let mut catalog = OutputCatalog::default();
-        assert!(catalog.eligible().is_empty());
+        assert!(catalog.eligible(false).is_empty());
         let key = catalog.add(3, 1).unwrap();
         assert_eq!(
-            catalog.get(key).unwrap().eligibility(),
+            catalog.get(key).unwrap().eligibility(false),
             OutputEligibility::AwaitingInitialState
         );
         catalog.mark_ready(key);
-        assert_eq!(catalog.eligible().len(), 1);
+        assert_eq!(catalog.eligible(false).len(), 1);
     }
 }

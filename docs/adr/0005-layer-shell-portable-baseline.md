@@ -2,8 +2,9 @@
 
 ## Status
 
-Accepted for the experimental scale-1 live-presentation profile. Reversible
-while the shell host and runtime APIs remain experimental.
+Accepted for the experimental scale-1 and fractional-scale live-presentation
+profiles. Reversible while the shell host and runtime APIs remain
+experimental.
 
 ## Context
 
@@ -53,7 +54,7 @@ create a fresh role when reopened; document identity remains unchanged.
 
 Portable surfaces are defined by a validated local JSON manifest. Version 1
 contains one top-panel template and one transient-overlay template. Each
-template expands independently for every eligible scale-1 output.
+template expands independently for every eligible output.
 
 Output identity is runtime-scoped. A registry global and local generation own
 each output instance; output names and descriptions are diagnostics, not
@@ -77,9 +78,19 @@ portable presentation and its current wire behavior is unchanged.
 
 ## Presentation constraints
 
-Scale 1 is the supported live-presentation profile in this spike. Integer and
-fractional-scale globals are observed conceptually, but fractional-scale
-rendering and viewporter integration are deferred.
+Logical layout dimensions and physical presentation dimensions are distinct.
+Each live `wl_surface` generation owns its preferred scale and, when the
+compositor advertises both fractional-scale and viewporter, its own
+fractional-scale and viewport objects. The renderer paints logical scene
+geometry into a checked, ceiling-rounded physical buffer at the preferred
+numerator over 120. The viewport destination remains the configured logical
+surface size and `wl_surface` buffer scale remains 1. Scale changes affect only
+the owning surface and safely retire old physical buffer pools.
+
+Scale 1 remains the fallback when the complete optional protocol pair is not
+available or no usable preference has been received. Manifest dimensions stay
+logical and do not override compositor scale. Partial damage remains deferred;
+the live path uses full logical-surface damage.
 
 The initial transport is CPU-rendered `wl_shm`. It is not zero-copy. DMA-BUF,
 GPU rendering, explicit synchronization, presentation feedback, color
@@ -107,10 +118,12 @@ Costs and limitations:
 - a full-output overlay requires a carefully bounded input region;
 - each eligible output receives its own panel and transient-overlay instances;
 - every layer surface has an independent buffer pool and frame scheduler;
+- every layer surface has independent scale and viewport state;
 - aggregate shared-memory use is bounded across the process as well as within
   each pool;
+- fractional scale increases CPU paint and shared-memory requirements;
 - installed font and CPU-renderer behavior still affect pixels;
-- scale 1 is the only completed presentation profile.
+- scale 1 remains available when optional fractional protocols are absent.
 
 ## Acceptance criteria
 
@@ -132,6 +145,14 @@ Costs and limitations:
   aliasing recreated instances.
 - Output addition and removal do not reconstruct unrelated documents.
 - Output names remain diagnostic and no persistent monitor selector is implied.
+- Preferred scale is per surface; logical layout, pointer coordinates, and
+  input regions do not become physical-pixel geometry.
+- Fractional presentation paints at physical density, uses a logical viewport
+  destination, and keeps buffer scale 1.
+- Scale and configure changes coalesce into one latest presentation revision,
+  with bounded retirement of older shared-memory pools.
+- Mixed-scale outputs remain independent and the scale-1 fallback remains
+  functional when optional protocol globals are unavailable.
 - The experimental compositor contract and prior tests remain intact.
 - Public documentation describes the contract as optional enhanced integration.
 
@@ -145,10 +166,11 @@ separate runtime behavior for individual compositors.
 ## Final decision
 
 ```text
-CONTINUE WITH NARROWER MANIFEST PROFILE
+CONTINUE WITH FRACTIONAL-SCALE PORTABLE PROFILE
 ```
 
-Scale-1 layer-shell presentation now includes manifest-driven, independently
-owned panel and overlay instances across live outputs. Fractional-scale
-presentation and persistent output-selection policy remain deferred and must
-be validated before the profile is broadened.
+Manifest-driven panel and overlay instances now retain logical CSS geometry
+while rendering independent physical buffers at compositor-preferred scales.
+Scale 1 remains the portable fallback. GPU presentation, partial damage,
+persistent output-selection policy, and higher-level shell components remain
+deferred.
