@@ -7,6 +7,11 @@ the HTMShell project. It is not stable, standardized, or part of
 `wayland-protocols`. The XML is the wire definition; this document defines the
 lifecycle and policy semantics that are difficult to express in XML alone.
 
+The protocol is an optional enhanced-integration path. HTMShell uses layer
+shell and existing Wayland protocols for portable baseline presentation, so a
+compositor does not need to implement `htm-shell-v1` for basic shell operation.
+The current wire behavior is unchanged by that architectural distinction.
+
 The current interface names remain `htm_shell_manager_v1` and
 `htm_shell_root_v1`. The project-specific `htm_` prefix avoids namespace
 collision, while the documentation and XML clearly mark the protocol as

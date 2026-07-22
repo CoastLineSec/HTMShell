@@ -1,11 +1,15 @@
-# HTMShell compositor integration
+# Optional enhanced HTMShell compositor integration
 
 ## Experimental status
 
-This document defines the compositor responsibilities for the experimental
-`htm-shell-v1` contract. The contract is not stable, standardized, or part of
-`wayland-protocols`. Breaking revisions remain possible while implementations
-are evaluated.
+HTMShell uses layer shell and existing Wayland protocols as its portable
+baseline. A compositor does not need to implement `htm-shell-v1` for basic
+HTMShell presentation.
+
+This document defines the compositor responsibilities for the optional,
+experimental `htm-shell-v1` enhanced-integration contract. The contract is not
+stable, standardized, or part of `wayland-protocols`. Breaking revisions remain
+possible while capabilities beyond the portable baseline are evaluated.
 
 HTMShell defines client-visible semantics. A supporting compositor implements
 those semantics through its own protocol, scene, input, damage, and policy
@@ -15,30 +19,37 @@ compositor-specific path.
 ```text
 HTMShell runtime
         │
-        │ core Wayland + existing extensions + htm-shell-v1
-        ▼
-Compositor-owned role, scene, input, damage, and policy integration
+        ├─ portable baseline: core Wayland + layer shell + existing extensions
+        │
+        └─ optional enhanced integration: htm-shell-v1
+                                      │
+                                      ▼
+             Compositor-owned role, scene, input, damage, and policy integration
 ```
 
 Shell content remains a normal `wl_surface`. The contract adds no renderer,
 display list, custom pixel transport, or compositor object identifier.
 
-## The missing semantic
+## Enhanced-integration semantic
 
-Existing Wayland protocols carry surface content, buffers, commits, frame
-callbacks, input, scaling, synchronization, desktop state, and secure locking.
-They do not, as one contract, express this missing semantic:
+Layer shell supplies the portable surface-role, placement, sizing, and standard
+input path needed for ordinary shell components. Existing protocols also carry
+buffers, commits, frame callbacks, scaling, synchronization, desktop state, and
+secure locking.
+
+The optional contract investigates a stronger compositor-managed semantic:
 
 > An authorized desktop-shell client can assign a semantic,
 > compositor-managed shell-root role to a normal Wayland surface, with defined
 > placement, scene participation, standard input focus, lifecycle, and secure
 > ordering.
 
-Layer shell overlaps with desktop placement and exclusive-zone use cases. It
-does not establish HTMShell's connection-scoped controller authority,
-capability handshake, permanent semantic root, or future shell-root contract.
-`htm-shell-v1` is not a general layer-shell replacement for ordinary clients,
-and version 1 defines no exclusive zone.
+Layer shell does not establish HTMShell's connection-scoped controller
+authority, capability handshake, or future integration for compositor-owned
+materials, application interleaving, and workspace-native roots.
+`htm-shell-v1` is not a layer-shell replacement and version 1 defines no
+exclusive zone. Its current overlay role remains experimental evidence rather
+than a requirement for basic shell operation.
 
 The missing concept is not a workspace, toplevel-enumeration, scaling,
 synchronization, capture, or input-event protocol. HTMShell reuses those
@@ -61,10 +72,11 @@ owns:
 HTML, CSS, DOM state, component state, and application pixels do not cross this
 contract.
 
-## Mandatory compatibility baseline
+## Enhanced-contract compatibility baseline
 
-A compositor may claim baseline compatibility only when it implements all of
-the following:
+A compositor may claim `htm-shell-v1` version 1 compatibility only when it
+implements all of the following. These requirements do not apply to the
+portable layer-shell baseline:
 
 1. Authorize one controller connection through compositor or session policy.
 2. Make `htm_shell_manager_v1` available to that connection.
@@ -89,14 +101,15 @@ the following:
 20. Contain malformed requests to the offending client without exposing
     compositor pointers or internal identities.
 
-The version 1 capability set contains `root_overlay` and
+The enhanced contract's version 1 capability set contains `root_overlay` and
 `standard_pointer_focus`. Both are mandatory even though they use the
 capability event mechanism. Missing either is baseline failure, not an optional
 downgrade.
 
-The baseline does not require workspaces, application enumeration, keyboard
-focus, session-lock implementation, fractional scaling, GPU buffers, explicit
-synchronization, presentation timestamps, materials, capture, or previews.
+The enhanced-contract baseline does not require workspaces, application
+enumeration, keyboard focus, session-lock implementation, fractional scaling,
+GPU buffers, explicit synchronization, presentation timestamps, materials,
+capture, or previews.
 
 ## Semantic overlay root
 
@@ -300,11 +313,12 @@ below describe contract dependency, not universal compositor availability.
 
 | Concern | Existing protocol family | Classification |
 | --- | --- | --- |
-| Surface, commit, damage, callbacks, outputs | Core Wayland | Baseline |
-| Shared-memory conformance buffers | `wl_shm` | Baseline harness |
+| Surface, commit, damage, callbacks, outputs | Core Wayland | Portable baseline |
+| Shell placement and ordinary shell-surface input | wlr layer shell | Portable baseline |
+| Shared-memory conformance buffers | `wl_shm` | Portable prototype and enhanced-contract harness |
 | Pointer and future keyboard delivery | Core seat protocols | Pointer baseline; keyboard future |
 | Buffer viewport and fractional scale | Viewporter and fractional-scale protocols | Optional and independent |
-| Frame scheduling | Core frame callbacks | Baseline |
+| Frame scheduling | Core frame callbacks | Portable and enhanced baselines |
 | Presentation feedback | Presentation-time protocol | Optional future |
 | GPU buffers | Linux DMA-BUF | Optional future |
 | Explicit synchronization | DRM syncobj explicit synchronization | Optional future |

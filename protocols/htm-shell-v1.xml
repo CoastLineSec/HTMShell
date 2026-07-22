@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <protocol name="htm_shell_v1">
   <description summary="experimental HTMShell compositor contract">
-    This protocol assigns an authorized HTMShell controller a semantic shell-root
-    role on an ordinary wl_surface. Surface content, buffers, damage, frame
-    callbacks, output information, and input continue to use standard Wayland
-    protocols.
+    This optional enhanced-integration protocol assigns an authorized HTMShell
+    controller a semantic shell-root role on an ordinary wl_surface. Basic
+    HTMShell presentation uses layer shell and does not require this protocol.
+    Surface content, buffers, damage, frame callbacks, output information, and
+    input continue to use standard Wayland protocols.
 
     Version 1 is an experimental feasibility contract. It is not a standard and
     is not part of wayland-protocols. The v1 suffix names this experimental

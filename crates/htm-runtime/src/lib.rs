@@ -7,6 +7,7 @@ mod adapter;
 mod error;
 mod identity;
 mod incremental;
+mod live;
 mod model;
 mod mutation;
 mod resource;
@@ -20,6 +21,10 @@ pub use incremental::{
     ExperimentalSceneSnapshot, IncrementalExperimentRun, InvalidationEvidence, MutationArtifact,
     MutationPhase, MutationPhaseMeasurement, ScaleBaseline, SceneDiffSummary, SceneNodeChange,
     SceneNodeSnapshot, SlotReuseEvidence, StylesheetReloadAttempt,
+};
+pub use live::{
+    LiveDocument, LiveFrame, LiveFrameRect, LiveInteractionState, LiveRuntimeMeasurements,
+    LiveRuntimeSnapshot,
 };
 pub use model::{
     Artifact, DiagnosticNode, DiagnosticReport, ExperimentOptions, ExperimentRun,

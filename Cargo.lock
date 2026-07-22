@@ -772,6 +772,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "htm-shell-host"
+version = "0.0.0"
+dependencies = [
+ "htm-runtime",
+ "memmap2",
+ "rustix",
+ "wayland-client",
+ "wayland-protocols-wlr",
+]
+
+[[package]]
 name = "htm-shell-probe"
 version = "0.0.0"
 dependencies = [
@@ -795,6 +806,13 @@ checksum = "46a1761807faccc9a19e86944bbf40610014066306f96edcdedc2fb714bcb7b8"
 dependencies = [
  "log",
  "markup5ever",
+]
+
+[[package]]
+name = "htmshell-live"
+version = "0.0.0"
+dependencies = [
+ "htm-shell-host",
 ]
 
 [[package]]
@@ -2431,6 +2449,19 @@ dependencies = [
  "bitflags 2.13.1",
  "wayland-backend",
  "wayland-client",
+ "wayland-scanner",
+]
+
+[[package]]
+name = "wayland-protocols-wlr"
+version = "0.3.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb04e52f7836d7c7976c78ca0250d61e33873c34156a2a1fc9474828ec268234"
+dependencies = [
+ "bitflags 2.13.1",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
  "wayland-scanner",
 ]
 

@@ -15,10 +15,13 @@ HTML and CSS
 HTMShell runtime
       │
       ▼
-Native desktop scene
+Portable Wayland shell presentation
       │
       ▼
 Supporting Wayland compositor
+
+Optional later:
+enhanced HTMShell compositor integration
 ```
 
 HTMShell is not intended to render websites or recreate a full browser platform. It uses a focused desktop-oriented HTML and CSS profile designed specifically for shell interfaces.
@@ -27,7 +30,7 @@ HTMShell is not intended to render websites or recreate a full browser platform.
 
 * Real HTML and CSS authoring
 * Native rendering without an embedded browser
-* Compositor-neutral shell protocol
+* Compositor-neutral presentation through advertised Wayland protocols
 * Standard Wayland surface and input lifecycles
 * Semantic shell roles instead of compositor-specific render stages
 * Incremental document updates
@@ -38,11 +41,16 @@ HTMShell is not intended to render websites or recreate a full browser platform.
 
 ## Compositor integration
 
-HTMShell defines a universal compositor contract rather than adapting its runtime around individual compositors.
+Layer shell is HTMShell's portable baseline presentation path. The runtime
+discovers standard and existing extension protocols through the Wayland
+registry; it does not identify the compositor or select a compositor-specific
+implementation.
 
-A compositor that supports HTMShell is responsible for implementing that contract, including shell-surface placement, input targeting, lifecycle management, and any optional advanced capabilities it chooses to provide.
-
-Hyprland is currently being used as the first development and validation environment, but the protocol and client architecture are not designed around Hyprland-specific behavior. Other compositors such as Sway, niri, River, Wayfire, KWin, and Labwc may be supported through implementations of the same contract.
+The experimental HTMShell compositor contract remains available as an optional
+path for future integration that existing protocols cannot express. It is not
+required for basic shell presentation. Hyprland is the first validation
+environment, but neither the runtime nor the portable layer-shell path contains
+Hyprland-specific behavior.
 
 ## Current status
 
@@ -61,6 +69,7 @@ The project has demonstrated:
 * A compositor-neutral Wayland shell-surface protocol prototype
 * Standard Wayland buffer and frame lifecycles
 * Semantic compositor-controlled shell placement
+* An experimental live layer-shell presentation path using shared-memory buffers
 
 HTMShell is not yet a usable desktop shell, and no stable release is available.
 

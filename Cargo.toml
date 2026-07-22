@@ -2,9 +2,11 @@
 members = [
     "crates/htm-compositor-client",
     "crates/htm-runtime",
+    "crates/htm-shell-host",
     "tools/htm-headless",
     "tools/htm-shell-conformance",
     "tools/htm-shell-probe",
+    "tools/htmshell-live",
 ]
 resolver = "2"
 
@@ -21,7 +23,9 @@ blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "389e3762fc0ac
 blitz-paint = { git = "https://github.com/DioxusLabs/blitz", rev = "389e3762fc0ac19f6de7c0cec7201d0c8bde393a", default-features = false, features = ["svg"] }
 blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "389e3762fc0ac19f6de7c0cec7201d0c8bde393a", default-features = false }
 cssparser = "=0.37.0"
+memmap2 = "=0.9.11"
 png = "=0.18.1"
+rustix = { version = "=1.1.4", features = ["fs"] }
 selectors = "=0.39.0"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
@@ -31,6 +35,7 @@ url = "=2.5.8"
 wayland-backend = { version = "=0.3.15", features = ["client_system"] }
 wayland-client = { version = "=0.31.14" }
 wayland-protocols = { version = "=0.32.13", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "=0.3.12", default-features = false, features = ["client"] }
 wayland-scanner = { version = "=0.31.10" }
 
 [profile.release]
