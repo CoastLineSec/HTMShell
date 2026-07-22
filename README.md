@@ -70,6 +70,7 @@ The project has demonstrated:
 * Standard Wayland buffer and frame lifecycles
 * Semantic compositor-controlled shell placement
 * An experimental live layer-shell presentation path using shared-memory buffers
+* One portable host process managing independent panel and overlay layer surfaces
 
 HTMShell is not yet a usable desktop shell, and no stable release is available.
 

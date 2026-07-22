@@ -16,6 +16,7 @@ const MAX_TOTAL_MAPPED_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BufferData {
+    pub(crate) owner: u8,
     pub(crate) id: u64,
 }
 
@@ -34,6 +35,8 @@ pub struct BufferPoolStats {
     pub releases: u64,
     pub skipped_no_free_buffer: u64,
     pub total_mapped_bytes: usize,
+    pub active_buffers: usize,
+    pub retired_buffers: usize,
 }
 
 pub(crate) struct ShmBufferPool {
@@ -41,16 +44,18 @@ pub(crate) struct ShmBufferPool {
     retired: Vec<BufferSlot>,
     layout: Option<Argb8888Layout>,
     next_id: u64,
+    owner: u8,
     stats: BufferPoolStats,
 }
 
 impl ShmBufferPool {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(owner: u8) -> Self {
         Self {
             slots: Vec::new(),
             retired: Vec::new(),
             layout: None,
             next_id: 1,
+            owner,
             stats: BufferPoolStats::default(),
         }
     }
@@ -113,7 +118,8 @@ impl ShmBufferPool {
             }
         }
         for _ in 0..BUFFER_COUNT {
-            self.slots.push(create_slot(shm, qh, layout, self.next_id)?);
+            self.slots
+                .push(create_slot(shm, qh, layout, self.owner, self.next_id)?);
             self.next_id = self.next_id.saturating_add(1);
         }
         self.layout = Some(layout);
@@ -183,6 +189,8 @@ impl ShmBufferPool {
             .chain(&self.retired)
             .map(|slot| slot.mapping.len())
             .sum();
+        self.stats.active_buffers = self.slots.len();
+        self.stats.retired_buffers = self.retired.len();
     }
 }
 
@@ -190,6 +198,7 @@ fn create_slot<State>(
     shm: &wl_shm::WlShm,
     qh: &QueueHandle<State>,
     layout: Argb8888Layout,
+    owner: u8,
     id: u64,
 ) -> Result<BufferSlot, ShellHostError>
 where
@@ -218,7 +227,7 @@ where
         layout.stride as i32,
         wl_shm::Format::Argb8888,
         qh,
-        BufferData { id },
+        BufferData { owner, id },
     );
     pool.destroy();
     Ok(BufferSlot {

@@ -30,6 +30,10 @@ impl FrameScheduler {
         self.frame_callback_outstanding = false;
     }
 
+    pub fn stop_scheduling(&mut self) {
+        self.dirty = false;
+    }
+
     pub fn decision(&self, configured: bool, free_buffer: bool) -> ScheduleDecision {
         if !configured || !self.dirty {
             return ScheduleDecision::Idle;

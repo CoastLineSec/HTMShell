@@ -13,4 +13,7 @@ mod wayland;
 pub use error::ShellHostError;
 pub use pixel::{Argb8888Layout, convert_premultiplied_rgba_to_argb8888};
 pub use scheduler::{FrameScheduler, ScheduleDecision};
-pub use wayland::{LiveHostOptions, LiveHostSummary, run_live_overlay};
+pub use wayland::{
+    LiveHostOptions, LiveHostSummary, MultiSurfaceHostOptions, MultiSurfaceHostSummary,
+    SurfaceHostSummary, run_live_overlay, run_multi_surface_shell,
+};

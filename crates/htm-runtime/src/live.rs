@@ -13,11 +13,13 @@ use blitz_traits::events::{
 use blitz_traits::shell::{ColorScheme, Viewport};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 const MAX_HTML_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_LOGICAL_DIMENSION: u32 = 16_384;
 const MAX_PIXEL_BYTES: usize = 256 * 1024 * 1024;
+static NEXT_LIVE_DOCUMENT_SERIAL: AtomicU64 = AtomicU64::new(1);
 
 pub type LiveFrameRect = LogicalRect;
 
@@ -43,6 +45,25 @@ pub struct LiveInteractionState {
     pub hovered: bool,
     pub active: bool,
     pub click_count: u64,
+}
+
+/// Fixture profile used by the portable live-presentation experiments.
+///
+/// This is not a stable component or package API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveDocumentKind {
+    SingleOverlay,
+    Panel,
+    TransientOverlay,
+}
+
+/// Host-visible action emitted by a parse-once live document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveAction {
+    SingleOverlayActivate,
+    ToggleOverlay,
+    CloseOverlay,
+    ActivateOverlay,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,8 +101,10 @@ pub struct LiveDocument {
     parse_count: u32,
     started: Instant,
     frame_generation: u64,
+    kind: LiveDocumentKind,
     last_pointer: Option<Point<f32>>,
-    pressed_action: bool,
+    pressed_action: Option<LiveAction>,
+    pending_action: Option<LiveAction>,
     click_count: u64,
     measurements: LiveRuntimeMeasurements,
     diagnostics: Vec<DiagnosticMessage>,
@@ -93,11 +116,26 @@ impl LiveDocument {
         logical_width: u32,
         logical_height: u32,
     ) -> Result<Self, RuntimeError> {
-        Self::load_inner(package.as_ref(), logical_width, logical_height)
+        Self::load_inner(
+            package.as_ref(),
+            LiveDocumentKind::SingleOverlay,
+            logical_width,
+            logical_height,
+        )
+    }
+
+    pub fn load_surface(
+        package: impl AsRef<Path>,
+        kind: LiveDocumentKind,
+        logical_width: u32,
+        logical_height: u32,
+    ) -> Result<Self, RuntimeError> {
+        Self::load_inner(package.as_ref(), kind, logical_width, logical_height)
     }
 
     fn load_inner(
         package: &Path,
+        kind: LiveDocumentKind,
         logical_width: u32,
         logical_height: u32,
     ) -> Result<Self, RuntimeError> {
@@ -112,10 +150,10 @@ impl LiveDocument {
                 package_root.display()
             )));
         }
-        let source = package_root.join("index.html");
+        let source = package_root.join(kind.source_file());
         let metadata = source
             .metadata()
-            .map_err(|error| RuntimeError::io("inspect live index.html", &source, error))?;
+            .map_err(|error| RuntimeError::io("inspect live document", &source, error))?;
         if metadata.len() > MAX_HTML_BYTES {
             return Err(RuntimeError::LimitExceeded(format!(
                 "index.html is {} bytes; limit is {MAX_HTML_BYTES}",
@@ -123,7 +161,7 @@ impl LiveDocument {
             )));
         }
         let html = std::fs::read_to_string(&source)
-            .map_err(|error| RuntimeError::io("read live index.html as UTF-8", &source, error))?;
+            .map_err(|error| RuntimeError::io("read live document as UTF-8", &source, error))?;
         let package_read_ms = elapsed_ms(read_started);
 
         let viewport = ViewportSpec {
@@ -154,9 +192,9 @@ impl LiveDocument {
         validate_document_limits(&document)?;
         let html_parse_ms = elapsed_ms(parse_started);
 
-        required_selector(&document, "#shell-card")?;
-        required_selector(&document, "#primary-action")?;
-        required_selector(&document, "#status-label")?;
+        for selector in kind.required_selectors() {
+            required_selector(&document, selector)?;
+        }
 
         let mut diagnostics = Vec::new();
         let resolve_started = Instant::now();
@@ -171,12 +209,16 @@ impl LiveDocument {
             package_root,
             source,
             viewport,
-            document_identity: ExperimentalDocumentIdentity { serial: 1 },
+            document_identity: ExperimentalDocumentIdentity {
+                serial: NEXT_LIVE_DOCUMENT_SERIAL.fetch_add(1, Ordering::Relaxed),
+            },
             parse_count: 1,
             started: Instant::now(),
             frame_generation: 0,
+            kind,
             last_pointer: None,
-            pressed_action: false,
+            pressed_action: None,
+            pending_action: None,
             click_count: 0,
             measurements: LiveRuntimeMeasurements {
                 package_read_ms,
@@ -219,11 +261,11 @@ impl LiveDocument {
 
     pub fn pointer_leave(&mut self) -> bool {
         let mut changed = self.document.clear_hover();
-        if self.pressed_action {
+        if self.pressed_action.is_some() {
             let point = self.last_pointer.unwrap_or_default();
             self.document
                 .handle_ui_event(UiEvent::PointerUp(pointer_event(point.x, point.y, false)));
-            self.pressed_action = false;
+            self.pressed_action = None;
             changed = true;
         }
         self.last_pointer = None;
@@ -237,22 +279,27 @@ impl LiveDocument {
         let Some(point) = self.last_pointer else {
             return Ok(false);
         };
-        let action = self.bounds_for("#primary-action")?;
-        let inside = contains(&action, point.x, point.y);
         match pressed {
-            true if inside && !self.pressed_action => {
+            true if self.pressed_action.is_none() => {
+                let Some(action) = self.action_at(point.x, point.y)? else {
+                    return Ok(false);
+                };
                 self.document
                     .handle_ui_event(UiEvent::PointerDown(pointer_event(point.x, point.y, true)));
-                self.pressed_action = true;
+                self.pressed_action = Some(action);
                 self.resolve();
                 Ok(true)
             }
-            false if self.pressed_action => {
+            false if self.pressed_action.is_some() => {
+                let pressed_action = self.pressed_action.take().expect("checked above");
                 self.document
                     .handle_ui_event(UiEvent::PointerUp(pointer_event(point.x, point.y, false)));
-                self.pressed_action = false;
-                if inside {
-                    self.apply_click_mutation()?;
+                if self.action_at(point.x, point.y)? == Some(pressed_action) {
+                    self.click_count = self.click_count.saturating_add(1);
+                    if pressed_action == LiveAction::SingleOverlayActivate {
+                        self.apply_click_mutation()?;
+                    }
+                    self.pending_action = Some(pressed_action);
                 }
                 self.resolve();
                 Ok(true)
@@ -277,8 +324,8 @@ impl LiveDocument {
         let render_ms = elapsed_ms(render_started);
         self.measurements.last_render_ms = render_ms;
         self.frame_generation = self.frame_generation.saturating_add(1);
-        let card = self.bounds_for("#shell-card")?;
-        let action = self.bounds_for("#primary-action")?;
+        let card = self.bounds_for(self.kind.region_selector())?;
+        let action = self.bounds_for(self.kind.primary_action_selector())?;
         validate_rect(&card)?;
         validate_rect(&action)?;
         Ok(LiveFrame {
@@ -301,14 +348,14 @@ impl LiveDocument {
     }
 
     pub fn snapshot(&self) -> Result<LiveRuntimeSnapshot, RuntimeError> {
-        let card_slot = required_selector(&self.document, "#shell-card")?;
-        let action_slot = required_selector(&self.document, "#primary-action")?;
+        let card_slot = required_selector(&self.document, self.kind.region_selector())?;
+        let action_slot = required_selector(&self.document, self.kind.primary_action_selector())?;
         let card = self
             .document
             .get_node(card_slot)
-            .ok_or_else(|| RuntimeError::InvalidMutationTarget("#shell-card disappeared".into()))?;
+            .ok_or_else(|| RuntimeError::InvalidMutationTarget("live region disappeared".into()))?;
         let action = self.document.get_node(action_slot).ok_or_else(|| {
-            RuntimeError::InvalidMutationTarget("#primary-action disappeared".into())
+            RuntimeError::InvalidMutationTarget("primary live action disappeared".into())
         })?;
         Ok(LiveRuntimeSnapshot {
             document_identity: self.document_identity,
@@ -350,12 +397,78 @@ impl LiveDocument {
         self.audit.request_count()
     }
 
+    pub fn kind(&self) -> LiveDocumentKind {
+        self.kind
+    }
+
+    pub fn take_action(&mut self) -> Option<LiveAction> {
+        self.pending_action.take()
+    }
+
+    pub fn update_panel_state(
+        &mut self,
+        overlay_open: bool,
+        last_action: &str,
+    ) -> Result<bool, RuntimeError> {
+        if self.kind != LiveDocumentKind::Panel {
+            return Err(RuntimeError::InvalidMutationTarget(
+                "panel state can only update a panel document".into(),
+            ));
+        }
+        let text = if overlay_open {
+            format!("Overlay open · {last_action}")
+        } else {
+            format!("Overlay closed · {last_action}")
+        };
+        self.set_text("#panel-status", &text)?;
+        self.set_class(
+            "#panel-root",
+            if overlay_open { "panel open" } else { "panel" },
+        )?;
+        self.resolve();
+        Ok(true)
+    }
+
+    pub fn update_overlay_state(
+        &mut self,
+        activation_count: u64,
+        last_action: &str,
+    ) -> Result<bool, RuntimeError> {
+        if self.kind != LiveDocumentKind::TransientOverlay {
+            return Err(RuntimeError::InvalidMutationTarget(
+                "overlay state can only update a transient-overlay document".into(),
+            ));
+        }
+        self.set_text(
+            "#overlay-status",
+            &format!("Activated {activation_count} time(s) · {last_action}"),
+        )?;
+        self.set_class(
+            "#overlay-card",
+            if activation_count == 0 {
+                "overlay-card"
+            } else {
+                "overlay-card activated"
+            },
+        )?;
+        self.resolve();
+        Ok(true)
+    }
+
     fn apply_click_mutation(&mut self) -> Result<(), RuntimeError> {
-        self.click_count = self.click_count.saturating_add(1);
-        let status = required_selector(&self.document, "#status-label")?;
+        self.set_text(
+            "#status-label",
+            &format!("Activated {} time(s)", self.click_count),
+        )?;
+        self.set_class("#shell-card", "shell-card activated")?;
+        Ok(())
+    }
+
+    fn set_text(&mut self, selector: &str, value: &str) -> Result<(), RuntimeError> {
+        let parent = required_selector(&self.document, selector)?;
         let text = self
             .document
-            .get_node(status)
+            .get_node(parent)
             .and_then(|node| {
                 node.children.iter().copied().find(|child| {
                     self.document
@@ -364,25 +477,35 @@ impl LiveDocument {
                 })
             })
             .ok_or_else(|| {
-                RuntimeError::InvalidMutationTarget(
-                    "#status-label does not contain a text node".into(),
-                )
+                RuntimeError::InvalidMutationTarget(format!(
+                    "{selector} does not contain a text node"
+                ))
             })?;
-        self.document
-            .mutate()
-            .set_node_text(text, &format!("Activated {} time(s)", self.click_count));
+        self.document.mutate().set_node_text(text, value);
+        Ok(())
+    }
 
-        let card = required_selector(&self.document, "#shell-card")?;
+    fn set_class(&mut self, selector: &str, value: &str) -> Result<(), RuntimeError> {
+        let node = required_selector(&self.document, selector)?;
         self.document.mutate().set_attribute(
-            card,
+            node,
             QualName {
                 prefix: None,
                 ns: ns!(),
                 local: local_name!("class"),
             },
-            "shell-card activated",
+            value,
         );
         Ok(())
+    }
+
+    fn action_at(&self, x: f32, y: f32) -> Result<Option<LiveAction>, RuntimeError> {
+        for (selector, action) in self.kind.actions() {
+            if contains(&self.bounds_for(selector)?, x, y) {
+                return Ok(Some(*action));
+            }
+        }
+        Ok(None)
     }
 
     fn bounds_for(&self, selector: &str) -> Result<LogicalRect, RuntimeError> {
@@ -399,6 +522,56 @@ impl LiveDocument {
         let started = Instant::now();
         self.document.resolve(self.started.elapsed().as_secs_f64());
         self.measurements.last_resolve_ms = elapsed_ms(started);
+    }
+}
+
+impl LiveDocumentKind {
+    fn source_file(self) -> &'static str {
+        match self {
+            Self::SingleOverlay => "index.html",
+            Self::Panel => "panel.html",
+            Self::TransientOverlay => "overlay.html",
+        }
+    }
+
+    fn region_selector(self) -> &'static str {
+        match self {
+            Self::SingleOverlay => "#shell-card",
+            Self::Panel => "#panel-root",
+            Self::TransientOverlay => "#overlay-card",
+        }
+    }
+
+    fn primary_action_selector(self) -> &'static str {
+        match self {
+            Self::SingleOverlay => "#primary-action",
+            Self::Panel => "#overlay-toggle",
+            Self::TransientOverlay => "#overlay-action",
+        }
+    }
+
+    fn required_selectors(self) -> &'static [&'static str] {
+        match self {
+            Self::SingleOverlay => &["#shell-card", "#primary-action", "#status-label"],
+            Self::Panel => &["#panel-root", "#overlay-toggle", "#panel-status"],
+            Self::TransientOverlay => &[
+                "#overlay-card",
+                "#overlay-close",
+                "#overlay-action",
+                "#overlay-status",
+            ],
+        }
+    }
+
+    fn actions(self) -> &'static [(&'static str, LiveAction)] {
+        match self {
+            Self::SingleOverlay => &[("#primary-action", LiveAction::SingleOverlayActivate)],
+            Self::Panel => &[("#overlay-toggle", LiveAction::ToggleOverlay)],
+            Self::TransientOverlay => &[
+                ("#overlay-close", LiveAction::CloseOverlay),
+                ("#overlay-action", LiveAction::ActivateOverlay),
+            ],
+        }
     }
 }
 
@@ -530,6 +703,19 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/live-overlay")
     }
 
+    fn multi_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/two-surface-shell")
+    }
+
+    fn click_action(live: &mut LiveDocument, bounds: &LogicalRect) -> LiveAction {
+        let x = f64::from(bounds.x + bounds.width / 2.0);
+        let y = f64::from(bounds.y + bounds.height / 2.0);
+        assert!(live.pointer_move(x, y).unwrap());
+        assert!(live.pointer_primary(true).unwrap());
+        assert!(live.pointer_primary(false).unwrap());
+        live.take_action().expect("action emitted")
+    }
+
     #[test]
     fn live_document_parses_once_across_resize_and_interaction() {
         let mut live = LiveDocument::load(fixture(), 800, 600).unwrap();
@@ -599,5 +785,73 @@ mod tests {
     #[test]
     fn invalid_package_path_is_contained_as_an_error() {
         assert!(LiveDocument::load(fixture().join("does-not-exist"), 800, 600).is_err());
+    }
+
+    #[test]
+    fn panel_document_parses_once_and_emits_toggle_action() {
+        let mut panel =
+            LiveDocument::load_surface(multi_fixture(), LiveDocumentKind::Panel, 1280, 52).unwrap();
+        let initial = panel.snapshot().unwrap();
+        assert_eq!(initial.document_parse_count, 1);
+        assert_eq!(
+            click_action(&mut panel, &initial.action_bounds),
+            LiveAction::ToggleOverlay
+        );
+        panel.update_panel_state(true, "Opened from panel").unwrap();
+        panel.set_viewport(1440, 52).unwrap();
+        let changed = panel.snapshot().unwrap();
+        assert_eq!(changed.document_parse_count, 1);
+        assert_eq!(initial.document_identity, changed.document_identity);
+        assert_eq!(initial.card_identity, changed.card_identity);
+        assert_eq!(initial.action_identity, changed.action_identity);
+    }
+
+    #[test]
+    fn transient_overlay_emits_independent_actions_without_reparse() {
+        let mut overlay = LiveDocument::load_surface(
+            multi_fixture(),
+            LiveDocumentKind::TransientOverlay,
+            1280,
+            720,
+        )
+        .unwrap();
+        let initial = overlay.snapshot().unwrap();
+        assert_eq!(
+            click_action(&mut overlay, &initial.action_bounds),
+            LiveAction::ActivateOverlay
+        );
+        overlay
+            .update_overlay_state(1, "Overlay state updated")
+            .unwrap();
+        let close = overlay.bounds_for("#overlay-close").unwrap();
+        assert_eq!(click_action(&mut overlay, &close), LiveAction::CloseOverlay);
+        let changed = overlay.snapshot().unwrap();
+        assert_eq!(changed.document_parse_count, 1);
+        assert_eq!(initial.document_identity, changed.document_identity);
+        assert_eq!(initial.card_identity, changed.card_identity);
+        assert_eq!(initial.action_identity, changed.action_identity);
+    }
+
+    #[test]
+    fn surface_state_updates_are_profile_scoped() {
+        let mut panel =
+            LiveDocument::load_surface(multi_fixture(), LiveDocumentKind::Panel, 800, 52).unwrap();
+        let mut overlay = LiveDocument::load_surface(
+            multi_fixture(),
+            LiveDocumentKind::TransientOverlay,
+            800,
+            600,
+        )
+        .unwrap();
+        assert!(panel.update_overlay_state(1, "invalid").is_err());
+        assert!(overlay.update_panel_state(true, "invalid").is_err());
+        let panel_snapshot = panel.snapshot().unwrap();
+        let overlay_snapshot = overlay.snapshot().unwrap();
+        assert_eq!(panel_snapshot.document_parse_count, 1);
+        assert_eq!(overlay_snapshot.document_parse_count, 1);
+        assert_ne!(
+            panel_snapshot.document_identity,
+            overlay_snapshot.document_identity
+        );
     }
 }

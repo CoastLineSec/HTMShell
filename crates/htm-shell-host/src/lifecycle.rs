@@ -81,6 +81,16 @@ impl LayerLifecycle {
         self.configured_size = None;
     }
 
+    pub(crate) fn unmap(&mut self) -> Result<(), &'static str> {
+        if self.state != LayerState::Configured {
+            return Err("layer surface can only unmap from configured state");
+        }
+        self.state = LayerState::WaitingForConfigure;
+        self.latest_serial = None;
+        self.configured_size = None;
+        Ok(())
+    }
+
     pub(crate) fn output_lost(&mut self) {
         self.state = LayerState::OutputLost;
         self.latest_serial = None;
@@ -133,5 +143,20 @@ mod tests {
         lost.acknowledge(2).unwrap();
         lost.output_lost();
         assert!(!lost.can_attach_buffer());
+    }
+
+    #[test]
+    fn null_buffer_unmap_requires_a_fresh_configure_before_remap() {
+        let mut lifecycle = LayerLifecycle::default();
+        lifecycle.assign_role().unwrap();
+        lifecycle.initial_bufferless_commit().unwrap();
+        lifecycle.configure(1, 800, 600).unwrap();
+        lifecycle.acknowledge(1).unwrap();
+        assert!(lifecycle.can_attach_buffer());
+        lifecycle.unmap().unwrap();
+        assert!(!lifecycle.can_attach_buffer());
+        lifecycle.configure(2, 1024, 768).unwrap();
+        lifecycle.acknowledge(2).unwrap();
+        assert!(lifecycle.can_attach_buffer());
     }
 }

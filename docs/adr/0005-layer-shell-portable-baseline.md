@@ -27,7 +27,7 @@ The runtime discovers advertised protocol globals and never detects compositor
 identity. Its HTML/CSS, layout, text, interaction, and paint behavior remains
 compositor-neutral.
 
-The first live path proves one full-output overlay surface:
+The first live path proved one full-output overlay surface:
 
 - one parse-once local HTML/CSS document;
 - compositor-configured logical dimensions;
@@ -38,8 +38,18 @@ The first live path proves one full-output overlay surface:
 - standard pointer hover, active, and click-driven host mutation;
 - a surface input region derived from resolved shell geometry.
 
-One process may eventually manage several layer surfaces, but panels,
-backgrounds, notifications, and multi-output policy are deferred.
+The portable host now also proves one process managing a persistent panel and
+a transient overlay. Each surface owns independent configure state, frame
+callback state, shared-memory buffers, input region, pointer state, and
+parse-once document. The documents may receive deterministic mutations from a
+small shared host-state model without sharing presentation ownership.
+
+The panel uses the top layer, top/left/right anchors, and an exclusive zone
+equal to its configured height. The overlay uses the overlay layer, all four
+anchors, and no exclusive zone. Closing the overlay unmaps its normal Wayland
+surface while retaining its parsed document for a later remap.
+
+Backgrounds, notifications, and multi-output policy remain deferred.
 
 ## Enhanced compositor integration
 
@@ -79,7 +89,8 @@ Costs and limitations:
 - layer shell cannot express every originally envisioned scene relationship;
 - `wl_shm` adds CPU conversion and memory-copy cost;
 - a full-output overlay requires a carefully bounded input region;
-- this spike implements one output and one surface;
+- this profile implements one output with a panel and one transient overlay;
+- every layer surface has an independent buffer pool and frame scheduler;
 - installed font and CPU-renderer behavior still affect pixels;
 - scale 1 is the only completed presentation profile.
 
@@ -93,6 +104,11 @@ Costs and limitations:
 - Frame callbacks prevent continuous idle rendering.
 - Standard pointer events drive hover, active, and one document mutation.
 - A core input region excludes unused transparent surface area.
+- One process independently schedules and owns a top-layer panel and an
+  overlay-layer transient surface.
+- The panel exclusive zone and overlay click-through region follow layer-shell
+  semantics without compositor-specific policy.
+- Opening and closing the overlay retains both parse-once documents.
 - The experimental compositor contract and prior tests remain intact.
 - Public documentation describes the contract as optional enhanced integration.
 
@@ -109,6 +125,7 @@ separate runtime behavior for individual compositors.
 CONTINUE WITH NARROWER LAYER-SHELL PROFILE
 ```
 
-Scale-1 layer-shell presentation satisfies the portable baseline requirements.
-Fractional-scale presentation remains deferred and must be validated before the
-profile is broadened.
+Scale-1 layer-shell presentation, including independent panel and transient
+overlay surfaces in one process, satisfies the portable baseline requirements.
+Fractional-scale presentation and multi-output policy remain deferred and must
+be validated before the profile is broadened.
