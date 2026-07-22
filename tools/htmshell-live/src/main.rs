@@ -1,6 +1,6 @@
 use htm_shell_host::{
-    LiveHostOptions, MultiSurfaceHostOptions, SurfaceHostSummary, run_live_overlay,
-    run_multi_surface_shell,
+    LiveHostOptions, ManifestHostOptions, MultiSurfaceHostOptions, SurfaceHostSummary,
+    ValidatedManifest, run_live_overlay, run_manifest_shell, run_multi_surface_shell,
 };
 use std::error::Error;
 use std::path::PathBuf;
@@ -12,6 +12,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|| "examples/live-overlay".into());
     if first == "two-surface" {
         return run_two_surface(args.collect());
+    }
+    if first == "manifest" {
+        return run_manifest(args.collect());
     }
     let package = PathBuf::from(first);
     let mut exit_after_frames = None;
@@ -83,6 +86,211 @@ fn main() -> Result<(), Box<dyn Error>> {
         "last_pixel_conversion_us={}",
         summary.last_pixel_conversion_us
     );
+    Ok(())
+}
+
+fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
+    let mut args = arguments.into_iter();
+    let path = PathBuf::from(
+        args.next()
+            .ok_or("manifest mode requires a path to shell.json")?,
+    );
+    let mut validate_only = false;
+    let mut exit_after_initial_frames = false;
+    let mut exit_after_output_events = None;
+    let mut exit_after_actions = None;
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--validate-only" => validate_only = true,
+            "--exit-after-initial-frames" => exit_after_initial_frames = true,
+            "--exit-after-output-events" => {
+                exit_after_output_events = Some(
+                    args.next()
+                        .ok_or("--exit-after-output-events requires a positive integer")?
+                        .parse::<u64>()?,
+                );
+            }
+            "--exit-after-actions" => {
+                exit_after_actions = Some(
+                    args.next()
+                        .ok_or("--exit-after-actions requires a positive integer")?
+                        .parse::<u64>()?,
+                );
+            }
+            _ => return Err(format!("unknown manifest argument: {argument}").into()),
+        }
+    }
+    if exit_after_output_events == Some(0) {
+        return Err("--exit-after-output-events must be positive".into());
+    }
+    if exit_after_actions == Some(0) {
+        return Err("--exit-after-actions must be positive".into());
+    }
+    let manifest = ValidatedManifest::load(&path)?;
+    if validate_only {
+        println!("manifest_result=valid");
+        println!("manifest_id={}", manifest.manifest().id);
+        println!("manifest_version={}", manifest.manifest().version);
+        println!("manifest_parse_count={}", manifest.parse_count());
+        println!("surface_templates={}", manifest.manifest().surfaces.len());
+        for surface in &manifest.manifest().surfaces {
+            println!(
+                "surface={} kind={:?} document={} namespace={}",
+                surface.id(),
+                surface.kind(),
+                surface.document().display(),
+                surface.namespace()
+            );
+        }
+        return Ok(());
+    }
+    let summary = run_manifest_shell(ManifestHostOptions {
+        manifest,
+        exit_after_initial_frames,
+        exit_after_output_events,
+        exit_after_actions,
+    })?;
+    println!("manifest_live_result=success");
+    println!("manifest_id={}", summary.manifest_id);
+    println!("manifest_parse_count={}", summary.manifest_parse_count);
+    println!("manifest_parse_us={}", summary.manifest_parse_us);
+    println!("manifest_validation_us={}", summary.manifest_validation_us);
+    println!("layer_shell_version={}", summary.layer_shell_version);
+    println!("output_generations={}", summary.output_generations);
+    println!("output_additions={}", summary.output_additions);
+    println!("output_removals={}", summary.output_removals);
+    println!(
+        "unsupported_scale_outputs={}",
+        summary.unsupported_scale_outputs
+    );
+    println!("active_outputs={}", summary.active_outputs.len());
+    for output in &summary.active_outputs {
+        let key = output
+            .output_key
+            .expect("live output summary has an identity");
+        println!(
+            "output={} generation={} label={}",
+            key.global_name, key.generation, output.diagnostic_label
+        );
+        println!(
+            "output_{}_ready_us={}",
+            key.generation, output.output_ready_us
+        );
+        println!(
+            "output_{}_first_panel_frame_us={}",
+            key.generation, output.first_panel_frame_us
+        );
+        println!(
+            "output_{}_overlay_open={}",
+            key.generation, output.overlay_open
+        );
+        if let Some(panel) = &output.panel {
+            println!(
+                "output_{}_panel_instance={} owner={}",
+                key.generation, panel.instance_generation, panel.owner
+            );
+            println!(
+                "output_{}_panel_parse_count={}",
+                key.generation, panel.metrics.html_parse_count
+            );
+            println!(
+                "output_{}_panel_frames={}",
+                key.generation, panel.metrics.frames_committed
+            );
+            println!(
+                "output_{}_panel_callbacks={}",
+                key.generation, panel.metrics.frame_callbacks
+            );
+            println!(
+                "output_{}_panel_releases={}",
+                key.generation, panel.metrics.buffer_releases
+            );
+            println!(
+                "output_{}_panel_allocations={}",
+                key.generation, panel.metrics.buffer_allocations
+            );
+            println!(
+                "output_{}_panel_mapped_peak={}",
+                key.generation, panel.metrics.mapped_memory_peak
+            );
+            println!(
+                "output_{}_panel_busy_skips={} actions={}",
+                key.generation, panel.metrics.busy_buffer_skips, panel.metrics.action_count
+            );
+            println!(
+                "output_{}_panel_pointer={}/{}/{}",
+                key.generation,
+                panel.metrics.pointer_enters,
+                panel.metrics.pointer_motions,
+                panel.metrics.pointer_buttons
+            );
+        }
+        if let Some(overlay) = &output.overlay {
+            println!(
+                "output_{}_overlay_instance={} owner={}",
+                key.generation, overlay.instance_generation, overlay.owner
+            );
+            println!(
+                "output_{}_overlay_parse_count={}",
+                key.generation, overlay.metrics.html_parse_count
+            );
+            println!(
+                "output_{}_overlay_frames={}",
+                key.generation, overlay.metrics.frames_committed
+            );
+            println!(
+                "output_{}_overlay_callbacks={}",
+                key.generation, overlay.metrics.frame_callbacks
+            );
+            println!(
+                "output_{}_overlay_releases={}",
+                key.generation, overlay.metrics.buffer_releases
+            );
+            println!(
+                "output_{}_overlay_allocations={}",
+                key.generation, overlay.metrics.buffer_allocations
+            );
+            println!(
+                "output_{}_overlay_mapped_peak={}",
+                key.generation, overlay.metrics.mapped_memory_peak
+            );
+            println!(
+                "output_{}_overlay_busy_skips={} actions={}",
+                key.generation, overlay.metrics.busy_buffer_skips, overlay.metrics.action_count
+            );
+            println!(
+                "output_{}_overlay_pointer={}/{}/{}",
+                key.generation,
+                overlay.metrics.pointer_enters,
+                overlay.metrics.pointer_motions,
+                overlay.metrics.pointer_buttons
+            );
+        }
+    }
+    println!("peak_output_instances={}", summary.peak_output_instances);
+    println!("peak_runtime_documents={}", summary.peak_runtime_documents);
+    println!(
+        "combined_mapped_memory_peak={}",
+        summary.combined_mapped_memory_peak
+    );
+    println!("aggregate_shm_limit={}", summary.aggregate_shm_limit);
+    println!(
+        "stale_callbacks_contained={}",
+        summary.stale_callbacks_contained
+    );
+    println!(
+        "stale_releases_contained={}",
+        summary.stale_releases_contained
+    );
+    println!(
+        "first_output_instance_us={}",
+        summary.first_output_instance_us
+    );
+    println!(
+        "last_output_teardown_us={}",
+        summary.last_output_teardown_us
+    );
+    println!("actions={}", summary.actions);
     Ok(())
 }
 

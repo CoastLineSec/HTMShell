@@ -16,7 +16,7 @@ const MAX_TOTAL_MAPPED_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BufferData {
-    pub(crate) owner: u8,
+    pub(crate) owner: u64,
     pub(crate) id: u64,
 }
 
@@ -44,12 +44,12 @@ pub(crate) struct ShmBufferPool {
     retired: Vec<BufferSlot>,
     layout: Option<Argb8888Layout>,
     next_id: u64,
-    owner: u8,
+    owner: u64,
     stats: BufferPoolStats,
 }
 
 impl ShmBufferPool {
-    pub(crate) fn new(owner: u8) -> Self {
+    pub(crate) fn new(owner: u64) -> Self {
         Self {
             slots: Vec::new(),
             retired: Vec::new(),
@@ -62,6 +62,17 @@ impl ShmBufferPool {
 
     pub(crate) fn has_free(&self) -> bool {
         self.slots.iter().any(|slot| !slot.busy)
+    }
+
+    pub(crate) fn requires_resize(&self, width: u32, height: u32) -> Result<bool, ShellHostError> {
+        Ok(self.layout != Some(Argb8888Layout::new(width, height)?))
+    }
+
+    pub(crate) fn new_pool_bytes(width: u32, height: u32) -> Result<usize, ShellHostError> {
+        Argb8888Layout::new(width, height)?
+            .byte_len
+            .checked_mul(BUFFER_COUNT)
+            .ok_or_else(|| ShellHostError::Buffer("total mapped bytes overflow".into()))
     }
 
     pub(crate) fn all_released(&self) -> bool {
@@ -198,7 +209,7 @@ fn create_slot<State>(
     shm: &wl_shm::WlShm,
     qh: &QueueHandle<State>,
     layout: Argb8888Layout,
-    owner: u8,
+    owner: u64,
     id: u64,
 ) -> Result<BufferSlot, ShellHostError>
 where

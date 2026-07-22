@@ -1,0 +1,62 @@
+:root {
+  --text: #f6f8ff;
+  --muted: #b5bfdc;
+  --card: rgba(24, 30, 52, 0.9);
+  --active: rgba(22, 55, 54, 0.92);
+  --border: rgba(190, 204, 255, 0.52);
+  --accent: #8fa7ff;
+}
+
+* { box-sizing: border-box; }
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  color: var(--text);
+  font-family: "DejaVu Sans", sans-serif;
+}
+
+#overlay-root {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+}
+
+.overlay-card {
+  width: 440px;
+  min-height: 270px;
+  padding: 26px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 26px;
+  background: var(--card);
+}
+
+.overlay-card.activated { border-color: #9fffe0; background: var(--active); }
+.card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.eyebrow { margin: 0 0 7px; color: var(--accent); font-size: 10px; letter-spacing: 1.2px; }
+h1 { margin: 0; font-size: 27px; }
+#overlay-status { margin: 14px 0 18px; color: var(--muted); font-size: 13px; }
+.clip-window { height: 22px; margin-bottom: 20px; overflow: hidden; border-radius: 11px; background: #090d20; }
+.clip-accent { width: 125%; height: 22px; background: linear-gradient(90deg, #8fa7ff, #5fe2c2); }
+
+#overlay-action,
+#overlay-close {
+  border: 1px solid rgba(215, 224, 255, 0.66);
+  border-radius: 11px;
+  font: inherit;
+}
+
+#overlay-action { padding: 11px 16px; color: #10172d; background: var(--accent); }
+#overlay-close { padding: 7px 10px; color: var(--text); background: rgba(255, 255, 255, 0.1); }
+#overlay-action:hover,
+#overlay-close:hover { border-color: white; filter: brightness(1.12); }
+#overlay-action:active,
+#overlay-close:active { transform: translateY(1px); filter: brightness(0.86); }

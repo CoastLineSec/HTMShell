@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum ShellHostError {
+    Manifest(String),
     Wayland(String),
     MissingGlobal(&'static str),
     MissingPointerCapability,
@@ -34,6 +35,7 @@ impl ShellHostError {
 impl fmt::Display for ShellHostError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Manifest(message) => write!(f, "shell manifest error: {message}"),
             Self::Wayland(message) => write!(f, "Wayland error: {message}"),
             Self::MissingGlobal(interface) => {
                 write!(f, "required Wayland global `{interface}` is unavailable")

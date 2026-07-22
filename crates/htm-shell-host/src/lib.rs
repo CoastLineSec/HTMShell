@@ -6,14 +6,26 @@
 mod buffer;
 mod error;
 mod lifecycle;
+mod manifest;
+mod output;
 mod pixel;
 mod scheduler;
 mod wayland;
 
+#[cfg(test)]
+mod session_model;
+
 pub use error::ShellHostError;
+pub use manifest::{
+    ManifestMeasurements, OutputScope, OverlayTemplate, PanelEdge, PanelTemplate, ShellManifest,
+    SurfaceKind, SurfacePreset, SurfaceTemplate, ValidatedManifest,
+};
+pub use output::{OutputCatalog, OutputEligibility, OutputKey, OutputRecord};
 pub use pixel::{Argb8888Layout, convert_premultiplied_rgba_to_argb8888};
 pub use scheduler::{FrameScheduler, ScheduleDecision};
 pub use wayland::{
-    LiveHostOptions, LiveHostSummary, MultiSurfaceHostOptions, MultiSurfaceHostSummary,
-    SurfaceHostSummary, run_live_overlay, run_multi_surface_shell,
+    LiveHostOptions, LiveHostSummary, ManifestHostOptions, ManifestHostSummary,
+    ManifestOutputHostSummary, ManifestSurfaceHostSummary, MultiSurfaceHostOptions,
+    MultiSurfaceHostSummary, SurfaceHostSummary, run_live_overlay, run_manifest_shell,
+    run_multi_surface_shell,
 };

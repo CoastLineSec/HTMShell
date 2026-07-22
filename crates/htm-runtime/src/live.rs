@@ -118,6 +118,7 @@ impl LiveDocument {
     ) -> Result<Self, RuntimeError> {
         Self::load_inner(
             package.as_ref(),
+            Path::new(LiveDocumentKind::SingleOverlay.source_file()),
             LiveDocumentKind::SingleOverlay,
             logical_width,
             logical_height,
@@ -130,11 +131,34 @@ impl LiveDocument {
         logical_width: u32,
         logical_height: u32,
     ) -> Result<Self, RuntimeError> {
-        Self::load_inner(package.as_ref(), kind, logical_width, logical_height)
+        Self::load_inner(
+            package.as_ref(),
+            Path::new(kind.source_file()),
+            kind,
+            logical_width,
+            logical_height,
+        )
+    }
+
+    pub fn load_surface_document(
+        package: impl AsRef<Path>,
+        document: impl AsRef<Path>,
+        kind: LiveDocumentKind,
+        logical_width: u32,
+        logical_height: u32,
+    ) -> Result<Self, RuntimeError> {
+        Self::load_inner(
+            package.as_ref(),
+            document.as_ref(),
+            kind,
+            logical_width,
+            logical_height,
+        )
     }
 
     fn load_inner(
         package: &Path,
+        document: &Path,
         kind: LiveDocumentKind,
         logical_width: u32,
         logical_height: u32,
@@ -150,7 +174,29 @@ impl LiveDocument {
                 package_root.display()
             )));
         }
-        let source = package_root.join(kind.source_file());
+        if document.is_absolute()
+            || document.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(RuntimeError::InvalidPackage(
+                "live document must be a package-relative path".into(),
+            ));
+        }
+        let source = package_root
+            .join(document)
+            .canonicalize()
+            .map_err(|error| RuntimeError::io("resolve live document", document, error))?;
+        if !source.starts_with(&package_root) {
+            return Err(RuntimeError::InvalidPackage(
+                "live document resolves outside the package directory".into(),
+            ));
+        }
         let metadata = source
             .metadata()
             .map_err(|error| RuntimeError::io("inspect live document", &source, error))?;
@@ -455,6 +501,37 @@ impl LiveDocument {
         Ok(true)
     }
 
+    pub fn set_instance_context(
+        &mut self,
+        template_id: &str,
+        output_label: &str,
+    ) -> Result<bool, RuntimeError> {
+        if self.kind == LiveDocumentKind::SingleOverlay {
+            return Err(RuntimeError::InvalidMutationTarget(
+                "instance context is only available to multi-surface fixtures".into(),
+            ));
+        }
+        let mut changed = false;
+        for (selector, value) in [
+            ("#surface-id-label", template_id),
+            ("#output-label", output_label),
+        ] {
+            if self
+                .document
+                .query_selector(selector)
+                .map_err(|error| RuntimeError::InvalidMutationTarget(format!("{error:?}")))?
+                .is_some()
+            {
+                self.set_text(selector, value)?;
+                changed = true;
+            }
+        }
+        if changed {
+            self.resolve();
+        }
+        Ok(changed)
+    }
+
     fn apply_click_mutation(&mut self) -> Result<(), RuntimeError> {
         self.set_text(
             "#status-label",
@@ -707,6 +784,10 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/two-surface-shell")
     }
 
+    fn manifest_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/multi-output-shell")
+    }
+
     fn click_action(live: &mut LiveDocument, bounds: &LogicalRect) -> LiveAction {
         let x = f64::from(bounds.x + bounds.width / 2.0);
         let y = f64::from(bounds.y + bounds.height / 2.0);
@@ -852,6 +933,52 @@ mod tests {
         assert_ne!(
             panel_snapshot.document_identity,
             overlay_snapshot.document_identity
+        );
+    }
+
+    #[test]
+    fn custom_surface_documents_are_independent_and_contextualized() {
+        let mut first = LiveDocument::load_surface_document(
+            manifest_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            52,
+        )
+        .unwrap();
+        let mut second = LiveDocument::load_surface_document(
+            manifest_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            52,
+        )
+        .unwrap();
+        first.set_instance_context("panel", "output-a").unwrap();
+        second.set_instance_context("panel", "output-b").unwrap();
+        first.update_panel_state(true, "output A opened").unwrap();
+        let first_snapshot = first.snapshot().unwrap();
+        let second_snapshot = second.snapshot().unwrap();
+        assert_eq!(first_snapshot.document_parse_count, 1);
+        assert_eq!(second_snapshot.document_parse_count, 1);
+        assert_ne!(
+            first_snapshot.document_identity,
+            second_snapshot.document_identity
+        );
+        assert_eq!(second_snapshot.interaction.click_count, 0);
+    }
+
+    #[test]
+    fn custom_document_path_cannot_escape_package() {
+        assert!(
+            LiveDocument::load_surface_document(
+                manifest_fixture(),
+                "../two-surface-shell/panel.html",
+                LiveDocumentKind::Panel,
+                1280,
+                52,
+            )
+            .is_err()
         );
     }
 }

@@ -71,8 +71,11 @@ The project has demonstrated:
 * Semantic compositor-controlled shell placement
 * An experimental live layer-shell presentation path using shared-memory buffers
 * One portable host process managing independent panel and overlay layer surfaces
+* A validated local surface manifest expanded into independent instances for each eligible output
+* Generation-safe output addition and removal through standard Wayland registry events
 
-HTMShell is not yet a usable desktop shell, and no stable release is available.
+The portable live profile currently supports integer scale 1. HTMShell is not
+yet a usable desktop shell, and no stable release is available.
 
 ## Non-goals
 

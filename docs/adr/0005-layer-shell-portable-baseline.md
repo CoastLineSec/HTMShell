@@ -47,9 +47,25 @@ small shared host-state model without sharing presentation ownership.
 The panel uses the top layer, top/left/right anchors, and an exclusive zone
 equal to its configured height. The overlay uses the overlay layer, all four
 anchors, and no exclusive zone. Closing the overlay unmaps its normal Wayland
-surface while retaining its parsed document for a later remap.
+surface while retaining its parsed document for a later remap. Manifest-driven
+overlays release their transient Wayland role after the null-buffer unmap and
+create a fresh role when reopened; document identity remains unchanged.
 
-Backgrounds, notifications, and multi-output policy remain deferred.
+Portable surfaces are defined by a validated local JSON manifest. Version 1
+contains one top-panel template and one transient-overlay template. Each
+template expands independently for every eligible scale-1 output.
+
+Output identity is runtime-scoped. A registry global and local generation own
+each output instance; output names and descriptions are diagnostics, not
+persistent configuration identifiers. Each output owns independent parsed
+documents, Wayland objects, buffers, callbacks, pointer state, input regions,
+and host-controlled overlay state. Output addition creates only the missing
+instance group. Output removal destroys only that generation, reclaims its
+resource budget, and leaves other outputs active. A process with no eligible
+outputs remains connected and idle until an output appears.
+
+Backgrounds, notifications, persistent monitor selection, and cross-output
+state policy remain deferred.
 
 ## Enhanced compositor integration
 
@@ -89,8 +105,10 @@ Costs and limitations:
 - layer shell cannot express every originally envisioned scene relationship;
 - `wl_shm` adds CPU conversion and memory-copy cost;
 - a full-output overlay requires a carefully bounded input region;
-- this profile implements one output with a panel and one transient overlay;
+- each eligible output receives its own panel and transient-overlay instances;
 - every layer surface has an independent buffer pool and frame scheduler;
+- aggregate shared-memory use is bounded across the process as well as within
+  each pool;
 - installed font and CPU-renderer behavior still affect pixels;
 - scale 1 is the only completed presentation profile.
 
@@ -109,6 +127,11 @@ Costs and limitations:
 - The panel exclusive zone and overlay click-through region follow layer-shell
   semantics without compositor-specific policy.
 - Opening and closing the overlay retains both parse-once documents.
+- A validated manifest expands stable surface template IDs per eligible output.
+- Output generations prevent stale callbacks, releases, and pointer state from
+  aliasing recreated instances.
+- Output addition and removal do not reconstruct unrelated documents.
+- Output names remain diagnostic and no persistent monitor selector is implied.
 - The experimental compositor contract and prior tests remain intact.
 - Public documentation describes the contract as optional enhanced integration.
 
@@ -122,10 +145,10 @@ separate runtime behavior for individual compositors.
 ## Final decision
 
 ```text
-CONTINUE WITH NARROWER LAYER-SHELL PROFILE
+CONTINUE WITH NARROWER MANIFEST PROFILE
 ```
 
-Scale-1 layer-shell presentation, including independent panel and transient
-overlay surfaces in one process, satisfies the portable baseline requirements.
-Fractional-scale presentation and multi-output policy remain deferred and must
+Scale-1 layer-shell presentation now includes manifest-driven, independently
+owned panel and overlay instances across live outputs. Fractional-scale
+presentation and persistent output-selection policy remain deferred and must
 be validated before the profile is broadened.
