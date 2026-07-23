@@ -7,8 +7,9 @@ publish.workspace = true
 
 [dependencies]
 htm-runtime = { path = "../htm-runtime" }
+jiff.workspace = true
 memmap2.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["event", "time"] }
 serde.workspace = true
 serde_json.workspace = true
 wayland-client.workspace = true

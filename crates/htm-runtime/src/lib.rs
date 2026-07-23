@@ -18,7 +18,7 @@ mod stylesheet;
 pub use adapter::{run_package, run_package_with_options};
 pub use builtin::{
     BindingUpdate, BuiltInElementKind, BuiltInElementSummary, ElementDeclaration,
-    ElementInstanceId, ShellAction, StateBindingKey, built_in_registry_names,
+    ElementInstanceId, ShellAction, StateBindingKey, StateBindingScope, built_in_registry_names,
 };
 pub use error::RuntimeError;
 pub use incremental::{

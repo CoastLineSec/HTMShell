@@ -35,6 +35,7 @@ impl BuiltInElementKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StateBindingKey {
+    ClockTime,
     OutputLabel,
     OutputScale,
     SurfaceTemplateId,
@@ -44,7 +45,8 @@ pub enum StateBindingKey {
 }
 
 impl StateBindingKey {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
+        Self::ClockTime,
         Self::OutputLabel,
         Self::OutputScale,
         Self::SurfaceTemplateId,
@@ -55,12 +57,25 @@ impl StateBindingKey {
 
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::ClockTime => "clock.time",
             Self::OutputLabel => "output.label",
             Self::OutputScale => "output.scale",
             Self::SurfaceTemplateId => "surface.template_id",
             Self::OverlayStatus => "overlay.status",
             Self::OverlayActivationCount => "overlay.activation_count",
             Self::ShellLastAction => "shell.last_action",
+        }
+    }
+
+    pub const fn scope(self) -> StateBindingScope {
+        match self {
+            Self::ClockTime => StateBindingScope::Process,
+            Self::OutputLabel
+            | Self::OutputScale
+            | Self::OverlayStatus
+            | Self::OverlayActivationCount
+            | Self::ShellLastAction => StateBindingScope::Output,
+            Self::SurfaceTemplateId => StateBindingScope::Surface,
         }
     }
 }
@@ -70,6 +85,7 @@ impl std::str::FromStr for StateBindingKey {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
+            "clock.time" => Ok(Self::ClockTime),
             "output.label" => Ok(Self::OutputLabel),
             "output.scale" => Ok(Self::OutputScale),
             "surface.template_id" => Ok(Self::SurfaceTemplateId),
@@ -79,6 +95,13 @@ impl std::str::FromStr for StateBindingKey {
             _ => Err(()),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StateBindingScope {
+    Process,
+    Output,
+    Surface,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -572,6 +595,7 @@ mod tests {
         assert_eq!(
             StateBindingKey::ALL.map(StateBindingKey::as_str),
             [
+                "clock.time",
                 "output.label",
                 "output.scale",
                 "surface.template_id",
@@ -587,6 +611,18 @@ mod tests {
         for key in StateBindingKey::ALL {
             assert_eq!(key.as_str().parse::<StateBindingKey>(), Ok(key));
         }
+        assert_eq!(
+            StateBindingKey::ClockTime.scope(),
+            StateBindingScope::Process
+        );
+        assert_eq!(
+            StateBindingKey::OutputLabel.scope(),
+            StateBindingScope::Output
+        );
+        assert_eq!(
+            StateBindingKey::SurfaceTemplateId.scope(),
+            StateBindingScope::Surface
+        );
         assert!("unknown.key".parse::<StateBindingKey>().is_err());
         for action in ShellAction::ALL {
             assert_eq!(action.as_str().parse::<ShellAction>(), Ok(action));
@@ -619,6 +655,22 @@ mod tests {
             index.element("toggle").unwrap().action,
             Some(ShellAction::OverlayToggle)
         );
+    }
+
+    #[test]
+    fn process_clock_bindings_share_the_existing_state_text_kind() {
+        let index = discover(
+            r#"<span id="clock-a" data-htm-element="state-text" data-htm-bind="clock.time"></span>
+               <output id="clock-b" data-htm-element="state-text" data-htm-bind="clock.time"></output>"#,
+            BuiltInSurfaceKind::Panel,
+        )
+        .unwrap();
+        assert_eq!(index.binding_targets(StateBindingKey::ClockTime).len(), 2);
+        assert_eq!(
+            index.element("clock-a").unwrap().kind,
+            BuiltInElementKind::StateText
+        );
+        assert_eq!(built_in_registry_names().len(), 2);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! document through standard Wayland objects and wlr layer shell.
 
 mod buffer;
+mod clock;
 mod error;
 mod lifecycle;
 mod manifest;
@@ -16,6 +17,7 @@ mod wayland;
 #[cfg(test)]
 mod session_model;
 
+pub use clock::ClockServiceSummary;
 pub use error::ShellHostError;
 pub use manifest::{
     ManifestMeasurements, OutputScope, OverlayTemplate, PanelEdge, PanelTemplate, ShellManifest,

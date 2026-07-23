@@ -594,6 +594,10 @@ impl LiveDocument {
         !self.builtins.is_empty()
     }
 
+    pub fn binding_target_count(&self, key: StateBindingKey) -> usize {
+        self.builtins.binding_targets(key).len()
+    }
+
     pub fn element_identity(&self, html_id: &str) -> Result<ElementInstanceId, RuntimeError> {
         self.builtins
             .element(html_id)
@@ -1146,6 +1150,10 @@ mod tests {
 
     fn built_in_fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/built-in-panel")
+    }
+
+    fn clock_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/clock-panel")
     }
 
     fn binding_values(
@@ -1718,5 +1726,67 @@ mod tests {
         assert_eq!(snapshot.document_parse_count, 1);
         assert_eq!(snapshot.interaction.click_count, 50);
         assert_eq!(overlay.measurements().registry_scan_count, 1);
+    }
+
+    #[test]
+    fn clock_binding_updates_incrementally_without_rescan_or_identity_change() {
+        let mut panel = LiveDocument::load_surface_document(
+            clock_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            58,
+        )
+        .unwrap();
+        let document = panel.snapshot().unwrap().document_identity;
+        let element = panel.element_identity("clock").unwrap();
+        assert_eq!(panel.binding_target_count(StateBindingKey::ClockTime), 1);
+        let first = panel
+            .apply_bound_text(&[(StateBindingKey::ClockTime, "09:07".into())])
+            .unwrap();
+        assert_eq!(first.changed_elements, 1);
+        assert_eq!(panel.element_text("clock").unwrap(), "09:07");
+        let duplicate = panel
+            .apply_bound_text(&[(StateBindingKey::ClockTime, "09:07".into())])
+            .unwrap();
+        assert_eq!(duplicate.changed_elements, 0);
+        assert_eq!(duplicate.suppressed_keys, 1);
+        panel.set_viewport(1600, 58).unwrap();
+        panel
+            .render_for(LiveRenderRequest::new(1600, 58, 180).unwrap())
+            .unwrap();
+        panel
+            .apply_bound_text(&[(StateBindingKey::ClockTime, "09:08".into())])
+            .unwrap();
+        assert_eq!(panel.snapshot().unwrap().document_identity, document);
+        assert_eq!(panel.element_identity("clock").unwrap(), element);
+        assert_eq!(panel.snapshot().unwrap().document_parse_count, 1);
+        assert_eq!(panel.measurements().registry_scan_count, 1);
+    }
+
+    #[test]
+    fn clock_update_does_not_dispatch_or_cancel_a_valid_pending_button() {
+        let mut panel = LiveDocument::load_surface_document(
+            clock_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            58,
+        )
+        .unwrap();
+        let toggle = panel.element_bounds("overlay-toggle").unwrap();
+        let x = f64::from(toggle.x + toggle.width / 2.0);
+        let y = f64::from(toggle.y + toggle.height / 2.0);
+        assert!(panel.pointer_move(x, y).unwrap());
+        assert!(panel.pointer_primary(true).unwrap());
+        assert_eq!(panel.take_action(), None);
+        panel
+            .apply_bound_text(&[(StateBindingKey::ClockTime, "17:42".into())])
+            .unwrap();
+        assert_eq!(panel.take_action(), None);
+        assert!(panel.pointer_primary(false).unwrap());
+        assert_eq!(panel.take_action(), Some(LiveAction::ToggleOverlay));
+        assert_eq!(panel.snapshot().unwrap().document_parse_count, 1);
+        assert_eq!(panel.measurements().registry_scan_count, 1);
     }
 }

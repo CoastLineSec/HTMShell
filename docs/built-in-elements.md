@@ -35,6 +35,7 @@ Supported binding keys are:
 
 | Key | Value supplied by the host |
 | --- | --- |
+| `clock.time` | Process-scoped local time in fixed zero-padded `HH:mm` form |
 | `output.label` | Session-local output diagnostic label |
 | `output.scale` | Effective compositor-provided presentation scale |
 | `surface.template_id` | Manifest surface-template ID |
@@ -45,6 +46,30 @@ Supported binding keys are:
 Output labels are diagnostics, not persistent output identities. All values
 are final strings supplied by the host; dotted keys are fixed enum values, not
 arbitrary property paths.
+
+### Clock state
+
+`clock.time` is the first service-backed state key. It uses the existing
+`state-text` element:
+
+```html
+<span
+  id="clock"
+  data-htm-element="state-text"
+  data-htm-bind="clock.time">
+</span>
+```
+
+One process-level scheduler samples local civil time and publishes one
+immutable display value to every document that binds this key. It updates at
+the next visible minute change and remains blocked between deadlines; there is
+no timer per output, surface, or element. The format is fixed to zero-padded
+24-hour `HH:mm`. Seconds, custom format strings, and author-created timers are
+not supported.
+
+If the system time zone cannot be discovered, the host uses UTC and reports
+that fallback diagnostically. Live time-zone reconfiguration remains
+experimental and is not guaranteed.
 
 ## Action button
 
@@ -103,6 +128,6 @@ tag, ID, class, attribute, `:hover`, `:active`, and `[disabled]` CSS selectors.
 Layout and hit geometry remain logical at scale 1 and fractional scales.
 
 The current model has no JavaScript, expressions, templates, dynamic
-components, event propagation framework, timers, services, component packages,
-or user-defined registry entries. It is a narrow static shell-composition
-experiment, not a general widget system.
+components, event propagation framework, author-defined timers, service
+plugins, component packages, or user-defined registry entries. The clock is a
+narrow native state source, not a general service or widget framework.

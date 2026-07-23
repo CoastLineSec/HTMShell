@@ -10,6 +10,7 @@ pub enum ShellHostError {
     UnsupportedShmFormat,
     InvalidDimensions(String),
     Buffer(String),
+    Clock(String),
     Runtime(htm_runtime::RuntimeError),
     Io {
         operation: &'static str,
@@ -48,6 +49,7 @@ impl fmt::Display for ShellHostError {
             }
             Self::InvalidDimensions(message) => write!(f, "invalid surface dimensions: {message}"),
             Self::Buffer(message) => write!(f, "shared-memory buffer error: {message}"),
+            Self::Clock(message) => write!(f, "clock service error: {message}"),
             Self::Runtime(error) => write!(f, "HTMShell runtime error: {error}"),
             Self::Io {
                 operation,

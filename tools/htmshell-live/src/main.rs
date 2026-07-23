@@ -108,6 +108,7 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     let mut exit_after_output_events = None;
     let mut exit_after_actions = None;
     let mut exit_after_scale_changes = None;
+    let mut exit_after_clock_updates = None;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--validate-only" => validate_only = true,
@@ -133,6 +134,13 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
                         .parse::<u64>()?,
                 );
             }
+            "--exit-after-clock-updates" => {
+                exit_after_clock_updates = Some(
+                    args.next()
+                        .ok_or("--exit-after-clock-updates requires a positive integer")?
+                        .parse::<u64>()?,
+                );
+            }
             _ => return Err(format!("unknown manifest argument: {argument}").into()),
         }
     }
@@ -144,6 +152,9 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     }
     if exit_after_scale_changes == Some(0) {
         return Err("--exit-after-scale-changes must be positive".into());
+    }
+    if exit_after_clock_updates == Some(0) {
+        return Err("--exit-after-clock-updates must be positive".into());
     }
     let manifest = ValidatedManifest::load(&path)?;
     if validate_only {
@@ -169,6 +180,7 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
         exit_after_output_events,
         exit_after_actions,
         exit_after_scale_changes,
+        exit_after_clock_updates,
     })?;
     println!("manifest_live_result=success");
     println!("manifest_id={}", summary.manifest_id);
@@ -351,6 +363,69 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
         summary.last_output_teardown_us
     );
     println!("actions={}", summary.actions);
+    println!("clock_format={}", summary.clock.format);
+    println!("clock_effective_zone={}", summary.clock.effective_zone);
+    println!("clock_utc_fallbacks={}", summary.clock.utc_fallbacks);
+    println!(
+        "clock_initialization_us={}",
+        summary.clock.initialization_us
+    );
+    println!("clock_last_sample_us={}", summary.clock.last_sample_us);
+    println!("clock_last_timezone_us={}", summary.clock.last_timezone_us);
+    println!("clock_last_format_us={}", summary.clock.last_format_us);
+    println!("clock_last_deadline_us={}", summary.clock.last_deadline_us);
+    println!(
+        "clock_last_timer_arm_us={}",
+        summary.clock.last_timer_arm_us
+    );
+    println!("clock_wakeups={}", summary.clock.wakeups);
+    println!("clock_expirations={}", summary.clock.expirations);
+    println!("clock_changed_values={}", summary.clock.changed_values);
+    println!(
+        "clock_unchanged_values_suppressed={}",
+        summary.clock.unchanged_values_suppressed
+    );
+    println!(
+        "clock_wall_clock_resets={}",
+        summary.clock.wall_clock_resets
+    );
+    println!("clock_subscribers={}", summary.clock.subscribers);
+    println!(
+        "clock_maximum_subscribers={}",
+        summary.clock.maximum_subscribers
+    );
+    println!(
+        "clock_timer_descriptors={}",
+        summary.clock.timer_descriptors
+    );
+    println!("clock_generation={}", summary.clock.generation);
+    println!("clock_sequence={}", summary.clock.sequence);
+    println!(
+        "clock_sampled_unix_seconds={}",
+        summary.clock.sampled_unix_seconds
+    );
+    println!(
+        "clock_documents_visited={}",
+        summary.clock.documents_visited
+    );
+    println!("clock_elements_mutated={}", summary.clock.elements_mutated);
+    println!("clock_fanout_us={}", summary.clock.fanout_us);
+    println!(
+        "clock_panel_frames_scheduled={}",
+        summary.clock.panel_frames_scheduled
+    );
+    println!(
+        "clock_unrelated_frames_scheduled={}",
+        summary.clock.unrelated_frames_scheduled
+    );
+    println!(
+        "clock_closed_surface_frames_suppressed={}",
+        summary.clock.closed_surface_frames_suppressed
+    );
+    println!(
+        "clock_mutation_failures_contained={}",
+        summary.clock.mutation_failures_contained
+    );
     Ok(())
 }
 

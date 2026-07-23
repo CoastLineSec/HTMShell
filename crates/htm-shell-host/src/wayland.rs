@@ -1,5 +1,6 @@
 use crate::ShellHostError;
 use crate::buffer::{BufferData, BufferPoolStats, ShmBufferPool};
+use crate::clock::{ClockService, ClockServiceSummary, ClockSnapshot};
 use crate::lifecycle::LayerLifecycle;
 use crate::manifest::{SurfaceKind as ManifestSurfaceKind, ValidatedManifest};
 use crate::output::{OutputCatalog, OutputEligibility, OutputKey};
@@ -8,10 +9,13 @@ use crate::scheduler::{FrameScheduler, ScheduleDecision};
 use htm_runtime::{
     LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind, LiveFrame, StateBindingKey,
 };
+use rustix::event::{PollFd, PollFlags, poll};
 use std::path::PathBuf;
 use std::time::Instant;
 use wayland_client::{
-    Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop,
+    Connection, Dispatch, Proxy, QueueHandle, WEnum,
+    backend::WaylandError,
+    delegate_noop,
     protocol::{
         wl_buffer, wl_callback, wl_compositor, wl_output, wl_pointer, wl_region, wl_registry,
         wl_seat, wl_shm, wl_shm_pool, wl_surface,
@@ -106,6 +110,7 @@ pub struct ManifestHostOptions {
     pub exit_after_output_events: Option<u64>,
     pub exit_after_actions: Option<u64>,
     pub exit_after_scale_changes: Option<u64>,
+    pub exit_after_clock_updates: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -216,6 +221,7 @@ pub struct ManifestHostSummary {
     pub first_output_instance_us: u64,
     pub last_output_teardown_us: u64,
     pub actions: u64,
+    pub clock: ClockServiceSummary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -533,6 +539,7 @@ struct State {
     last_overlay_close_latency_us: u64,
     combined_mapped_memory_peak: usize,
     failure: Option<String>,
+    clock: ClockService,
 }
 
 impl State {
@@ -598,6 +605,7 @@ impl State {
             last_overlay_close_latency_us: 0,
             combined_mapped_memory_peak: 0,
             failure: None,
+            clock: ClockService::default(),
         }
     }
 
@@ -1127,6 +1135,10 @@ impl State {
         self.peak_runtime_documents = self
             .peak_runtime_documents
             .max(self.output_instances.len().saturating_mul(2));
+        if let Err(error) = self.reconcile_clock_subscribers() {
+            self.destroy_output_instance(key);
+            return Err(error);
+        }
         self.maybe_stop_after_output_events();
         Ok(())
     }
@@ -1162,6 +1174,100 @@ impl State {
         self.destroy_surface_owner(instance.overlay_owner);
         self.destroy_surface_owner(instance.panel_owner);
         self.last_output_teardown_us = elapsed_us(started);
+        if let Err(error) = self.reconcile_clock_subscribers() {
+            self.fail(format!("clock subscription teardown failed: {error}"));
+        }
+    }
+
+    fn clock_subscriber_count(&self) -> usize {
+        self.surfaces
+            .iter()
+            .filter(|surface| {
+                surface.runtime.as_ref().is_some_and(|runtime| {
+                    runtime.binding_target_count(StateBindingKey::ClockTime) > 0
+                })
+            })
+            .count()
+    }
+
+    fn reconcile_clock_subscribers(&mut self) -> Result<(), ShellHostError> {
+        let subscribers = self.clock_subscriber_count();
+        let previous = self.clock.subscriber_count();
+        let initial = self
+            .clock
+            .set_subscriber_count(subscribers)
+            .map_err(|error| ShellHostError::Clock(error.to_string()))?;
+        if subscribers > previous {
+            let snapshot = initial.or_else(|| self.clock.current_snapshot().cloned());
+            if let Some(snapshot) = snapshot {
+                self.fanout_clock_snapshot(&snapshot);
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_clock_ready(&mut self) -> Result<(), ShellHostError> {
+        let snapshot = self
+            .clock
+            .handle_ready()
+            .map_err(|error| ShellHostError::Clock(error.to_string()))?;
+        if let Some(snapshot) = snapshot {
+            self.fanout_clock_snapshot(&snapshot);
+        }
+        self.maybe_stop_after_clock_updates();
+        Ok(())
+    }
+
+    fn fanout_clock_snapshot(&mut self, snapshot: &ClockSnapshot) {
+        let started = Instant::now();
+        let mut documents = 0usize;
+        let mut elements = 0usize;
+        let mut panel_frames = 0usize;
+        let mut closed_frames_suppressed = 0usize;
+        let mut failures = 0usize;
+        for surface in &mut self.surfaces {
+            let Some(runtime) = surface.runtime.as_mut() else {
+                continue;
+            };
+            if runtime.binding_target_count(StateBindingKey::ClockTime) == 0 {
+                continue;
+            }
+            documents = documents.saturating_add(1);
+            let values = [(StateBindingKey::ClockTime, snapshot.display_text.clone())];
+            match runtime.apply_bound_text(&values) {
+                Ok(update) => {
+                    elements = elements.saturating_add(update.changed_elements);
+                    if update.changed_elements > 0 {
+                        if surface.desired_mapped {
+                            surface
+                                .pending_binding_mutation_started
+                                .get_or_insert_with(Instant::now);
+                            surface.scheduler.mark_dirty();
+                            if surface.kind == SurfaceKind::Panel {
+                                panel_frames = panel_frames.saturating_add(1);
+                            }
+                        } else {
+                            closed_frames_suppressed = closed_frames_suppressed.saturating_add(1);
+                        }
+                    }
+                }
+                Err(error) => {
+                    failures = failures.saturating_add(1);
+                    eprintln!(
+                        "htmshell-live: clock binding update for surface {} was contained: {error}",
+                        surface.owner
+                    );
+                }
+            }
+        }
+        self.clock.record_fanout(
+            documents,
+            elements,
+            panel_frames,
+            closed_frames_suppressed,
+            failures,
+            elapsed_us(started),
+        );
     }
 
     fn destroy_surface_owner(&mut self, owner: u64) {
@@ -1672,6 +1778,22 @@ impl State {
         }
     }
 
+    fn maybe_stop_after_clock_updates(&mut self) {
+        let target = match &self.options {
+            SessionOptions::Manifest(options) => options.exit_after_clock_updates,
+            _ => None,
+        };
+        let changed_values = self.clock.summary().changed_values;
+        if target.is_some_and(|target| {
+            changed_values >= target
+                && self.surfaces.iter().all(|surface| {
+                    !surface.scheduler.dirty() && !surface.scheduler.frame_callback_outstanding()
+                })
+        }) {
+            self.running = false;
+        }
+    }
+
     fn open_manifest_overlay(
         &mut self,
         group_index: usize,
@@ -2038,6 +2160,7 @@ impl State {
         self.maybe_stop_after_output_events();
         self.maybe_stop_after_manifest_actions();
         self.maybe_stop_after_manifest_scale_changes();
+        self.maybe_stop_after_clock_updates();
     }
 
     fn on_buffer_release(&mut self, owner: u64, id: u64) {
@@ -2090,6 +2213,9 @@ impl State {
     }
 
     fn begin_shutdown(&mut self) {
+        if let Err(error) = self.clock.shutdown() {
+            self.fail(format!("clock shutdown failed: {error}"));
+        }
         self.clear_pointer_focus();
         for surface in &mut self.surfaces {
             if surface.mapped || surface.desired_mapped {
@@ -2346,6 +2472,7 @@ impl State {
             first_output_instance_us: self.first_output_instance_us,
             last_output_teardown_us: self.last_output_teardown_us,
             actions: self.manifest_actions,
+            clock: self.clock.summary(),
         }
     }
 }
@@ -2385,9 +2512,6 @@ fn run_session(options: SessionOptions) -> Result<State, ShellHostError> {
     connection.flush().map_err(ShellHostError::wayland)?;
 
     while state.running {
-        event_queue
-            .blocking_dispatch(&mut state)
-            .map_err(ShellHostError::wayland)?;
         while event_queue
             .dispatch_pending(&mut state)
             .map_err(ShellHostError::wayland)?
@@ -2407,6 +2531,9 @@ fn run_session(options: SessionOptions) -> Result<State, ShellHostError> {
             {
                 state.running = false;
             }
+        }
+        if state.running {
+            wait_for_wayland_or_clock(&mut event_queue, &mut state)?;
         }
     }
 
@@ -2430,6 +2557,81 @@ fn run_session(options: SessionOptions) -> Result<State, ShellHostError> {
     } else {
         Ok(state)
     }
+}
+
+fn wait_for_wayland_or_clock(
+    event_queue: &mut wayland_client::EventQueue<State>,
+    state: &mut State,
+) -> Result<(), ShellHostError> {
+    let Some(read_guard) = event_queue.prepare_read() else {
+        return Ok(());
+    };
+    let wayland_fd = read_guard.connection_fd();
+    let timer_fd = state.clock.poll_fd();
+    let mut descriptors = Vec::with_capacity(if timer_fd.is_some() { 2 } else { 1 });
+    descriptors.push(PollFd::from_borrowed_fd(
+        wayland_fd,
+        PollFlags::IN | PollFlags::ERR | PollFlags::HUP,
+    ));
+    if let Some(timer_fd) = timer_fd {
+        descriptors.push(PollFd::from_borrowed_fd(
+            timer_fd,
+            PollFlags::IN | PollFlags::ERR | PollFlags::HUP,
+        ));
+    }
+    match poll(&mut descriptors, None) {
+        Ok(_) => {}
+        Err(error) if error == rustix::io::Errno::INTR => {
+            drop(descriptors);
+            drop(read_guard);
+            return Ok(());
+        }
+        Err(error) => {
+            drop(descriptors);
+            drop(read_guard);
+            return Err(ShellHostError::Clock(format!(
+                "poll Wayland and clock descriptors: {error}"
+            )));
+        }
+    }
+    let wayland_events = descriptors[0].revents();
+    let timer_events = descriptors.get(1).map(PollFd::revents);
+    drop(descriptors);
+
+    let (wayland_ready, timer_ready) =
+        classify_poll_readiness(wayland_events, timer_events).map_err(ShellHostError::Clock)?;
+    if wayland_ready {
+        match read_guard.read() {
+            Ok(_) => {}
+            Err(WaylandError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(ShellHostError::wayland(error)),
+        }
+    } else {
+        drop(read_guard);
+    }
+
+    if timer_ready {
+        state.handle_clock_ready()?;
+    }
+    Ok(())
+}
+
+fn classify_poll_readiness(
+    wayland: PollFlags,
+    timer: Option<PollFlags>,
+) -> Result<(bool, bool), String> {
+    if wayland.intersects(PollFlags::NVAL) {
+        return Err("Wayland descriptor became invalid".into());
+    }
+    if timer.is_some_and(|events| events.intersects(PollFlags::NVAL)) {
+        return Err("clock timer descriptor became invalid".into());
+    }
+    Ok((
+        wayland.intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP),
+        timer.is_some_and(|events| {
+            events.intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP)
+        }),
+    ))
 }
 
 fn update_input_region(
@@ -3043,10 +3245,32 @@ mod tests {
     }
 
     #[test]
+    fn poll_readiness_keeps_wayland_and_clock_sources_independent() {
+        assert_eq!(
+            classify_poll_readiness(PollFlags::IN, None).unwrap(),
+            (true, false)
+        );
+        assert_eq!(
+            classify_poll_readiness(PollFlags::empty(), Some(PollFlags::IN)).unwrap(),
+            (false, true)
+        );
+        assert_eq!(
+            classify_poll_readiness(PollFlags::IN, Some(PollFlags::IN)).unwrap(),
+            (true, true)
+        );
+        assert_eq!(
+            classify_poll_readiness(PollFlags::empty(), Some(PollFlags::empty())).unwrap(),
+            (false, false)
+        );
+        assert!(classify_poll_readiness(PollFlags::NVAL, None).is_err());
+        assert!(classify_poll_readiness(PollFlags::empty(), Some(PollFlags::NVAL)).is_err());
+    }
+
+    #[test]
     fn built_in_display_values_are_typed_deterministic_and_output_local() {
         let a = built_in_binding_values("panel", "output-a", 192, true, 7, "Opened");
         let b = built_in_binding_values("panel", "output-b", 120, false, 0, "Ready");
-        assert_eq!(a.len(), StateBindingKey::ALL.len());
+        assert_eq!(a.len(), StateBindingKey::ALL.len() - 1);
         assert_eq!(
             a[0],
             (StateBindingKey::OutputLabel, "Output: output-a".into())

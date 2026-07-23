@@ -445,3 +445,165 @@ fn readded_output_does_not_inherit_scale_or_stale_generation() {
     assert_eq!(new_scale.preferred_numerator(), 120);
     assert_ne!(new_scale.surface_generation(), 0);
 }
+
+#[derive(Debug, Default)]
+struct ClockDocumentModel {
+    generation: u64,
+    bound: bool,
+    mapped: bool,
+    text: String,
+    mutations: u64,
+    frames: u64,
+}
+
+#[derive(Debug, Default)]
+struct ClockOutputModel {
+    panel: ClockDocumentModel,
+    overlay: ClockDocumentModel,
+}
+
+#[derive(Debug, Default)]
+struct ClockFanoutModel {
+    outputs: BTreeMap<OutputKey, ClockOutputModel>,
+    snapshot: Option<String>,
+    next_generation: u64,
+    samples: u64,
+    timer_descriptors: usize,
+    timer_armed: bool,
+}
+
+impl ClockFanoutModel {
+    fn add_output(&mut self, key: OutputKey) {
+        self.next_generation = self.next_generation.saturating_add(1);
+        let mut panel = ClockDocumentModel {
+            generation: self.next_generation,
+            bound: true,
+            mapped: true,
+            ..ClockDocumentModel::default()
+        };
+        self.next_generation = self.next_generation.saturating_add(1);
+        let overlay = ClockDocumentModel {
+            generation: self.next_generation,
+            ..ClockDocumentModel::default()
+        };
+        if self.timer_descriptors == 0 {
+            self.timer_descriptors = 1;
+        }
+        self.timer_armed = true;
+        if let Some(snapshot) = &self.snapshot {
+            panel.text.clone_from(snapshot);
+            panel.mutations = 1;
+            panel.frames = 1;
+        }
+        self.outputs
+            .insert(key, ClockOutputModel { panel, overlay });
+    }
+
+    fn remove_output(&mut self, key: OutputKey) {
+        self.outputs.remove(&key);
+        self.timer_armed = self
+            .outputs
+            .values()
+            .any(|output| output.panel.bound || output.overlay.bound);
+    }
+
+    fn publish(&mut self, value: &str) {
+        self.samples = self.samples.saturating_add(1);
+        if self.snapshot.as_deref() == Some(value) {
+            return;
+        }
+        self.snapshot = Some(value.into());
+        for output in self.outputs.values_mut() {
+            for document in [&mut output.panel, &mut output.overlay] {
+                if !document.bound || document.text == value {
+                    continue;
+                }
+                document.text = value.into();
+                document.mutations = document.mutations.saturating_add(1);
+                if document.mapped {
+                    document.frames = document.frames.saturating_add(1);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn one_clock_snapshot_fans_out_only_to_bound_documents() {
+    let mut clock = ClockFanoutModel::default();
+    let a = key(1, 1);
+    let b = key(2, 2);
+    clock.add_output(a);
+    clock.add_output(b);
+    clock.publish("09:07");
+    assert_eq!(clock.samples, 1);
+    assert_eq!(clock.timer_descriptors, 1);
+    assert_eq!(clock.outputs[&a].panel.text, "09:07");
+    assert_eq!(clock.outputs[&b].panel.text, "09:07");
+    assert_eq!(clock.outputs[&a].panel.frames, 1);
+    assert_eq!(clock.outputs[&b].panel.frames, 1);
+    assert_eq!(clock.outputs[&a].overlay.frames, 0);
+    assert_eq!(clock.outputs[&b].overlay.frames, 0);
+
+    clock.publish("09:07");
+    assert_eq!(clock.samples, 2);
+    assert_eq!(clock.outputs[&a].panel.frames, 1);
+    assert_eq!(clock.outputs[&b].panel.frames, 1);
+}
+
+#[test]
+fn clock_subscriptions_follow_output_generations_without_cross_output_state() {
+    let mut clock = ClockFanoutModel::default();
+    let old = key(1, 1);
+    let other = key(2, 2);
+    clock.add_output(old);
+    clock.add_output(other);
+    clock.publish("09:07");
+    let old_generation = clock.outputs[&old].panel.generation;
+    clock.remove_output(old);
+    clock.publish("09:08");
+    assert_eq!(clock.outputs[&other].panel.text, "09:08");
+    assert_eq!(clock.outputs[&other].panel.frames, 2);
+
+    let fresh = key(1, 3);
+    clock.add_output(fresh);
+    assert_eq!(clock.outputs[&fresh].panel.text, "09:08");
+    assert_eq!(clock.outputs[&fresh].panel.frames, 1);
+    assert_ne!(clock.outputs[&fresh].panel.generation, old_generation);
+    assert_eq!(clock.outputs[&other].panel.frames, 2);
+
+    clock.remove_output(other);
+    clock.remove_output(fresh);
+    assert!(!clock.timer_armed);
+}
+
+#[test]
+fn closed_clock_bound_document_mutates_without_scheduling_a_frame() {
+    let mut clock = ClockFanoutModel::default();
+    let output = key(1, 1);
+    clock.add_output(output);
+    clock.outputs.get_mut(&output).unwrap().overlay.bound = true;
+    clock.publish("17:42");
+    assert_eq!(clock.outputs[&output].overlay.mutations, 1);
+    assert_eq!(clock.outputs[&output].overlay.frames, 0);
+}
+
+#[test]
+fn twenty_five_clock_output_replacements_never_alias_subscriptions() {
+    let mut clock = ClockFanoutModel::default();
+    let mut generations = Vec::new();
+    for generation in 1..=25 {
+        let output = key(7, generation);
+        clock.add_output(output);
+        clock.publish(&format!("{:02}:{:02}", generation / 60, generation % 60));
+        generations.push(clock.outputs[&output].panel.generation);
+        clock.remove_output(output);
+        assert!(!clock.timer_armed);
+    }
+    let mut unique = generations.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), generations.len());
+    assert_eq!(clock.timer_descriptors, 1);
+    assert!(clock.outputs.is_empty());
+}

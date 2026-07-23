@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "clock-panel-demo",
+  "surfaces": [
+    {
+      "id": "panel",
+      "kind": "panel",
+      "document": "panel.html",
+      "outputs": "all",
+      "edge": "top",
+      "thickness": 58,
+      "reserveSpace": true
+    },
+    {
+      "id": "overlay",
+      "kind": "overlay",
+      "document": "overlay.html",
+      "outputs": "all",
+      "initiallyOpen": false
+    }
+  ]
+}
