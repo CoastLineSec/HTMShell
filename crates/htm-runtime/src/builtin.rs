@@ -40,6 +40,9 @@ impl BuiltInElementKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StateBindingKey {
     ClockTime,
+    BatteryPercentage,
+    BatteryStatus,
+    BatteryWarning,
     OutputLabel,
     OutputScale,
     SurfaceTemplateId,
@@ -50,8 +53,11 @@ pub enum StateBindingKey {
 }
 
 impl StateBindingKey {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 11] = [
         Self::ClockTime,
+        Self::BatteryPercentage,
+        Self::BatteryStatus,
+        Self::BatteryWarning,
         Self::OutputLabel,
         Self::OutputScale,
         Self::SurfaceTemplateId,
@@ -64,6 +70,9 @@ impl StateBindingKey {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ClockTime => "clock.time",
+            Self::BatteryPercentage => "battery.percentage",
+            Self::BatteryStatus => "battery.status",
+            Self::BatteryWarning => "battery.warning",
             Self::OutputLabel => "output.label",
             Self::OutputScale => "output.scale",
             Self::SurfaceTemplateId => "surface.template_id",
@@ -76,7 +85,10 @@ impl StateBindingKey {
 
     pub const fn scope(self) -> StateBindingScope {
         match self {
-            Self::ClockTime => StateBindingScope::Process,
+            Self::ClockTime
+            | Self::BatteryPercentage
+            | Self::BatteryStatus
+            | Self::BatteryWarning => StateBindingScope::Process,
             Self::OutputLabel
             | Self::OutputScale
             | Self::OverlayStatus
@@ -90,18 +102,21 @@ impl StateBindingKey {
         matches!(
             (self, kind),
             (
-                Self::OverlayStatus,
+                Self::OverlayStatus | Self::BatteryStatus,
                 StateValueKind::Text | StateValueKind::Token
-            ) | (Self::SurfaceScaleProfile, StateValueKind::Token)
-                | (
-                    Self::ClockTime
-                        | Self::OutputLabel
-                        | Self::OutputScale
-                        | Self::SurfaceTemplateId
-                        | Self::OverlayActivationCount
-                        | Self::ShellLastAction,
-                    StateValueKind::Text,
-                )
+            ) | (
+                Self::SurfaceScaleProfile | Self::BatteryWarning,
+                StateValueKind::Token
+            ) | (
+                Self::ClockTime
+                    | Self::BatteryPercentage
+                    | Self::OutputLabel
+                    | Self::OutputScale
+                    | Self::SurfaceTemplateId
+                    | Self::OverlayActivationCount
+                    | Self::ShellLastAction,
+                StateValueKind::Text,
+            )
         )
     }
 }
@@ -112,6 +127,9 @@ impl std::str::FromStr for StateBindingKey {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "clock.time" => Ok(Self::ClockTime),
+            "battery.percentage" => Ok(Self::BatteryPercentage),
+            "battery.status" => Ok(Self::BatteryStatus),
+            "battery.warning" => Ok(Self::BatteryWarning),
             "output.label" => Ok(Self::OutputLabel),
             "output.scale" => Ok(Self::OutputScale),
             "surface.template_id" => Ok(Self::SurfaceTemplateId),
@@ -143,10 +161,41 @@ pub enum StateToken {
     Closed,
     Scale1,
     Fractional,
+    Unavailable,
+    Absent,
+    Unknown,
+    Charging,
+    Discharging,
+    Empty,
+    Full,
+    PendingCharge,
+    PendingDischarge,
+    None,
+    Low,
+    Critical,
+    Action,
 }
 
 impl StateToken {
-    pub const ALL: [Self; 4] = [Self::Open, Self::Closed, Self::Scale1, Self::Fractional];
+    pub const ALL: [Self; 17] = [
+        Self::Open,
+        Self::Closed,
+        Self::Scale1,
+        Self::Fractional,
+        Self::Unavailable,
+        Self::Absent,
+        Self::Unknown,
+        Self::Charging,
+        Self::Discharging,
+        Self::Empty,
+        Self::Full,
+        Self::PendingCharge,
+        Self::PendingDischarge,
+        Self::None,
+        Self::Low,
+        Self::Critical,
+        Self::Action,
+    ];
 
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -154,6 +203,19 @@ impl StateToken {
             Self::Closed => "closed",
             Self::Scale1 => "scale-1",
             Self::Fractional => "fractional",
+            Self::Unavailable => "unavailable",
+            Self::Absent => "absent",
+            Self::Unknown => "unknown",
+            Self::Charging => "charging",
+            Self::Discharging => "discharging",
+            Self::Empty => "empty",
+            Self::Full => "full",
+            Self::PendingCharge => "pending-charge",
+            Self::PendingDischarge => "pending-discharge",
+            Self::None => "none",
+            Self::Low => "low",
+            Self::Critical => "critical",
+            Self::Action => "action",
         }
     }
 
@@ -164,6 +226,27 @@ impl StateToken {
                 | (
                     StateBindingKey::SurfaceScaleProfile,
                     Self::Scale1 | Self::Fractional
+                )
+                | (
+                    StateBindingKey::BatteryStatus,
+                    Self::Unavailable
+                        | Self::Absent
+                        | Self::Unknown
+                        | Self::Charging
+                        | Self::Discharging
+                        | Self::Empty
+                        | Self::Full
+                        | Self::PendingCharge
+                        | Self::PendingDischarge
+                )
+                | (
+                    StateBindingKey::BatteryWarning,
+                    Self::Unknown
+                        | Self::None
+                        | Self::Discharging
+                        | Self::Low
+                        | Self::Critical
+                        | Self::Action
                 )
         )
     }
@@ -747,6 +830,9 @@ mod tests {
             StateBindingKey::ALL.map(StateBindingKey::as_str),
             [
                 "clock.time",
+                "battery.percentage",
+                "battery.status",
+                "battery.warning",
                 "output.label",
                 "output.scale",
                 "surface.template_id",
@@ -767,6 +853,13 @@ mod tests {
             StateBindingKey::ClockTime.scope(),
             StateBindingScope::Process
         );
+        for key in [
+            StateBindingKey::BatteryPercentage,
+            StateBindingKey::BatteryStatus,
+            StateBindingKey::BatteryWarning,
+        ] {
+            assert_eq!(key.scope(), StateBindingScope::Process);
+        }
         assert_eq!(
             StateBindingKey::OutputLabel.scope(),
             StateBindingScope::Output
@@ -781,15 +874,64 @@ mod tests {
         );
         assert!(StateBindingKey::OverlayStatus.supports(StateValueKind::Text));
         assert!(StateBindingKey::OverlayStatus.supports(StateValueKind::Token));
+        assert!(StateBindingKey::BatteryPercentage.supports(StateValueKind::Text));
+        assert!(!StateBindingKey::BatteryPercentage.supports(StateValueKind::Token));
+        assert!(StateBindingKey::BatteryStatus.supports(StateValueKind::Text));
+        assert!(StateBindingKey::BatteryStatus.supports(StateValueKind::Token));
+        assert!(!StateBindingKey::BatteryWarning.supports(StateValueKind::Text));
+        assert!(StateBindingKey::BatteryWarning.supports(StateValueKind::Token));
         assert!(StateBindingKey::SurfaceScaleProfile.supports(StateValueKind::Token));
         assert!(!StateBindingKey::SurfaceScaleProfile.supports(StateValueKind::Text));
         assert!(!StateBindingKey::ClockTime.supports(StateValueKind::Token));
         assert_eq!(
             StateToken::ALL.map(StateToken::as_str),
-            ["open", "closed", "scale-1", "fractional"]
+            [
+                "open",
+                "closed",
+                "scale-1",
+                "fractional",
+                "unavailable",
+                "absent",
+                "unknown",
+                "charging",
+                "discharging",
+                "empty",
+                "full",
+                "pending-charge",
+                "pending-discharge",
+                "none",
+                "low",
+                "critical",
+                "action",
+            ]
         );
         assert!(StateToken::Open.valid_for(StateBindingKey::OverlayStatus));
         assert!(!StateToken::Open.valid_for(StateBindingKey::SurfaceScaleProfile));
+        for token in [
+            StateToken::Unavailable,
+            StateToken::Absent,
+            StateToken::Unknown,
+            StateToken::Charging,
+            StateToken::Discharging,
+            StateToken::Empty,
+            StateToken::Full,
+            StateToken::PendingCharge,
+            StateToken::PendingDischarge,
+        ] {
+            assert!(token.valid_for(StateBindingKey::BatteryStatus));
+        }
+        for token in [
+            StateToken::Unknown,
+            StateToken::None,
+            StateToken::Discharging,
+            StateToken::Low,
+            StateToken::Critical,
+            StateToken::Action,
+        ] {
+            assert!(token.valid_for(StateBindingKey::BatteryWarning));
+        }
+        assert!(!StateToken::Low.valid_for(StateBindingKey::BatteryStatus));
+        assert!(!StateToken::Charging.valid_for(StateBindingKey::BatteryWarning));
         assert!("unknown.key".parse::<StateBindingKey>().is_err());
         for action in ShellAction::ALL {
             assert_eq!(action.as_str().parse::<ShellAction>(), Ok(action));

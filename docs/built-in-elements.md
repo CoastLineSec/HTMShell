@@ -36,6 +36,8 @@ Supported binding keys are:
 | Key | Value supplied by the host |
 | --- | --- |
 | `clock.time` | Process-scoped local time in fixed zero-padded `HH:mm` form |
+| `battery.percentage` | Process-scoped aggregate percentage, or `—` when unknown |
+| `battery.status` | Process-scoped aggregate availability and charge state |
 | `output.label` | Session-local output diagnostic label |
 | `output.scale` | Effective compositor-provided presentation scale |
 | `surface.template_id` | Manifest surface-template ID |
@@ -70,6 +72,41 @@ not supported.
 If the system time zone cannot be discovered, the host uses UTC and reports
 that fallback diagnostically. Live time-zone reconfiguration remains
 experimental and is not guaranteed.
+
+### Battery state
+
+Battery state is process-scoped, read-only, and sourced from UPower's aggregate
+display device on the system bus. HTMShell does not enumerate batteries,
+interpret sysfs power-supply data, or poll battery state. One event-driven
+source serves every subscribed document.
+
+```html
+<div
+  id="battery-state"
+  data-htm-element="state-token"
+  data-htm-bind="battery.status">
+  <span
+    id="battery-percentage"
+    data-htm-element="state-text"
+    data-htm-bind="battery.percentage"></span>
+  <span
+    id="battery-warning"
+    data-htm-element="state-token"
+    data-htm-bind="battery.warning"></span>
+</div>
+```
+
+`battery.percentage` displays a rounded whole percentage such as `78%`.
+Unknown, absent, and unavailable values display `—`. `battery.status` text is
+one of `Battery unavailable`, `No battery`, `Battery`, `Charging`,
+`Discharging`, `Empty`, `Fully charged`, `Pending charge`, or
+`Pending discharge`.
+
+No battery is a valid `absent` state and is distinct from an `unavailable`
+UPower service. Service absence does not prevent the shell from starting, and
+owner and property signals update state without a periodic polling loop.
+Battery controls, per-device state, health, charge thresholds, and remaining
+time are unsupported.
 
 ## Action button
 
@@ -125,6 +162,8 @@ The approved token bindings and their complete domains are:
 | --- | --- | --- |
 | `overlay.status` | Output | `open`, `closed` |
 | `surface.scale_profile` | Surface | `scale-1`, `fractional` |
+| `battery.status` | Process | `unavailable`, `absent`, `unknown`, `charging`, `discharging`, `empty`, `full`, `pending-charge`, `pending-discharge` |
+| `battery.warning` | Process | `unknown`, `none`, `discharging`, `low`, `critical`, `action` |
 
 `surface.scale_profile` describes the effective presentation profile, not the
 exact fractional numerator. A change between fractional numerators therefore
@@ -181,5 +220,5 @@ Layout and hit geometry remain logical at scale 1 and fractional scales.
 The current model has no JavaScript, expressions, arbitrary attribute/class/
 style bindings, templates, dynamic components, event propagation framework,
 author-defined timers, service plugins, component packages, or user-defined
-registry entries. The clock is a narrow native state source, not a general
-service or widget framework.
+registry entries. The clock and UPower battery source are narrow native state
+sources, not a general service or widget framework.

@@ -1,4 +1,7 @@
 use crate::ShellHostError;
+use crate::battery::{
+    BatteryFanoutMetrics, BatteryService, BatteryServiceSummary, BatterySnapshot,
+};
 use crate::buffer::{BufferData, BufferPoolStats, ShmBufferPool};
 use crate::clock::{ClockService, ClockServiceSummary, ClockSnapshot};
 use crate::lifecycle::LayerLifecycle;
@@ -11,6 +14,7 @@ use htm_runtime::{
     StateToken,
 };
 use rustix::event::{PollFd, PollFlags, poll};
+use rustix::fd::BorrowedFd;
 use std::path::PathBuf;
 use std::time::Instant;
 use wayland_client::{
@@ -112,6 +116,7 @@ pub struct ManifestHostOptions {
     pub exit_after_actions: Option<u64>,
     pub exit_after_scale_changes: Option<u64>,
     pub exit_after_clock_updates: Option<u64>,
+    pub exit_after_battery_updates: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -233,6 +238,7 @@ pub struct ManifestHostSummary {
     pub last_output_teardown_us: u64,
     pub actions: u64,
     pub clock: ClockServiceSummary,
+    pub battery: BatteryServiceSummary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -551,6 +557,7 @@ struct State {
     combined_mapped_memory_peak: usize,
     failure: Option<String>,
     clock: ClockService,
+    battery: BatteryService,
 }
 
 impl State {
@@ -617,6 +624,7 @@ impl State {
             combined_mapped_memory_peak: 0,
             failure: None,
             clock: ClockService::default(),
+            battery: BatteryService::default(),
         }
     }
 
@@ -1154,6 +1162,7 @@ impl State {
             self.destroy_output_instance(key);
             return Err(error);
         }
+        self.reconcile_battery_subscribers();
         self.maybe_stop_after_output_events();
         Ok(())
     }
@@ -1192,6 +1201,7 @@ impl State {
         if let Err(error) = self.reconcile_clock_subscribers() {
             self.fail(format!("clock subscription teardown failed: {error}"));
         }
+        self.reconcile_battery_subscribers();
     }
 
     fn clock_subscriber_count(&self) -> usize {
@@ -1231,6 +1241,117 @@ impl State {
         }
         self.maybe_stop_after_clock_updates();
         Ok(())
+    }
+
+    fn battery_subscriber_count(&self) -> usize {
+        self.surfaces
+            .iter()
+            .filter(|surface| {
+                surface.runtime.as_ref().is_some_and(|runtime| {
+                    [
+                        StateBindingKey::BatteryPercentage,
+                        StateBindingKey::BatteryStatus,
+                        StateBindingKey::BatteryWarning,
+                    ]
+                    .into_iter()
+                    .any(|key| runtime.binding_target_count(key) > 0)
+                })
+            })
+            .count()
+    }
+
+    fn reconcile_battery_subscribers(&mut self) {
+        let subscribers = self.battery_subscriber_count();
+        let previous = self.battery.subscriber_count();
+        let snapshot = self.battery.set_subscriber_count(subscribers);
+        if subscribers > previous {
+            let snapshot = snapshot.or_else(|| self.battery.current_snapshot().cloned());
+            if let Some(snapshot) = snapshot {
+                self.fanout_battery_snapshot(&snapshot);
+            }
+        }
+    }
+
+    fn handle_battery_bus_ready(&mut self) {
+        if let Some(snapshot) = self.battery.handle_bus_ready() {
+            self.fanout_battery_snapshot(&snapshot);
+        }
+        self.maybe_stop_after_battery_updates();
+    }
+
+    fn handle_battery_immediate_dispatch(&mut self) {
+        if let Some(snapshot) = self.battery.handle_immediate_dispatch() {
+            self.fanout_battery_snapshot(&snapshot);
+        }
+        self.maybe_stop_after_battery_updates();
+    }
+
+    fn handle_battery_deadline_ready(&mut self) {
+        if let Some(snapshot) = self.battery.handle_deadline_ready() {
+            self.fanout_battery_snapshot(&snapshot);
+        }
+        self.maybe_stop_after_battery_updates();
+    }
+
+    fn fanout_battery_snapshot(&mut self, snapshot: &BatterySnapshot) {
+        let started = Instant::now();
+        let projection_started = Instant::now();
+        let text = snapshot.text_projections();
+        let tokens = snapshot.token_projections();
+        let projection_us = elapsed_us(projection_started);
+        let mut documents = 0usize;
+        let mut elements = 0usize;
+        let mut frames = 0usize;
+        let mut closed_frames_suppressed = 0usize;
+        let mut failures = 0usize;
+        for surface in &mut self.surfaces {
+            let Some(runtime) = surface.runtime.as_mut() else {
+                continue;
+            };
+            let subscribes = [
+                StateBindingKey::BatteryPercentage,
+                StateBindingKey::BatteryStatus,
+                StateBindingKey::BatteryWarning,
+            ]
+            .into_iter()
+            .any(|key| runtime.binding_target_count(key) > 0);
+            if !subscribes {
+                continue;
+            }
+            documents = documents.saturating_add(1);
+            match runtime.apply_bound_state(&text, &tokens) {
+                Ok(update) => {
+                    elements = elements.saturating_add(update.changed_elements);
+                    if update.changed_elements > 0 {
+                        if surface.desired_mapped {
+                            surface
+                                .pending_binding_mutation_started
+                                .get_or_insert_with(Instant::now);
+                            surface.scheduler.mark_dirty();
+                            frames = frames.saturating_add(1);
+                        } else {
+                            closed_frames_suppressed = closed_frames_suppressed.saturating_add(1);
+                        }
+                    }
+                }
+                Err(error) => {
+                    failures = failures.saturating_add(1);
+                    eprintln!(
+                        "htmshell-live: battery binding update for surface {} was contained: {error}",
+                        surface.owner
+                    );
+                }
+            }
+        }
+        self.battery.record_fanout(BatteryFanoutMetrics {
+            documents,
+            elements,
+            frames,
+            closed_frames_suppressed,
+            failures,
+            fanout_us: elapsed_us(started),
+            projection_us,
+        });
     }
 
     fn fanout_clock_snapshot(&mut self, snapshot: &ClockSnapshot) {
@@ -1834,6 +1955,22 @@ impl State {
         }
     }
 
+    fn maybe_stop_after_battery_updates(&mut self) {
+        let target = match &self.options {
+            SessionOptions::Manifest(options) => options.exit_after_battery_updates,
+            _ => None,
+        };
+        let changed_snapshots = self.battery.summary().changed_snapshots;
+        if target.is_some_and(|target| {
+            changed_snapshots >= target
+                && self.surfaces.iter().all(|surface| {
+                    !surface.scheduler.dirty() && !surface.scheduler.frame_callback_outstanding()
+                })
+        }) {
+            self.running = false;
+        }
+    }
+
     fn open_manifest_overlay(
         &mut self,
         group_index: usize,
@@ -2203,6 +2340,7 @@ impl State {
         self.maybe_stop_after_manifest_actions();
         self.maybe_stop_after_manifest_scale_changes();
         self.maybe_stop_after_clock_updates();
+        self.maybe_stop_after_battery_updates();
     }
 
     fn on_buffer_release(&mut self, owner: u64, id: u64) {
@@ -2255,6 +2393,7 @@ impl State {
     }
 
     fn begin_shutdown(&mut self) {
+        self.battery.shutdown();
         if let Err(error) = self.clock.shutdown() {
             self.fail(format!("clock shutdown failed: {error}"));
         }
@@ -2533,6 +2672,7 @@ impl State {
             last_output_teardown_us: self.last_output_teardown_us,
             actions: self.manifest_actions,
             clock: self.clock.summary(),
+            battery: self.battery.summary(),
         }
     }
 }
@@ -2593,7 +2733,7 @@ fn run_session(options: SessionOptions) -> Result<State, ShellHostError> {
             }
         }
         if state.running {
-            wait_for_wayland_or_clock(&mut event_queue, &mut state)?;
+            wait_for_event_sources(&mut event_queue, &mut state)?;
         }
     }
 
@@ -2619,26 +2759,57 @@ fn run_session(options: SessionOptions) -> Result<State, ShellHostError> {
     }
 }
 
-fn wait_for_wayland_or_clock(
+fn wait_for_event_sources(
     event_queue: &mut wayland_client::EventQueue<State>,
     state: &mut State,
 ) -> Result<(), ShellHostError> {
+    if state.battery.needs_immediate_dispatch() {
+        state.handle_battery_immediate_dispatch();
+        return Ok(());
+    }
     let Some(read_guard) = event_queue.prepare_read() else {
         return Ok(());
     };
     let wayland_fd = read_guard.connection_fd();
-    let timer_fd = state.clock.poll_fd();
-    let mut descriptors = Vec::with_capacity(if timer_fd.is_some() { 2 } else { 1 });
+    let clock_fd = state.clock.poll_fd();
+    let battery_watch = state.battery.bus_watch();
+    let battery_deadline_fd = state.battery.deadline_fd();
+    let mut descriptors = Vec::with_capacity(4);
     descriptors.push(PollFd::from_borrowed_fd(
         wayland_fd,
         PollFlags::IN | PollFlags::ERR | PollFlags::HUP,
     ));
-    if let Some(timer_fd) = timer_fd {
+    let clock_index = clock_fd.map(|clock_fd| {
+        let index = descriptors.len();
         descriptors.push(PollFd::from_borrowed_fd(
-            timer_fd,
+            clock_fd,
             PollFlags::IN | PollFlags::ERR | PollFlags::HUP,
         ));
-    }
+        index
+    });
+    let battery_bus_fd = battery_watch.map(|watch| {
+        let mut flags = PollFlags::ERR | PollFlags::HUP;
+        if watch.read {
+            flags |= PollFlags::IN;
+        }
+        if watch.write {
+            flags |= PollFlags::OUT;
+        }
+        // The direct libdbus channel owns this descriptor for the complete
+        // lifetime of `battery_watch` and remains alive until polling ends.
+        let fd = unsafe { BorrowedFd::borrow_raw(watch.fd) };
+        let index = descriptors.len();
+        descriptors.push(PollFd::from_borrowed_fd(fd, flags));
+        index
+    });
+    let battery_deadline_index = battery_deadline_fd.map(|deadline_fd| {
+        let index = descriptors.len();
+        descriptors.push(PollFd::from_borrowed_fd(
+            deadline_fd,
+            PollFlags::IN | PollFlags::ERR | PollFlags::HUP,
+        ));
+        index
+    });
     match poll(&mut descriptors, None) {
         Ok(_) => {}
         Err(error) if error == rustix::io::Errno::INTR => {
@@ -2649,17 +2820,19 @@ fn wait_for_wayland_or_clock(
         Err(error) => {
             drop(descriptors);
             drop(read_guard);
-            return Err(ShellHostError::Clock(format!(
-                "poll Wayland and clock descriptors: {error}"
+            return Err(ShellHostError::Wayland(format!(
+                "poll event-source descriptors: {error}"
             )));
         }
     }
     let wayland_events = descriptors[0].revents();
-    let timer_events = descriptors.get(1).map(PollFd::revents);
+    let clock_events = clock_index.map(|index| descriptors[index].revents());
+    let battery_bus_events = battery_bus_fd.map(|index| descriptors[index].revents());
+    let battery_deadline_events = battery_deadline_index.map(|index| descriptors[index].revents());
     drop(descriptors);
 
-    let (wayland_ready, timer_ready) =
-        classify_poll_readiness(wayland_events, timer_events).map_err(ShellHostError::Clock)?;
+    let (wayland_ready, clock_ready) =
+        classify_poll_readiness(wayland_events, clock_events).map_err(ShellHostError::Clock)?;
     if wayland_ready {
         match read_guard.read() {
             Ok(_) => {}
@@ -2670,8 +2843,34 @@ fn wait_for_wayland_or_clock(
         drop(read_guard);
     }
 
-    if timer_ready {
+    if clock_ready {
         state.handle_clock_ready()?;
+    }
+    if let Some(events) = battery_bus_events {
+        if events.intersects(PollFlags::NVAL) {
+            if let Some(snapshot) = state
+                .battery
+                .handle_bus_failure("battery system-bus descriptor became invalid")
+            {
+                state.fanout_battery_snapshot(&snapshot);
+            }
+        } else if events
+            .intersects(PollFlags::IN | PollFlags::OUT | PollFlags::ERR | PollFlags::HUP)
+        {
+            state.handle_battery_bus_ready();
+        }
+    }
+    if let Some(events) = battery_deadline_events {
+        if events.intersects(PollFlags::NVAL) {
+            if let Some(snapshot) = state
+                .battery
+                .handle_deadline_failure("battery deadline descriptor became invalid")
+            {
+                state.fanout_battery_snapshot(&snapshot);
+            }
+        } else if events.intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP) {
+            state.handle_battery_deadline_ready();
+        }
     }
     Ok(())
 }
@@ -3377,7 +3576,7 @@ mod tests {
     fn built_in_display_values_are_typed_deterministic_and_output_local() {
         let a = built_in_binding_values("panel", "output-a", 192, true, 7, "Opened");
         let b = built_in_binding_values("panel", "output-b", 120, false, 0, "Ready");
-        assert_eq!(a.len(), StateBindingKey::ALL.len() - 2);
+        assert_eq!(a.len(), 6);
         assert_eq!(
             a[0],
             (StateBindingKey::OutputLabel, "Output: output-a".into())

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>HTMShell UPower battery-state experiment</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main id="panel-root" class="panel">
+      <section class="panel-region panel-start">
+        <span class="brand-mark"><img src="assets/shell.svg" alt=""></span>
+        <strong>HTMShell</strong>
+        <span id="output-label" data-htm-element="state-text" data-htm-bind="output.label">Output</span>
+      </section>
+      <section class="panel-region panel-center">
+        <span id="clock" data-htm-element="state-text" data-htm-bind="clock.time">--:--</span>
+      </section>
+      <section class="panel-region panel-end">
+        <div
+          id="battery-state"
+          class="battery"
+          data-htm-element="state-token"
+          data-htm-bind="battery.status">
+          <img src="assets/battery.svg" alt="">
+          <span id="battery-percentage" data-htm-element="state-text" data-htm-bind="battery.percentage">—</span>
+          <span id="battery-status-text" data-htm-element="state-text" data-htm-bind="battery.status">Battery unavailable</span>
+          <span
+            id="battery-warning"
+            class="battery-warning"
+            data-htm-element="state-token"
+            data-htm-bind="battery.warning"></span>
+        </div>
+        <span id="scale-label" data-htm-element="state-text" data-htm-bind="output.scale">Scale</span>
+        <span
+          id="scale-profile"
+          class="profile-dot"
+          data-htm-element="state-token"
+          data-htm-bind="surface.scale_profile"></span>
+        <button
+          id="overlay-toggle"
+          type="button"
+          data-htm-element="action-button"
+          data-htm-action="overlay.toggle">
+          <img src="assets/overlay.svg" alt="">
+          <span>Overlay</span>
+          <span
+            id="overlay-toggle-state"
+            class="status-dot"
+            data-htm-element="state-token"
+            data-htm-bind="overlay.status"></span>
+        </button>
+      </section>
+    </main>
+  </body>
+</html>

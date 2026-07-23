@@ -75,6 +75,7 @@ The project has demonstrated:
 * Generation-safe output addition and removal through standard Wayland registry events
 * A small built-in registry for typed text, finite visual state, and actions on ordinary HTML
 * Event-driven native state, beginning with one shared local-time scheduler for ordinary state-text bindings
+* Event-driven aggregate battery state from UPower when the system service is available
 
 The portable host renders at the compositor's preferred fractional scale when
 fractional-scale and viewporter are available, with scale 1 as the fallback.

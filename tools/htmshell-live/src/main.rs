@@ -109,6 +109,7 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     let mut exit_after_actions = None;
     let mut exit_after_scale_changes = None;
     let mut exit_after_clock_updates = None;
+    let mut exit_after_battery_updates = None;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--validate-only" => validate_only = true,
@@ -141,6 +142,13 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
                         .parse::<u64>()?,
                 );
             }
+            "--exit-after-battery-updates" => {
+                exit_after_battery_updates = Some(
+                    args.next()
+                        .ok_or("--exit-after-battery-updates requires a positive integer")?
+                        .parse::<u64>()?,
+                );
+            }
             _ => return Err(format!("unknown manifest argument: {argument}").into()),
         }
     }
@@ -155,6 +163,9 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     }
     if exit_after_clock_updates == Some(0) {
         return Err("--exit-after-clock-updates must be positive".into());
+    }
+    if exit_after_battery_updates == Some(0) {
+        return Err("--exit-after-battery-updates must be positive".into());
     }
     let manifest = ValidatedManifest::load(&path)?;
     if validate_only {
@@ -181,6 +192,7 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
         exit_after_actions,
         exit_after_scale_changes,
         exit_after_clock_updates,
+        exit_after_battery_updates,
     })?;
     println!("manifest_live_result=success");
     println!("manifest_id={}", summary.manifest_id);
@@ -425,6 +437,150 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     println!(
         "clock_mutation_failures_contained={}",
         summary.clock.mutation_failures_contained
+    );
+    println!("battery_transport={}", summary.battery.transport);
+    println!(
+        "battery_lifecycle_state={}",
+        summary.battery.lifecycle_state
+    );
+    println!("battery_subscribers={}", summary.battery.subscribers);
+    println!(
+        "battery_maximum_subscribers={}",
+        summary.battery.maximum_subscribers
+    );
+    println!(
+        "battery_source_generation={}",
+        summary.battery.source_generation
+    );
+    println!("battery_sequence={}", summary.battery.sequence);
+    println!("battery_availability={}", summary.battery.availability);
+    println!(
+        "battery_percentage={}",
+        summary
+            .battery
+            .percentage
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".into())
+    );
+    println!("battery_charge_state={}", summary.battery.charge_state);
+    println!("battery_warning={}", summary.battery.warning);
+    println!(
+        "battery_system_bus_connections={}",
+        summary.battery.system_bus_connections
+    );
+    println!(
+        "battery_connection_failures={}",
+        summary.battery.connection_failures
+    );
+    println!(
+        "battery_service_appearances={}",
+        summary.battery.service_appearances
+    );
+    println!(
+        "battery_service_disappearances={}",
+        summary.battery.service_disappearances
+    );
+    println!(
+        "battery_owner_replacements={}",
+        summary.battery.owner_replacements
+    );
+    println!(
+        "battery_property_signals={}",
+        summary.battery.property_signals
+    );
+    println!(
+        "battery_property_bursts={}",
+        summary.battery.property_bursts
+    );
+    println!("battery_refreshes={}", summary.battery.refreshes);
+    println!(
+        "battery_refresh_failures={}",
+        summary.battery.refresh_failures
+    );
+    println!(
+        "battery_bus_disconnects={}",
+        summary.battery.bus_disconnects
+    );
+    println!(
+        "battery_reconnect_attempts={}",
+        summary.battery.reconnect_attempts
+    );
+    println!(
+        "battery_duplicate_snapshots_suppressed={}",
+        summary.battery.duplicate_snapshots_suppressed
+    );
+    println!(
+        "battery_changed_snapshots={}",
+        summary.battery.changed_snapshots
+    );
+    println!(
+        "battery_malformed_values={}",
+        summary.battery.malformed_values
+    );
+    println!(
+        "battery_messages_drained={}",
+        summary.battery.messages_drained
+    );
+    println!(
+        "battery_initial_connection_us={}",
+        summary.battery.initial_connection_us
+    );
+    println!(
+        "battery_last_owner_lookup_us={}",
+        summary.battery.last_owner_lookup_us
+    );
+    println!(
+        "battery_last_property_read_us={}",
+        summary.battery.last_property_read_us
+    );
+    println!(
+        "battery_last_signal_to_refresh_us={}",
+        summary.battery.last_signal_to_refresh_us
+    );
+    println!(
+        "battery_last_reconnect_us={}",
+        summary.battery.last_reconnect_us
+    );
+    println!(
+        "battery_transport_descriptors={}",
+        summary.battery.transport_descriptors
+    );
+    println!(
+        "battery_deadline_descriptors={}",
+        summary.battery.deadline_descriptors
+    );
+    println!(
+        "battery_explicit_worker_threads={}",
+        summary.battery.explicit_worker_threads
+    );
+    println!(
+        "battery_internal_threads={}",
+        summary.battery.internal_threads
+    );
+    println!(
+        "battery_documents_visited={}",
+        summary.battery.documents_visited
+    );
+    println!(
+        "battery_elements_mutated={}",
+        summary.battery.elements_mutated
+    );
+    println!("battery_fanout_us={}", summary.battery.fanout_us);
+    println!(
+        "battery_frames_scheduled={}",
+        summary.battery.frames_scheduled
+    );
+    println!(
+        "battery_unrelated_frames_scheduled={}",
+        summary.battery.unrelated_frames_scheduled
+    );
+    println!(
+        "battery_closed_surface_frames_suppressed={}",
+        summary.battery.closed_surface_frames_suppressed
+    );
+    println!(
+        "battery_mutation_failures_contained={}",
+        summary.battery.mutation_failures_contained
     );
     Ok(())
 }

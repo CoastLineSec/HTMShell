@@ -3,6 +3,7 @@
 //! This crate is intentionally narrow. It presents one parse-once HTMShell
 //! document through standard Wayland objects and wlr layer shell.
 
+mod battery;
 mod buffer;
 mod clock;
 mod error;
@@ -17,6 +18,9 @@ mod wayland;
 #[cfg(test)]
 mod session_model;
 
+pub use battery::{
+    BatteryAvailability, BatteryChargeState, BatteryServiceSummary, BatterySnapshot, BatteryWarning,
+};
 pub use clock::ClockServiceSummary;
 pub use error::ShellHostError;
 pub use manifest::{

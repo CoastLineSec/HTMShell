@@ -383,6 +383,8 @@ impl LiveDocument {
         live.apply_bound_tokens(&[
             (StateBindingKey::OverlayStatus, StateToken::Closed),
             (StateBindingKey::SurfaceScaleProfile, StateToken::Scale1),
+            (StateBindingKey::BatteryStatus, StateToken::Unavailable),
+            (StateBindingKey::BatteryWarning, StateToken::Unknown),
         ])?;
         Ok(live)
     }
@@ -1316,6 +1318,10 @@ mod tests {
 
     fn static_panel_fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/static-panel")
+    }
+
+    fn battery_panel_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/battery-panel")
     }
 
     fn element_attribute(live: &LiveDocument, html_id: &str, name: &str) -> Option<String> {
@@ -2333,6 +2339,80 @@ mod tests {
         assert_eq!(panel.take_action(), None);
         assert!(panel.pointer_primary(false).unwrap());
         assert_eq!(panel.take_action(), Some(LiveAction::ToggleOverlay));
+        assert_eq!(panel.snapshot().unwrap().document_parse_count, 1);
+        assert_eq!(panel.measurements().registry_scan_count, 1);
+    }
+
+    #[test]
+    fn battery_text_and_tokens_update_incrementally_without_identity_loss() {
+        let mut panel = LiveDocument::load_surface_document(
+            battery_panel_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            64,
+        )
+        .unwrap();
+        let document = panel.snapshot().unwrap().document_identity;
+        let percentage = panel.element_identity("battery-percentage").unwrap();
+        let status = panel.element_identity("battery-state").unwrap();
+        let warning = panel.element_identity("battery-warning").unwrap();
+        assert_eq!(
+            panel.binding_target_count(StateBindingKey::BatteryPercentage),
+            1
+        );
+        assert_eq!(
+            panel.binding_target_count(StateBindingKey::BatteryStatus),
+            2
+        );
+        assert_eq!(
+            panel.binding_target_count(StateBindingKey::BatteryWarning),
+            1
+        );
+
+        let changed = panel
+            .apply_bound_state(
+                &[
+                    (StateBindingKey::BatteryPercentage, "78%".into()),
+                    (StateBindingKey::BatteryStatus, "Charging".into()),
+                ],
+                &[
+                    (StateBindingKey::BatteryStatus, StateToken::Charging),
+                    (StateBindingKey::BatteryWarning, StateToken::None),
+                ],
+            )
+            .unwrap();
+        assert_eq!(changed.changed_elements, 4);
+        assert_eq!(panel.element_text("battery-percentage").unwrap(), "78%");
+        assert_eq!(
+            element_attribute(&panel, "battery-state", "data-htm-state").as_deref(),
+            Some("charging")
+        );
+        assert_eq!(
+            element_attribute(&panel, "battery-warning", "data-htm-state").as_deref(),
+            Some("none")
+        );
+
+        let duplicate = panel
+            .apply_bound_state(
+                &[
+                    (StateBindingKey::BatteryPercentage, "78%".into()),
+                    (StateBindingKey::BatteryStatus, "Charging".into()),
+                ],
+                &[
+                    (StateBindingKey::BatteryStatus, StateToken::Charging),
+                    (StateBindingKey::BatteryWarning, StateToken::None),
+                ],
+            )
+            .unwrap();
+        assert_eq!(duplicate.changed_elements, 0);
+        assert_eq!(panel.snapshot().unwrap().document_identity, document);
+        assert_eq!(
+            panel.element_identity("battery-percentage").unwrap(),
+            percentage
+        );
+        assert_eq!(panel.element_identity("battery-state").unwrap(), status);
+        assert_eq!(panel.element_identity("battery-warning").unwrap(), warning);
         assert_eq!(panel.snapshot().unwrap().document_parse_count, 1);
         assert_eq!(panel.measurements().registry_scan_count, 1);
     }
