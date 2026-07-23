@@ -6,6 +6,7 @@
 mod adapter;
 mod builtin;
 mod clock;
+mod collection;
 mod error;
 mod identity;
 mod incremental;
@@ -18,9 +19,10 @@ mod stylesheet;
 
 pub use adapter::{run_package, run_package_with_options};
 pub use builtin::{
-    BindingUpdate, BuiltInElementKind, BuiltInElementSummary, ClockDeclaration, ElementDeclaration,
-    ElementInstanceId, ShellAction, StateBindingKey, StateBindingScope, StateToken, StateValueKind,
-    built_in_registry_names,
+    BindingUpdate, BuiltInElementKind, BuiltInElementSummary, ClockDeclaration,
+    DEVICE_STATE_TOKENS, DEVICE_TYPE_TOKENS, ElementDeclaration, ElementInstanceId,
+    RepeatDeclaration, RepeatedElementDeclaration, ShellAction, StateBindingKey, StateBindingScope,
+    StateToken, StateValueKind, built_in_registry_names,
 };
 pub use clock::{
     CLOCK_FORMAT_CONVERSIONS, CLOCK_FORMAT_FLAGS, CLOCK_PUBLIC_ATTRIBUTES,
@@ -28,6 +30,13 @@ pub use clock::{
     ClockFormatFlag, ClockFormatPart, ClockTimeZone, MAX_CLOCK_DECLARATIONS_PER_DOCUMENT,
     MAX_CLOCK_DECLARATIONS_PER_PROCESS, MAX_CLOCK_FORMAT_BYTES, MAX_CLOCK_FORMATS_PER_PROCESS,
     MAX_CLOCK_OUTPUT_BYTES, MAX_CLOCK_ZONE_BYTES, MAX_CLOCK_ZONES_PER_PROCESS,
+};
+pub use collection::{
+    FormattedValue, ItemBindingKey, MAX_CLONED_NODES_PER_DOCUMENT, MAX_CLONED_NODES_PER_REPEAT,
+    MAX_ITEMS_PER_REPEAT, MAX_POWER_PROFILE_HOLDS_PER_PROCESS,
+    MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE, MAX_REPEAT_DECLARATIONS_PER_DOCUMENT,
+    MAX_REPEAT_TEMPLATE_DEPTH, MAX_UPOWER_DEVICES_PER_PROCESS, NumericValue, RepeatItemSnapshot,
+    RepeatSource, RepeatSourceSnapshot, StateValueFormat, ValueFormatError,
 };
 pub use error::RuntimeError;
 pub use incremental::{

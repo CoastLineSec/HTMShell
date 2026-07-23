@@ -16,6 +16,8 @@ Validated behavior declarations on ordinary HTML.
 - [`state-token`](HTMShell.Elements/state-token.md)
 - [`action-button`](HTMShell.Elements/action-button.md)
 - [`clock-text`](HTMShell.Elements/clock-text.md)
+- [`state-value`](HTMShell.Elements/state-value.md)
+- [`repeat`](HTMShell.Elements/repeat.md)
 
 ## `HTMShell.State`
 
@@ -32,6 +34,7 @@ Typed actions accepted from built-in buttons.
 
 - [`Overlay`](HTMShell.Actions/Overlay.md)
 - [`Clock`](HTMShell.Actions/Clock.md)
+- [`PowerProfile`](HTMShell.Actions/PowerProfile.md)
 
 ## `HTMShell.Services.Clock`
 
@@ -41,6 +44,9 @@ Process-scoped clock and date presentation.
 
 ## `HTMShell.Services.UPower`
 
-Process-scoped aggregate battery state.
+Process-scoped UPower devices and power-profile state.
 
+- [`UPower`](HTMShell.Services.UPower/UPower.md)
 - [`Battery`](HTMShell.Services.UPower/Battery.md)
+- [`UPowerDevice`](HTMShell.Services.UPower/UPowerDevice.md)
+- [`PowerProfiles`](HTMShell.Services.UPower/PowerProfiles.md)

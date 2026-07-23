@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="panel-root" class="panel">
+    <section class="start">
+      <img class="icon" src="assets/power.svg" alt="">
+      <strong>HTMShell</strong>
+      <span id="output" data-htm-element="state-text" data-htm-bind="output.label"></span>
+    </section>
+    <section class="center">
+      <time id="clock" data-htm-element="clock-text" data-htm-format="%H:%M"></time>
+    </section>
+    <section class="end">
+      <div id="battery-state" class="battery" data-htm-element="state-token" data-htm-bind="battery.status">
+        <span id="battery-percentage" data-htm-element="state-text" data-htm-bind="battery.percentage"></span>
+      </div>
+      <span id="on-battery" data-htm-element="state-token" data-htm-bind="upower.on_battery"></span>
+      <span id="profile" data-htm-element="state-token" data-htm-bind="power_profile.current"></span>
+      <span id="degradation" data-htm-element="state-token" data-htm-bind="power_profile.degradation"></span>
+      <button id="power-saver" data-htm-element="action-button" data-htm-action="power_profile.set_power_saver" data-htm-enabled-bind="power_profile.availability">Power saver</button>
+      <button id="balanced" data-htm-element="action-button" data-htm-action="power_profile.set_balanced" data-htm-enabled-bind="power_profile.availability">Balanced</button>
+      <button id="performance" data-htm-element="action-button" data-htm-action="power_profile.set_performance" data-htm-enabled-bind="power_profile.performance_available">Performance</button>
+      <button id="overlay-toggle" data-htm-element="action-button" data-htm-action="overlay.toggle">Details</button>
+    </section>
+  </main>
+</body>
+</html>

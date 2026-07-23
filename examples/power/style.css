@@ -1,0 +1,21 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; font-family: sans-serif; color: #eef3ff; }
+body { background: transparent; }
+.panel { height: 58px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 8px 12px; background: #182133; }
+.start, .end { display: flex; align-items: center; gap: 8px; }
+.end { justify-content: flex-end; }
+.center { justify-self: center; font-size: 20px; font-weight: 650; }
+.icon { width: 24px; height: 24px; }
+button { color: inherit; background: #2a3851; border: 1px solid #526786; border-radius: 8px; padding: 7px 10px; }
+button:hover { background: #344765; }
+button:active { background: #1f2b40; }
+button:disabled { opacity: 0.42; }
+.battery[data-htm-state="charging"], [data-htm-state="performance"] { color: #88e0b0; }
+[data-htm-state="unavailable"], [data-htm-state="absent"], [data-htm-state="unknown"] { opacity: 0.55; }
+[data-htm-state="high-temperature"], [data-htm-state="lap-detected"] { color: #ffbc73; }
+.overlay-card { width: min(720px, 90%); max-height: 82%; margin: 72px auto 0; overflow: auto; padding: 20px; border-radius: 16px; background: #182133f2; }
+.overlay-card header { display: flex; align-items: center; justify-content: space-between; }
+.details { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.device-list, .hold-list { padding: 0; list-style: none; }
+.device, .hold { margin: 6px 0; padding: 10px; border-radius: 9px; background: #25324a; }
+.device-state, .hold { display: flex; gap: 10px; align-items: center; }

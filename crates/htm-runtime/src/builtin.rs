@@ -1,8 +1,11 @@
 use crate::identity::{IdentityRegistry, author_slots};
 use crate::{
     ClockFormat, ClockTimeZone, ExperimentalDocumentIdentity, ExperimentalNodeIdentity,
-    MAX_CLOCK_DECLARATIONS_PER_DOCUMENT, RuntimeError,
+    ItemBindingKey, MAX_CLOCK_DECLARATIONS_PER_DOCUMENT, MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE,
+    MAX_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_REPEAT_TEMPLATE_DEPTH, RepeatSource, RuntimeError,
+    StateValueFormat,
 };
+use blitz_dom::node::NodeData;
 use blitz_dom::{LocalName, local_name};
 use blitz_html::HtmlDocument;
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,6 +17,9 @@ const BIND_ATTRIBUTE: &str = "data-htm-bind";
 const ACTION_ATTRIBUTE: &str = "data-htm-action";
 const TARGET_ATTRIBUTE: &str = "data-htm-target";
 const FORMAT_ATTRIBUTE: &str = "data-htm-format";
+const SOURCE_ATTRIBUTE: &str = "data-htm-source";
+const LOCAL_ID_ATTRIBUTE: &str = "data-htm-local-id";
+const ENABLED_BIND_ATTRIBUTE: &str = "data-htm-enabled-bind";
 const TIME_ZONE_ATTRIBUTE: &str = "data-htm-time-zone";
 const ENABLED_ATTRIBUTE: &str = "data-htm-enabled";
 pub(crate) const DATETIME_ATTRIBUTE: &str = "datetime";
@@ -25,6 +31,8 @@ pub enum BuiltInElementKind {
     ActionButton,
     StateToken,
     ClockText,
+    StateValue,
+    Repeat,
 }
 
 impl BuiltInElementKind {
@@ -34,6 +42,8 @@ impl BuiltInElementKind {
             Self::ActionButton => "action-button",
             Self::StateToken => "state-token",
             Self::ClockText => "clock-text",
+            Self::StateValue => "state-value",
+            Self::Repeat => "repeat",
         }
     }
 
@@ -43,6 +53,8 @@ impl BuiltInElementKind {
             "action-button" => Some(Self::ActionButton),
             "state-token" => Some(Self::StateToken),
             "clock-text" => Some(Self::ClockText),
+            "state-value" => Some(Self::StateValue),
+            "repeat" => Some(Self::Repeat),
             _ => None,
         }
     }
@@ -51,9 +63,32 @@ impl BuiltInElementKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StateBindingKey {
     ClockTime,
+    UPowerAvailability,
+    UPowerOnBattery,
+    UPowerDeviceCount,
     BatteryPercentage,
     BatteryStatus,
     BatteryWarning,
+    BatteryReady,
+    BatteryType,
+    BatteryEnergy,
+    BatteryEnergyCapacity,
+    BatteryChangeRate,
+    BatteryTimeToEmpty,
+    BatteryTimeToFull,
+    BatteryIsPresent,
+    BatteryHealthPercentage,
+    BatteryHealthSupported,
+    BatteryIconName,
+    BatteryIsLaptopBattery,
+    BatteryPowerSupply,
+    BatteryNativePath,
+    BatteryModel,
+    PowerProfileAvailability,
+    PowerProfileCurrent,
+    PowerProfilePerformanceAvailable,
+    PowerProfileDegradation,
+    PowerProfileHoldCount,
     OutputLabel,
     OutputScale,
     SurfaceTemplateId,
@@ -64,11 +99,34 @@ pub enum StateBindingKey {
 }
 
 impl StateBindingKey {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 34] = [
         Self::ClockTime,
+        Self::UPowerAvailability,
+        Self::UPowerOnBattery,
+        Self::UPowerDeviceCount,
         Self::BatteryPercentage,
         Self::BatteryStatus,
         Self::BatteryWarning,
+        Self::BatteryReady,
+        Self::BatteryType,
+        Self::BatteryEnergy,
+        Self::BatteryEnergyCapacity,
+        Self::BatteryChangeRate,
+        Self::BatteryTimeToEmpty,
+        Self::BatteryTimeToFull,
+        Self::BatteryIsPresent,
+        Self::BatteryHealthPercentage,
+        Self::BatteryHealthSupported,
+        Self::BatteryIconName,
+        Self::BatteryIsLaptopBattery,
+        Self::BatteryPowerSupply,
+        Self::BatteryNativePath,
+        Self::BatteryModel,
+        Self::PowerProfileAvailability,
+        Self::PowerProfileCurrent,
+        Self::PowerProfilePerformanceAvailable,
+        Self::PowerProfileDegradation,
+        Self::PowerProfileHoldCount,
         Self::OutputLabel,
         Self::OutputScale,
         Self::SurfaceTemplateId,
@@ -81,9 +139,32 @@ impl StateBindingKey {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ClockTime => "clock.time",
+            Self::UPowerAvailability => "upower.availability",
+            Self::UPowerOnBattery => "upower.on_battery",
+            Self::UPowerDeviceCount => "upower.device_count",
             Self::BatteryPercentage => "battery.percentage",
             Self::BatteryStatus => "battery.status",
             Self::BatteryWarning => "battery.warning",
+            Self::BatteryReady => "battery.ready",
+            Self::BatteryType => "battery.type",
+            Self::BatteryEnergy => "battery.energy",
+            Self::BatteryEnergyCapacity => "battery.energy_capacity",
+            Self::BatteryChangeRate => "battery.change_rate",
+            Self::BatteryTimeToEmpty => "battery.time_to_empty",
+            Self::BatteryTimeToFull => "battery.time_to_full",
+            Self::BatteryIsPresent => "battery.is_present",
+            Self::BatteryHealthPercentage => "battery.health_percentage",
+            Self::BatteryHealthSupported => "battery.health_supported",
+            Self::BatteryIconName => "battery.icon_name",
+            Self::BatteryIsLaptopBattery => "battery.is_laptop_battery",
+            Self::BatteryPowerSupply => "battery.power_supply",
+            Self::BatteryNativePath => "battery.native_path",
+            Self::BatteryModel => "battery.model",
+            Self::PowerProfileAvailability => "power_profile.availability",
+            Self::PowerProfileCurrent => "power_profile.current",
+            Self::PowerProfilePerformanceAvailable => "power_profile.performance_available",
+            Self::PowerProfileDegradation => "power_profile.degradation",
+            Self::PowerProfileHoldCount => "power_profile.hold_count",
             Self::OutputLabel => "output.label",
             Self::OutputScale => "output.scale",
             Self::SurfaceTemplateId => "surface.template_id",
@@ -97,9 +178,32 @@ impl StateBindingKey {
     pub const fn scope(self) -> StateBindingScope {
         match self {
             Self::ClockTime
+            | Self::UPowerAvailability
+            | Self::UPowerOnBattery
+            | Self::UPowerDeviceCount
             | Self::BatteryPercentage
             | Self::BatteryStatus
-            | Self::BatteryWarning => StateBindingScope::Process,
+            | Self::BatteryWarning
+            | Self::BatteryReady
+            | Self::BatteryType
+            | Self::BatteryEnergy
+            | Self::BatteryEnergyCapacity
+            | Self::BatteryChangeRate
+            | Self::BatteryTimeToEmpty
+            | Self::BatteryTimeToFull
+            | Self::BatteryIsPresent
+            | Self::BatteryHealthPercentage
+            | Self::BatteryHealthSupported
+            | Self::BatteryIconName
+            | Self::BatteryIsLaptopBattery
+            | Self::BatteryPowerSupply
+            | Self::BatteryNativePath
+            | Self::BatteryModel
+            | Self::PowerProfileAvailability
+            | Self::PowerProfileCurrent
+            | Self::PowerProfilePerformanceAvailable
+            | Self::PowerProfileDegradation
+            | Self::PowerProfileHoldCount => StateBindingScope::Process,
             Self::OutputLabel
             | Self::OutputScale
             | Self::OverlayStatus
@@ -110,27 +214,182 @@ impl StateBindingKey {
     }
 
     pub const fn supports(self, kind: StateValueKind) -> bool {
-        matches!(
-            (self, kind),
-            (
-                Self::OverlayStatus | Self::BatteryStatus,
-                StateValueKind::Text | StateValueKind::Token
-            ) | (
-                Self::SurfaceScaleProfile | Self::BatteryWarning,
-                StateValueKind::Token
-            ) | (
+        match kind {
+            StateValueKind::Text => matches!(
+                self,
                 Self::ClockTime
+                    | Self::UPowerAvailability
+                    | Self::UPowerOnBattery
                     | Self::BatteryPercentage
+                    | Self::BatteryStatus
+                    | Self::BatteryReady
+                    | Self::BatteryType
+                    | Self::BatteryIsPresent
+                    | Self::BatteryHealthSupported
+                    | Self::BatteryIconName
+                    | Self::BatteryIsLaptopBattery
+                    | Self::BatteryPowerSupply
+                    | Self::BatteryNativePath
+                    | Self::BatteryModel
+                    | Self::PowerProfileAvailability
+                    | Self::PowerProfileCurrent
+                    | Self::PowerProfilePerformanceAvailable
+                    | Self::PowerProfileDegradation
                     | Self::OutputLabel
                     | Self::OutputScale
                     | Self::SurfaceTemplateId
+                    | Self::OverlayStatus
                     | Self::OverlayActivationCount
-                    | Self::ShellLastAction,
-                StateValueKind::Text,
-            )
-        )
+                    | Self::ShellLastAction
+            ),
+            StateValueKind::Token => matches!(
+                self,
+                Self::UPowerAvailability
+                    | Self::UPowerOnBattery
+                    | Self::BatteryStatus
+                    | Self::BatteryWarning
+                    | Self::BatteryReady
+                    | Self::BatteryType
+                    | Self::BatteryIsPresent
+                    | Self::BatteryHealthSupported
+                    | Self::BatteryIsLaptopBattery
+                    | Self::BatteryPowerSupply
+                    | Self::PowerProfileAvailability
+                    | Self::PowerProfileCurrent
+                    | Self::PowerProfilePerformanceAvailable
+                    | Self::PowerProfileDegradation
+                    | Self::SurfaceScaleProfile
+                    | Self::OverlayStatus
+            ),
+            StateValueKind::Value => matches!(
+                self,
+                Self::UPowerDeviceCount
+                    | Self::BatteryPercentage
+                    | Self::BatteryEnergy
+                    | Self::BatteryEnergyCapacity
+                    | Self::BatteryChangeRate
+                    | Self::BatteryTimeToEmpty
+                    | Self::BatteryTimeToFull
+                    | Self::BatteryHealthPercentage
+                    | Self::PowerProfileHoldCount
+            ),
+            StateValueKind::Boolean => matches!(
+                self,
+                Self::PowerProfileAvailability | Self::PowerProfilePerformanceAvailable
+            ),
+        }
+    }
+
+    pub const fn allowed_value_formats(self) -> &'static [StateValueFormat] {
+        match self {
+            Self::UPowerDeviceCount | Self::PowerProfileHoldCount => &[StateValueFormat::Raw],
+            Self::BatteryPercentage | Self::BatteryHealthPercentage => {
+                &[StateValueFormat::Raw, StateValueFormat::Percent]
+            }
+            Self::BatteryEnergy | Self::BatteryEnergyCapacity => {
+                &[StateValueFormat::Raw, StateValueFormat::Energy]
+            }
+            Self::BatteryChangeRate => &[StateValueFormat::Raw, StateValueFormat::Power],
+            Self::BatteryTimeToEmpty | Self::BatteryTimeToFull => {
+                &[StateValueFormat::Raw, StateValueFormat::Duration]
+            }
+            _ => &[],
+        }
+    }
+
+    pub const fn token_values(self) -> &'static [&'static str] {
+        match self {
+            Self::OverlayStatus => &["open", "closed"],
+            Self::SurfaceScaleProfile => &["scale-1", "fractional"],
+            Self::UPowerAvailability => &["available", "unavailable"],
+            Self::UPowerOnBattery => &["battery", "external", "unavailable"],
+            Self::BatteryStatus => &[
+                "unavailable",
+                "absent",
+                "unknown",
+                "charging",
+                "discharging",
+                "empty",
+                "full",
+                "pending-charge",
+                "pending-discharge",
+            ],
+            Self::BatteryWarning => &[
+                "unknown",
+                "none",
+                "discharging",
+                "low",
+                "critical",
+                "action",
+            ],
+            Self::BatteryReady
+            | Self::BatteryIsPresent
+            | Self::BatteryHealthSupported
+            | Self::BatteryIsLaptopBattery
+            | Self::BatteryPowerSupply => &["true", "false", "unknown"],
+            Self::BatteryType => DEVICE_TYPE_TOKENS,
+            Self::PowerProfileAvailability => &["available", "unavailable"],
+            Self::PowerProfileCurrent => &[
+                "power-saver",
+                "balanced",
+                "performance",
+                "unknown",
+                "unavailable",
+            ],
+            Self::PowerProfilePerformanceAvailable => &["true", "false", "unavailable"],
+            Self::PowerProfileDegradation => &[
+                "none",
+                "high-temperature",
+                "lap-detected",
+                "unknown",
+                "unavailable",
+            ],
+            _ => &[],
+        }
     }
 }
+
+pub const DEVICE_TYPE_TOKENS: &[&str] = &[
+    "unknown",
+    "line-power",
+    "battery",
+    "ups",
+    "monitor",
+    "mouse",
+    "keyboard",
+    "pda",
+    "phone",
+    "media-player",
+    "tablet",
+    "computer",
+    "gaming-input",
+    "pen",
+    "touchpad",
+    "modem",
+    "network",
+    "headset",
+    "speakers",
+    "headphones",
+    "video",
+    "other-audio",
+    "remote-control",
+    "printer",
+    "scanner",
+    "camera",
+    "wearable",
+    "toy",
+    "bluetooth-generic",
+];
+
+pub const DEVICE_STATE_TOKENS: &[&str] = &[
+    "unknown",
+    "charging",
+    "discharging",
+    "empty",
+    "fully-charged",
+    "pending-charge",
+    "pending-discharge",
+];
 
 impl std::str::FromStr for StateBindingKey {
     type Err = ();
@@ -138,9 +397,32 @@ impl std::str::FromStr for StateBindingKey {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "clock.time" => Ok(Self::ClockTime),
+            "upower.availability" => Ok(Self::UPowerAvailability),
+            "upower.on_battery" => Ok(Self::UPowerOnBattery),
+            "upower.device_count" => Ok(Self::UPowerDeviceCount),
             "battery.percentage" => Ok(Self::BatteryPercentage),
             "battery.status" => Ok(Self::BatteryStatus),
             "battery.warning" => Ok(Self::BatteryWarning),
+            "battery.ready" => Ok(Self::BatteryReady),
+            "battery.type" => Ok(Self::BatteryType),
+            "battery.energy" => Ok(Self::BatteryEnergy),
+            "battery.energy_capacity" => Ok(Self::BatteryEnergyCapacity),
+            "battery.change_rate" => Ok(Self::BatteryChangeRate),
+            "battery.time_to_empty" => Ok(Self::BatteryTimeToEmpty),
+            "battery.time_to_full" => Ok(Self::BatteryTimeToFull),
+            "battery.is_present" => Ok(Self::BatteryIsPresent),
+            "battery.health_percentage" => Ok(Self::BatteryHealthPercentage),
+            "battery.health_supported" => Ok(Self::BatteryHealthSupported),
+            "battery.icon_name" => Ok(Self::BatteryIconName),
+            "battery.is_laptop_battery" => Ok(Self::BatteryIsLaptopBattery),
+            "battery.power_supply" => Ok(Self::BatteryPowerSupply),
+            "battery.native_path" => Ok(Self::BatteryNativePath),
+            "battery.model" => Ok(Self::BatteryModel),
+            "power_profile.availability" => Ok(Self::PowerProfileAvailability),
+            "power_profile.current" => Ok(Self::PowerProfileCurrent),
+            "power_profile.performance_available" => Ok(Self::PowerProfilePerformanceAvailable),
+            "power_profile.degradation" => Ok(Self::PowerProfileDegradation),
+            "power_profile.hold_count" => Ok(Self::PowerProfileHoldCount),
             "output.label" => Ok(Self::OutputLabel),
             "output.scale" => Ok(Self::OutputScale),
             "surface.template_id" => Ok(Self::SurfaceTemplateId),
@@ -164,6 +446,8 @@ pub enum StateBindingScope {
 pub enum StateValueKind {
     Text,
     Token,
+    Value,
+    Boolean,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -187,10 +471,48 @@ pub enum StateToken {
     Action,
     Enabled,
     Disabled,
+    Available,
+    External,
+    True,
+    False,
+    LinePower,
+    Battery,
+    Ups,
+    Monitor,
+    Mouse,
+    Keyboard,
+    Pda,
+    Phone,
+    MediaPlayer,
+    Tablet,
+    Computer,
+    GamingInput,
+    Pen,
+    Touchpad,
+    Modem,
+    Network,
+    Headset,
+    Speakers,
+    Headphones,
+    Video,
+    OtherAudio,
+    RemoteControl,
+    Printer,
+    Scanner,
+    Camera,
+    Wearable,
+    Toy,
+    BluetoothGeneric,
+    FullyCharged,
+    PowerSaver,
+    Balanced,
+    Performance,
+    HighTemperature,
+    LapDetected,
 }
 
 impl StateToken {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 57] = [
         Self::Open,
         Self::Closed,
         Self::Scale1,
@@ -210,6 +532,44 @@ impl StateToken {
         Self::Action,
         Self::Enabled,
         Self::Disabled,
+        Self::Available,
+        Self::External,
+        Self::True,
+        Self::False,
+        Self::LinePower,
+        Self::Battery,
+        Self::Ups,
+        Self::Monitor,
+        Self::Mouse,
+        Self::Keyboard,
+        Self::Pda,
+        Self::Phone,
+        Self::MediaPlayer,
+        Self::Tablet,
+        Self::Computer,
+        Self::GamingInput,
+        Self::Pen,
+        Self::Touchpad,
+        Self::Modem,
+        Self::Network,
+        Self::Headset,
+        Self::Speakers,
+        Self::Headphones,
+        Self::Video,
+        Self::OtherAudio,
+        Self::RemoteControl,
+        Self::Printer,
+        Self::Scanner,
+        Self::Camera,
+        Self::Wearable,
+        Self::Toy,
+        Self::BluetoothGeneric,
+        Self::FullyCharged,
+        Self::PowerSaver,
+        Self::Balanced,
+        Self::Performance,
+        Self::HighTemperature,
+        Self::LapDetected,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -233,39 +593,49 @@ impl StateToken {
             Self::Action => "action",
             Self::Enabled => "enabled",
             Self::Disabled => "disabled",
+            Self::Available => "available",
+            Self::External => "external",
+            Self::True => "true",
+            Self::False => "false",
+            Self::LinePower => "line-power",
+            Self::Battery => "battery",
+            Self::Ups => "ups",
+            Self::Monitor => "monitor",
+            Self::Mouse => "mouse",
+            Self::Keyboard => "keyboard",
+            Self::Pda => "pda",
+            Self::Phone => "phone",
+            Self::MediaPlayer => "media-player",
+            Self::Tablet => "tablet",
+            Self::Computer => "computer",
+            Self::GamingInput => "gaming-input",
+            Self::Pen => "pen",
+            Self::Touchpad => "touchpad",
+            Self::Modem => "modem",
+            Self::Network => "network",
+            Self::Headset => "headset",
+            Self::Speakers => "speakers",
+            Self::Headphones => "headphones",
+            Self::Video => "video",
+            Self::OtherAudio => "other-audio",
+            Self::RemoteControl => "remote-control",
+            Self::Printer => "printer",
+            Self::Scanner => "scanner",
+            Self::Camera => "camera",
+            Self::Wearable => "wearable",
+            Self::Toy => "toy",
+            Self::BluetoothGeneric => "bluetooth-generic",
+            Self::FullyCharged => "fully-charged",
+            Self::PowerSaver => "power-saver",
+            Self::Balanced => "balanced",
+            Self::Performance => "performance",
+            Self::HighTemperature => "high-temperature",
+            Self::LapDetected => "lap-detected",
         }
     }
 
-    pub const fn valid_for(self, key: StateBindingKey) -> bool {
-        matches!(
-            (key, self),
-            (StateBindingKey::OverlayStatus, Self::Open | Self::Closed)
-                | (
-                    StateBindingKey::SurfaceScaleProfile,
-                    Self::Scale1 | Self::Fractional
-                )
-                | (
-                    StateBindingKey::BatteryStatus,
-                    Self::Unavailable
-                        | Self::Absent
-                        | Self::Unknown
-                        | Self::Charging
-                        | Self::Discharging
-                        | Self::Empty
-                        | Self::Full
-                        | Self::PendingCharge
-                        | Self::PendingDischarge
-                )
-                | (
-                    StateBindingKey::BatteryWarning,
-                    Self::Unknown
-                        | Self::None
-                        | Self::Discharging
-                        | Self::Low
-                        | Self::Critical
-                        | Self::Action
-                )
-        )
+    pub fn valid_for(self, key: StateBindingKey) -> bool {
+        key.token_values().contains(&self.as_str())
     }
 }
 
@@ -277,16 +647,22 @@ pub enum ShellAction {
     ClockEnable,
     ClockDisable,
     ClockToggle,
+    PowerProfileSetPowerSaver,
+    PowerProfileSetBalanced,
+    PowerProfileSetPerformance,
 }
 
 impl ShellAction {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 9] = [
         Self::OverlayToggle,
         Self::OverlayClose,
         Self::OverlayActivate,
         Self::ClockEnable,
         Self::ClockDisable,
         Self::ClockToggle,
+        Self::PowerProfileSetPowerSaver,
+        Self::PowerProfileSetBalanced,
+        Self::PowerProfileSetPerformance,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -297,6 +673,9 @@ impl ShellAction {
             Self::ClockEnable => "clock.enable",
             Self::ClockDisable => "clock.disable",
             Self::ClockToggle => "clock.toggle",
+            Self::PowerProfileSetPowerSaver => "power_profile.set_power_saver",
+            Self::PowerProfileSetBalanced => "power_profile.set_balanced",
+            Self::PowerProfileSetPerformance => "power_profile.set_performance",
         }
     }
 }
@@ -312,6 +691,9 @@ impl std::str::FromStr for ShellAction {
             "clock.enable" => Ok(Self::ClockEnable),
             "clock.disable" => Ok(Self::ClockDisable),
             "clock.toggle" => Ok(Self::ClockToggle),
+            "power_profile.set_power_saver" => Ok(Self::PowerProfileSetPowerSaver),
+            "power_profile.set_balanced" => Ok(Self::PowerProfileSetBalanced),
+            "power_profile.set_performance" => Ok(Self::PowerProfileSetPerformance),
             _ => Err(()),
         }
     }
@@ -337,6 +719,12 @@ impl BuiltInSurfaceKind {
                     Self::Overlay,
                     ShellAction::OverlayClose | ShellAction::OverlayActivate
                 )
+                | (
+                    Self::Panel | Self::Overlay,
+                    ShellAction::PowerProfileSetPowerSaver
+                        | ShellAction::PowerProfileSetBalanced
+                        | ShellAction::PowerProfileSetPerformance
+                )
         )
     }
 }
@@ -357,6 +745,9 @@ pub struct ElementDeclaration {
     pub action_target: Option<ElementInstanceId>,
     pub clock: Option<ClockDeclaration>,
     pub disabled: bool,
+    pub enabled_binding: Option<StateBindingKey>,
+    pub value_format: Option<StateValueFormat>,
+    pub repeat: Option<RepeatDeclaration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,6 +758,25 @@ pub struct ClockDeclaration {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepeatedElementDeclaration {
+    pub local_id: String,
+    pub kind: BuiltInElementKind,
+    pub binding: ItemBindingKey,
+    pub value_format: Option<StateValueFormat>,
+    pub prototype_order: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepeatDeclaration {
+    pub id: ElementInstanceId,
+    pub source: RepeatSource,
+    pub template_node: ExperimentalNodeIdentity,
+    pub root_node: ExperimentalNodeIdentity,
+    pub descendants: Vec<RepeatedElementDeclaration>,
+    pub prototype_nodes: usize,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BuiltInElementSummary {
     pub registered_elements: usize,
@@ -375,6 +785,9 @@ pub struct BuiltInElementSummary {
     pub token_bindings: usize,
     pub actions: usize,
     pub clock_declarations: usize,
+    pub value_bindings: usize,
+    pub boolean_bindings: usize,
+    pub repeat_declarations: usize,
     pub discovery_scans: u32,
 }
 
@@ -384,6 +797,8 @@ pub struct BindingUpdate {
     pub changed_elements: usize,
     pub changed_text_elements: usize,
     pub changed_token_elements: usize,
+    pub changed_value_elements: usize,
+    pub changed_boolean_elements: usize,
     pub suppressed_keys: usize,
 }
 
@@ -394,7 +809,7 @@ struct BuiltInElementDefinition {
     required_attribute: &'static str,
 }
 
-const DEFINITIONS: [BuiltInElementDefinition; 4] = [
+const DEFINITIONS: [BuiltInElementDefinition; 6] = [
     BuiltInElementDefinition {
         name: "state-text",
         allowed_tags: &["span", "p", "output"],
@@ -414,6 +829,16 @@ const DEFINITIONS: [BuiltInElementDefinition; 4] = [
         name: "clock-text",
         allowed_tags: &["time"],
         required_attribute: FORMAT_ATTRIBUTE,
+    },
+    BuiltInElementDefinition {
+        name: "state-value",
+        allowed_tags: &["data"],
+        required_attribute: BIND_ATTRIBUTE,
+    },
+    BuiltInElementDefinition {
+        name: "repeat",
+        allowed_tags: &["template"],
+        required_attribute: SOURCE_ATTRIBUTE,
     },
 ];
 
@@ -440,6 +865,8 @@ pub(crate) struct BuiltInElementIndex {
     elements: BTreeMap<String, IndexedElement>,
     text_bindings: BTreeMap<StateBindingKey, Vec<String>>,
     token_bindings: BTreeMap<StateBindingKey, Vec<String>>,
+    value_bindings: BTreeMap<StateBindingKey, Vec<String>>,
+    boolean_bindings: BTreeMap<StateBindingKey, Vec<String>>,
     actions: Vec<String>,
     applied_values: BTreeMap<(StateBindingKey, StateValueKind), String>,
     surface_kind: BuiltInSurfaceKind,
@@ -458,6 +885,8 @@ impl BuiltInElementIndex {
         let mut elements = BTreeMap::new();
         let mut text_bindings: BTreeMap<StateBindingKey, Vec<String>> = BTreeMap::new();
         let mut token_bindings: BTreeMap<StateBindingKey, Vec<String>> = BTreeMap::new();
+        let mut value_bindings: BTreeMap<StateBindingKey, Vec<String>> = BTreeMap::new();
+        let mut boolean_bindings: BTreeMap<StateBindingKey, Vec<String>> = BTreeMap::new();
         let mut actions = Vec::new();
         let mut unresolved_action_targets = BTreeMap::new();
         let slots = author_slots(document);
@@ -480,6 +909,15 @@ impl BuiltInElementIndex {
             let Some(element) = node.element_data() else {
                 continue;
             };
+            if repeat_ancestor(document, slot).is_some() {
+                continue;
+            }
+            if element.has_attr(LocalName::from(LOCAL_ID_ATTRIBUTE)) {
+                return Err(invalid_declaration(
+                    &declaration_context(source, element.attr(local_name!("id"))),
+                    "`data-htm-local-id` is only valid inside a repeat template",
+                ));
+            }
             let Some(kind_name) = element.attr(LocalName::from(ELEMENT_ATTRIBUTE)) else {
                 continue;
             };
@@ -540,128 +978,221 @@ impl BuiltInElementIndex {
                     "`datetime` and `data-htm-state` are runtime-owned",
                 ));
             }
-            let (binding, binding_kind, action, clock) = match kind {
-                BuiltInElementKind::StateText => {
-                    validate_state_text_children(document, slot, &context)?;
-                    let binding = required.parse::<StateBindingKey>().map_err(|()| {
-                        invalid_declaration(
-                            &context,
-                            format!("unsupported state binding `{required}`"),
-                        )
-                    })?;
-                    if !binding.supports(StateValueKind::Text) {
-                        return Err(invalid_declaration(
-                            &context,
-                            format!(
-                                "state binding `{required}` does not support text presentation"
-                            ),
-                        ));
-                    }
-                    (Some(binding), Some(StateValueKind::Text), None, None)
-                }
-                BuiltInElementKind::ActionButton => {
-                    let action = required.parse::<ShellAction>().map_err(|()| {
-                        invalid_declaration(&context, format!("unsupported action `{required}`"))
-                    })?;
-                    if !surface_kind.permits(action) {
-                        return Err(invalid_declaration(
-                            &context,
-                            format!(
-                                "action `{}` is not permitted from this surface kind",
-                                action.as_str()
-                            ),
-                        ));
-                    }
-                    let clock_action = matches!(
-                        action,
-                        ShellAction::ClockEnable
-                            | ShellAction::ClockDisable
-                            | ShellAction::ClockToggle
-                    );
-                    match (
-                        clock_action,
-                        element.attr(LocalName::from(TARGET_ATTRIBUTE)),
-                    ) {
-                        (true, Some(target)) if !target.is_empty() => {
-                            unresolved_action_targets.insert(html_id.clone(), target.to_owned());
-                        }
-                        (true, _) => {
-                            return Err(invalid_declaration(
+            let (binding, binding_kind, action, clock, value_format, repeat, enabled_binding) =
+                match kind {
+                    BuiltInElementKind::StateText => {
+                        validate_state_text_children(document, slot, &context)?;
+                        let binding = required.parse::<StateBindingKey>().map_err(|()| {
+                            invalid_declaration(
                                 &context,
-                                "clock action requires nonempty `data-htm-target`",
-                            ));
-                        }
-                        (false, Some(_)) => {
-                            return Err(invalid_declaration(
-                                &context,
-                                "`data-htm-target` is forbidden for overlay actions",
-                            ));
-                        }
-                        (false, None) => {}
-                    }
-                    (None, None, Some(action), None)
-                }
-                BuiltInElementKind::StateToken => {
-                    let binding = required.parse::<StateBindingKey>().map_err(|()| {
-                        invalid_declaration(
-                            &context,
-                            format!("unsupported state binding `{required}`"),
-                        )
-                    })?;
-                    if !binding.supports(StateValueKind::Token) {
-                        return Err(invalid_declaration(
-                            &context,
-                            format!(
-                                "state binding `{required}` does not support token presentation"
-                            ),
-                        ));
-                    }
-                    (Some(binding), Some(StateValueKind::Token), None, None)
-                }
-                BuiltInElementKind::ClockText => {
-                    validate_state_text_children(document, slot, &context)?;
-                    let format = ClockFormat::compile(required).map_err(|error| {
-                        invalid_declaration(
-                            &context,
-                            format!("invalid `{FORMAT_ATTRIBUTE}`: {error}"),
-                        )
-                    })?;
-                    let time_zone =
-                        ClockTimeZone::parse(element.attr(LocalName::from(TIME_ZONE_ATTRIBUTE)))
-                            .map_err(|error| {
-                                invalid_declaration(
-                                    &context,
-                                    format!("invalid `{TIME_ZONE_ATTRIBUTE}`: {error}"),
-                                )
-                            })?;
-                    let enabled = match element.attr(LocalName::from(ENABLED_ATTRIBUTE)) {
-                        None | Some("true") => true,
-                        Some("false") => false,
-                        Some(value) => {
+                                format!("unsupported state binding `{required}`"),
+                            )
+                        })?;
+                        if !binding.supports(StateValueKind::Text) {
                             return Err(invalid_declaration(
                                 &context,
                                 format!(
-                                    "`{ENABLED_ATTRIBUTE}` must be `true` or `false`, not `{value}`"
+                                    "state binding `{required}` does not support text presentation"
                                 ),
                             ));
                         }
-                    };
-                    (
-                        None,
-                        None,
-                        None,
-                        Some(ClockDeclaration {
-                            id: ElementInstanceId {
-                                document_generation,
-                                html_id: html_id.clone(),
-                            },
-                            format,
-                            time_zone,
-                            enabled,
-                        }),
-                    )
-                }
-            };
+                        (
+                            Some(binding),
+                            Some(StateValueKind::Text),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    }
+                    BuiltInElementKind::ActionButton => {
+                        let action = required.parse::<ShellAction>().map_err(|()| {
+                            invalid_declaration(
+                                &context,
+                                format!("unsupported action `{required}`"),
+                            )
+                        })?;
+                        if !surface_kind.permits(action) {
+                            return Err(invalid_declaration(
+                                &context,
+                                format!(
+                                    "action `{}` is not permitted from this surface kind",
+                                    action.as_str()
+                                ),
+                            ));
+                        }
+                        let clock_action = matches!(
+                            action,
+                            ShellAction::ClockEnable
+                                | ShellAction::ClockDisable
+                                | ShellAction::ClockToggle
+                        );
+                        match (
+                            clock_action,
+                            element.attr(LocalName::from(TARGET_ATTRIBUTE)),
+                        ) {
+                            (true, Some(target)) if !target.is_empty() => {
+                                unresolved_action_targets
+                                    .insert(html_id.clone(), target.to_owned());
+                            }
+                            (true, _) => {
+                                return Err(invalid_declaration(
+                                    &context,
+                                    "clock action requires nonempty `data-htm-target`",
+                                ));
+                            }
+                            (false, Some(_)) => {
+                                return Err(invalid_declaration(
+                                    &context,
+                                    "`data-htm-target` is forbidden for this action",
+                                ));
+                            }
+                            (false, None) => {}
+                        }
+                        let enabled_binding = element
+                            .attr(LocalName::from(ENABLED_BIND_ATTRIBUTE))
+                            .map(|value| {
+                                value.parse::<StateBindingKey>().map_err(|()| {
+                                    invalid_declaration(
+                                        &context,
+                                        format!("unsupported enabled binding `{value}`"),
+                                    )
+                                })
+                            })
+                            .transpose()?;
+                        if enabled_binding
+                            .is_some_and(|binding| !binding.supports(StateValueKind::Boolean))
+                        {
+                            return Err(invalid_declaration(
+                                &context,
+                                "`data-htm-enabled-bind` requires a Boolean state key",
+                            ));
+                        }
+                        (None, None, Some(action), None, None, None, enabled_binding)
+                    }
+                    BuiltInElementKind::StateToken => {
+                        let binding = required.parse::<StateBindingKey>().map_err(|()| {
+                            invalid_declaration(
+                                &context,
+                                format!("unsupported state binding `{required}`"),
+                            )
+                        })?;
+                        if !binding.supports(StateValueKind::Token) {
+                            return Err(invalid_declaration(
+                                &context,
+                                format!(
+                                    "state binding `{required}` does not support token presentation"
+                                ),
+                            ));
+                        }
+                        (
+                            Some(binding),
+                            Some(StateValueKind::Token),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    }
+                    BuiltInElementKind::ClockText => {
+                        validate_state_text_children(document, slot, &context)?;
+                        let format = ClockFormat::compile(required).map_err(|error| {
+                            invalid_declaration(
+                                &context,
+                                format!("invalid `{FORMAT_ATTRIBUTE}`: {error}"),
+                            )
+                        })?;
+                        let time_zone = ClockTimeZone::parse(
+                            element.attr(LocalName::from(TIME_ZONE_ATTRIBUTE)),
+                        )
+                        .map_err(|error| {
+                            invalid_declaration(
+                                &context,
+                                format!("invalid `{TIME_ZONE_ATTRIBUTE}`: {error}"),
+                            )
+                        })?;
+                        let enabled = match element.attr(LocalName::from(ENABLED_ATTRIBUTE)) {
+                            None | Some("true") => true,
+                            Some("false") => false,
+                            Some(value) => {
+                                return Err(invalid_declaration(
+                                    &context,
+                                    format!(
+                                        "`{ENABLED_ATTRIBUTE}` must be `true` or `false`, not `{value}`"
+                                    ),
+                                ));
+                            }
+                        };
+                        (
+                            None,
+                            None,
+                            None,
+                            Some(ClockDeclaration {
+                                id: ElementInstanceId {
+                                    document_generation,
+                                    html_id: html_id.clone(),
+                                },
+                                format,
+                                time_zone,
+                                enabled,
+                            }),
+                            None,
+                            None,
+                            None,
+                        )
+                    }
+                    BuiltInElementKind::StateValue => {
+                        validate_state_text_children(document, slot, &context)?;
+                        if element.has_attr(local_name!("value")) {
+                            return Err(invalid_declaration(
+                                &context,
+                                "`value` is runtime-owned for `state-value`",
+                            ));
+                        }
+                        let binding = required.parse::<StateBindingKey>().map_err(|()| {
+                            invalid_declaration(
+                                &context,
+                                format!("unsupported state binding `{required}`"),
+                            )
+                        })?;
+                        if !binding.supports(StateValueKind::Value) {
+                            return Err(invalid_declaration(
+                                &context,
+                                format!(
+                                    "state binding `{required}` does not support numeric presentation"
+                                ),
+                            ));
+                        }
+                        let format = parse_value_format(
+                            element.attr(LocalName::from(FORMAT_ATTRIBUTE)),
+                            binding.allowed_value_formats(),
+                            &context,
+                        )?;
+                        (
+                            Some(binding),
+                            Some(StateValueKind::Value),
+                            None,
+                            None,
+                            Some(format),
+                            None,
+                            None,
+                        )
+                    }
+                    BuiltInElementKind::Repeat => {
+                        let repeat = analyze_repeat(
+                            document,
+                            identities,
+                            slot,
+                            document_generation,
+                            &html_id,
+                            required,
+                            &context,
+                        )?;
+                        (None, None, None, None, None, Some(repeat), None)
+                    }
+                };
             let instance_id = ElementInstanceId {
                 document_generation,
                 html_id: html_id.clone(),
@@ -675,6 +1206,9 @@ impl BuiltInElementIndex {
                 action_target: None,
                 clock,
                 disabled: element.has_attr(local_name!("disabled")),
+                enabled_binding,
+                value_format,
+                repeat,
             };
             let indexed = IndexedElement {
                 declaration,
@@ -696,6 +1230,18 @@ impl BuiltInElementIndex {
                             .or_default()
                             .push(html_id.clone());
                     }
+                    Some(StateValueKind::Value) => {
+                        value_bindings
+                            .entry(binding)
+                            .or_default()
+                            .push(html_id.clone());
+                    }
+                    Some(StateValueKind::Boolean) => {
+                        boolean_bindings
+                            .entry(binding)
+                            .or_default()
+                            .push(html_id.clone());
+                    }
                     None => {
                         return Err(invalid_declaration(
                             &context,
@@ -707,6 +1253,12 @@ impl BuiltInElementIndex {
             if action.is_some() {
                 actions.push(html_id.clone());
             }
+            if let Some(enabled_binding) = enabled_binding {
+                boolean_bindings
+                    .entry(enabled_binding)
+                    .or_default()
+                    .push(html_id.clone());
+            }
             elements.insert(html_id, indexed);
         }
 
@@ -717,6 +1269,15 @@ impl BuiltInElementIndex {
         if clock_declarations > MAX_CLOCK_DECLARATIONS_PER_DOCUMENT {
             return Err(RuntimeError::LimitExceeded(format!(
                 "{source} contains {clock_declarations} clock declarations; the per-document limit is {MAX_CLOCK_DECLARATIONS_PER_DOCUMENT}"
+            )));
+        }
+        let repeat_declarations = elements
+            .values()
+            .filter(|element| element.declaration.repeat.is_some())
+            .count();
+        if repeat_declarations > MAX_REPEAT_DECLARATIONS_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{source} contains {repeat_declarations} repeat declarations; the per-document limit is {MAX_REPEAT_DECLARATIONS_PER_DOCUMENT}"
             )));
         }
         for (action_id, target_id) in unresolved_action_targets {
@@ -753,21 +1314,37 @@ impl BuiltInElementIndex {
         for ids in token_bindings.values_mut() {
             ids.sort();
         }
+        for ids in value_bindings.values_mut() {
+            ids.sort();
+        }
+        for ids in boolean_bindings.values_mut() {
+            ids.sort();
+        }
         let text_binding_count = text_bindings.values().map(Vec::len).sum();
         let token_binding_count = token_bindings.values().map(Vec::len).sum();
+        let value_binding_count = value_bindings.values().map(Vec::len).sum();
+        let boolean_binding_count = boolean_bindings.values().map(Vec::len).sum();
         let summary = BuiltInElementSummary {
             registered_elements: elements.len(),
-            bindings: text_binding_count + token_binding_count,
+            bindings: text_binding_count
+                + token_binding_count
+                + value_binding_count
+                + boolean_binding_count,
             text_bindings: text_binding_count,
             token_bindings: token_binding_count,
             actions: actions.len(),
             clock_declarations,
+            value_bindings: value_binding_count,
+            boolean_bindings: boolean_binding_count,
+            repeat_declarations,
             discovery_scans: 1,
         };
         Ok(Self {
             elements,
             text_bindings,
             token_bindings,
+            value_bindings,
+            boolean_bindings,
             actions,
             applied_values: BTreeMap::new(),
             surface_kind,
@@ -794,6 +1371,13 @@ impl BuiltInElementIndex {
         self.elements
             .values()
             .filter_map(|element| element.declaration.clock.clone())
+            .collect()
+    }
+
+    pub(crate) fn repeat_declarations(&self) -> Vec<RepeatDeclaration> {
+        self.elements
+            .values()
+            .filter_map(|element| element.declaration.repeat.clone())
             .collect()
     }
 
@@ -845,6 +1429,8 @@ impl BuiltInElementIndex {
         match kind {
             StateValueKind::Text => &self.text_bindings,
             StateValueKind::Token => &self.token_bindings,
+            StateValueKind::Value => &self.value_bindings,
+            StateValueKind::Boolean => &self.boolean_bindings,
         }
         .get(&key)
         .map(Vec::as_slice)
@@ -938,7 +1524,14 @@ impl BuiltInElementIndex {
 }
 
 pub fn built_in_registry_names() -> &'static [&'static str] {
-    &["state-text", "action-button", "state-token", "clock-text"]
+    &[
+        "state-text",
+        "action-button",
+        "state-token",
+        "clock-text",
+        "state-value",
+        "repeat",
+    ]
 }
 
 pub(crate) fn ensure_registry_valid() -> Result<(), RuntimeError> {
@@ -973,15 +1566,20 @@ fn definition(kind: BuiltInElementKind) -> &'static BuiltInElementDefinition {
         BuiltInElementKind::ActionButton => &DEFINITIONS[1],
         BuiltInElementKind::StateToken => &DEFINITIONS[2],
         BuiltInElementKind::ClockText => &DEFINITIONS[3],
+        BuiltInElementKind::StateValue => &DEFINITIONS[4],
+        BuiltInElementKind::Repeat => &DEFINITIONS[5],
     }
 }
 
 fn allowed_behavior_attributes(kind: BuiltInElementKind) -> &'static [&'static str] {
     match kind {
         BuiltInElementKind::StateText => &[ELEMENT_ATTRIBUTE, BIND_ATTRIBUTE],
-        BuiltInElementKind::ActionButton => {
-            &[ELEMENT_ATTRIBUTE, ACTION_ATTRIBUTE, TARGET_ATTRIBUTE]
-        }
+        BuiltInElementKind::ActionButton => &[
+            ELEMENT_ATTRIBUTE,
+            ACTION_ATTRIBUTE,
+            TARGET_ATTRIBUTE,
+            ENABLED_BIND_ATTRIBUTE,
+        ],
         BuiltInElementKind::StateToken => &[ELEMENT_ATTRIBUTE, BIND_ATTRIBUTE],
         BuiltInElementKind::ClockText => &[
             ELEMENT_ATTRIBUTE,
@@ -989,7 +1587,306 @@ fn allowed_behavior_attributes(kind: BuiltInElementKind) -> &'static [&'static s
             TIME_ZONE_ATTRIBUTE,
             ENABLED_ATTRIBUTE,
         ],
+        BuiltInElementKind::StateValue => &[ELEMENT_ATTRIBUTE, BIND_ATTRIBUTE, FORMAT_ATTRIBUTE],
+        BuiltInElementKind::Repeat => &[ELEMENT_ATTRIBUTE, SOURCE_ATTRIBUTE],
     }
+}
+
+fn repeat_ancestor(document: &HtmlDocument, slot: usize) -> Option<usize> {
+    let mut parent = document.get_node(slot).and_then(|node| node.parent);
+    while let Some(candidate) = parent {
+        let node = document.get_node(candidate)?;
+        if node
+            .element_data()
+            .and_then(|element| element.attr(LocalName::from(ELEMENT_ATTRIBUTE)))
+            == Some("repeat")
+        {
+            return Some(candidate);
+        }
+        parent = node.parent;
+    }
+    None
+}
+
+fn analyze_repeat(
+    document: &HtmlDocument,
+    identities: &IdentityRegistry,
+    template_slot: usize,
+    document_generation: ExperimentalDocumentIdentity,
+    html_id: &str,
+    source_value: &str,
+    context: &str,
+) -> Result<RepeatDeclaration, RuntimeError> {
+    let source = source_value.parse::<RepeatSource>().map_err(|()| {
+        invalid_declaration(
+            context,
+            format!("unsupported repeat source `{source_value}`"),
+        )
+    })?;
+    let template = document
+        .get_node(template_slot)
+        .ok_or_else(|| invalid_declaration(context, "template node lookup failed"))?;
+    let mut roots = Vec::new();
+    for child in &template.children {
+        let node = document
+            .get_node(*child)
+            .ok_or_else(|| invalid_declaration(context, "template child lookup failed"))?;
+        match &node.data {
+            NodeData::Text(text) if text.content.trim().is_empty() => {}
+            NodeData::Text(_) => {
+                return Err(invalid_declaration(
+                    context,
+                    "repeat template top-level text must be whitespace",
+                ));
+            }
+            NodeData::Element(_) => roots.push(*child),
+            _ => {}
+        }
+    }
+    if roots.len() != 1 {
+        return Err(invalid_declaration(
+            context,
+            format!(
+                "repeat template must contain exactly one root element; found {}",
+                roots.len()
+            ),
+        ));
+    }
+    let root = roots[0];
+    let mut descendants = Vec::new();
+    let mut local_ids = BTreeSet::new();
+    let mut stack = vec![(root, 1usize)];
+    let mut prototype_order = 0usize;
+    while let Some((slot, depth)) = stack.pop() {
+        if depth > MAX_REPEAT_TEMPLATE_DEPTH {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{context}: repeat template depth exceeds {MAX_REPEAT_TEMPLATE_DEPTH}"
+            )));
+        }
+        let node = document
+            .get_node(slot)
+            .ok_or_else(|| invalid_declaration(context, "repeat subtree lookup failed"))?;
+        let order = prototype_order;
+        prototype_order = prototype_order.saturating_add(1);
+        if let Some(element) = node.element_data() {
+            if element.has_attr(local_name!("id")) {
+                return Err(invalid_declaration(
+                    context,
+                    "normal `id` attributes are forbidden inside repeat templates",
+                ));
+            }
+            let local_id = element.attr(LocalName::from(LOCAL_ID_ATTRIBUTE));
+            let kind_name = element.attr(LocalName::from(ELEMENT_ATTRIBUTE));
+            match kind_name {
+                None => {
+                    if local_id.is_some() {
+                        return Err(invalid_declaration(
+                            context,
+                            "`data-htm-local-id` is only valid on registered repeat descendants",
+                        ));
+                    }
+                    for attribute in element.attrs() {
+                        if attribute.name.local.as_ref().starts_with("data-htm-") {
+                            return Err(invalid_declaration(
+                                context,
+                                format!(
+                                    "unsupported repeat-template attribute `{}`",
+                                    attribute.name.local
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Some(kind_name) => {
+                    let kind = BuiltInElementKind::parse(kind_name).ok_or_else(|| {
+                        invalid_declaration(
+                            context,
+                            format!("unknown repeated built-in element `{kind_name}`"),
+                        )
+                    })?;
+                    if !matches!(
+                        kind,
+                        BuiltInElementKind::StateText
+                            | BuiltInElementKind::StateToken
+                            | BuiltInElementKind::StateValue
+                    ) {
+                        return Err(invalid_declaration(
+                            context,
+                            format!("`{}` is not allowed inside a repeat", kind.as_str()),
+                        ));
+                    }
+                    let definition = definition(kind);
+                    let tag = element.name.local.as_ref();
+                    if !definition.allowed_tags.contains(&tag) {
+                        return Err(invalid_declaration(
+                            context,
+                            format!("`{}` is not allowed on <{tag}>", kind.as_str()),
+                        ));
+                    }
+                    for attribute in element.attrs() {
+                        let name = attribute.name.local.as_ref();
+                        if name.starts_with("data-htm-")
+                            && name != LOCAL_ID_ATTRIBUTE
+                            && !allowed_behavior_attributes(kind).contains(&name)
+                        {
+                            return Err(invalid_declaration(
+                                context,
+                                format!("unsupported HTMShell behavior attribute `{name}`"),
+                            ));
+                        }
+                    }
+                    let local_id = local_id.filter(|value| !value.is_empty()).ok_or_else(|| {
+                        invalid_declaration(
+                            context,
+                            "registered repeat descendant requires `data-htm-local-id`",
+                        )
+                    })?;
+                    if !local_ids.insert(local_id.to_owned()) {
+                        return Err(invalid_declaration(
+                            context,
+                            format!("duplicate repeat local id `{local_id}`"),
+                        ));
+                    }
+                    let binding_value = element
+                        .attr(LocalName::from(BIND_ATTRIBUTE))
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| {
+                            invalid_declaration(
+                                context,
+                                format!("`{}` requires `data-htm-bind`", kind.as_str()),
+                            )
+                        })?;
+                    let binding = binding_value.parse::<ItemBindingKey>().map_err(|()| {
+                        invalid_declaration(
+                            context,
+                            format!("unsupported item binding `{binding_value}`"),
+                        )
+                    })?;
+                    if binding.source() != source {
+                        return Err(invalid_declaration(
+                            context,
+                            format!(
+                                "item binding `{binding_value}` does not belong to `{source_value}`"
+                            ),
+                        ));
+                    }
+                    let value_format = match kind {
+                        BuiltInElementKind::StateText if binding.supports_text() => {
+                            validate_state_text_children(document, slot, context)?;
+                            None
+                        }
+                        BuiltInElementKind::StateToken if binding.supports_token() => {
+                            if element.has_attr(LocalName::from(STATE_ATTRIBUTE)) {
+                                return Err(invalid_declaration(
+                                    context,
+                                    "`data-htm-state` is runtime-owned",
+                                ));
+                            }
+                            None
+                        }
+                        BuiltInElementKind::StateValue if binding.supports_value() => {
+                            validate_state_text_children(document, slot, context)?;
+                            if element.has_attr(local_name!("value")) {
+                                return Err(invalid_declaration(
+                                    context,
+                                    "`value` is runtime-owned for `state-value`",
+                                ));
+                            }
+                            Some(parse_value_format(
+                                element.attr(LocalName::from(FORMAT_ATTRIBUTE)),
+                                item_value_formats(binding),
+                                context,
+                            )?)
+                        }
+                        _ => {
+                            return Err(invalid_declaration(
+                                context,
+                                format!(
+                                    "item binding `{binding_value}` does not support `{}`",
+                                    kind.as_str()
+                                ),
+                            ));
+                        }
+                    };
+                    descendants.push(RepeatedElementDeclaration {
+                        local_id: local_id.to_owned(),
+                        kind,
+                        binding,
+                        value_format,
+                        prototype_order: order,
+                    });
+                    if descendants.len() > MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE {
+                        return Err(RuntimeError::LimitExceeded(format!(
+                            "{context}: repeat template has more than {MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE} registered descendants"
+                        )));
+                    }
+                }
+            }
+        }
+        stack.extend(
+            node.children
+                .iter()
+                .rev()
+                .copied()
+                .map(|child| (child, depth.saturating_add(1))),
+        );
+    }
+    Ok(RepeatDeclaration {
+        id: ElementInstanceId {
+            document_generation,
+            html_id: html_id.to_owned(),
+        },
+        source,
+        template_node: identities.identity_for_slot(document, template_slot)?,
+        root_node: identities.identity_for_slot(document, root)?,
+        descendants,
+        prototype_nodes: prototype_order,
+    })
+}
+
+fn item_value_formats(binding: ItemBindingKey) -> &'static [StateValueFormat] {
+    match binding {
+        ItemBindingKey::Energy | ItemBindingKey::EnergyCapacity => {
+            &[StateValueFormat::Raw, StateValueFormat::Energy]
+        }
+        ItemBindingKey::ChangeRate => &[StateValueFormat::Raw, StateValueFormat::Power],
+        ItemBindingKey::TimeToEmpty | ItemBindingKey::TimeToFull => {
+            &[StateValueFormat::Raw, StateValueFormat::Duration]
+        }
+        ItemBindingKey::Percentage | ItemBindingKey::HealthPercentage => {
+            &[StateValueFormat::Raw, StateValueFormat::Percent]
+        }
+        _ => &[],
+    }
+}
+
+fn parse_value_format(
+    value: Option<&str>,
+    allowed: &'static [StateValueFormat],
+    context: &str,
+) -> Result<StateValueFormat, RuntimeError> {
+    let format = match value {
+        None => StateValueFormat::Raw,
+        Some("") => {
+            return Err(invalid_declaration(
+                context,
+                "`data-htm-format` must not be empty",
+            ));
+        }
+        Some(value) => value.parse::<StateValueFormat>().map_err(|()| {
+            invalid_declaration(context, format!("unsupported numeric format `{value}`"))
+        })?,
+    };
+    if !allowed.contains(&format) {
+        return Err(invalid_declaration(
+            context,
+            format!(
+                "numeric format `{}` is invalid for this binding",
+                format.as_str()
+            ),
+        ));
+    }
+    Ok(format)
 }
 
 fn declaration_context(source: &str, id: Option<&str>) -> String {
@@ -1064,38 +1961,23 @@ mod tests {
     fn registry_is_exact_deterministic_and_duplicate_safe() {
         assert_eq!(
             built_in_registry_names(),
-            &["state-text", "action-button", "state-token", "clock-text"]
+            &[
+                "state-text",
+                "action-button",
+                "state-token",
+                "clock-text",
+                "state-value",
+                "repeat",
+            ]
         );
         assert!(validate_definitions(&DEFINITIONS).is_ok());
         let duplicate = [DEFINITIONS[0], DEFINITIONS[0]];
         assert!(validate_definitions(&duplicate).is_err());
-        assert_eq!(
-            StateBindingKey::ALL.map(StateBindingKey::as_str),
-            [
-                "clock.time",
-                "battery.percentage",
-                "battery.status",
-                "battery.warning",
-                "output.label",
-                "output.scale",
-                "surface.template_id",
-                "surface.scale_profile",
-                "overlay.status",
-                "overlay.activation_count",
-                "shell.last_action",
-            ]
-        );
-        assert_eq!(
-            ShellAction::ALL.map(ShellAction::as_str),
-            [
-                "overlay.toggle",
-                "overlay.close",
-                "overlay.activate",
-                "clock.enable",
-                "clock.disable",
-                "clock.toggle",
-            ]
-        );
+        assert_eq!(StateBindingKey::ALL.len(), 34);
+        assert!(StateBindingKey::ALL.contains(&StateBindingKey::UPowerOnBattery));
+        assert!(StateBindingKey::ALL.contains(&StateBindingKey::PowerProfileCurrent));
+        assert_eq!(ShellAction::ALL.len(), 9);
+        assert!(ShellAction::ALL.contains(&ShellAction::PowerProfileSetPerformance));
         for key in StateBindingKey::ALL {
             assert_eq!(key.as_str().parse::<StateBindingKey>(), Ok(key));
         }
@@ -1133,30 +2015,9 @@ mod tests {
         assert!(StateBindingKey::SurfaceScaleProfile.supports(StateValueKind::Token));
         assert!(!StateBindingKey::SurfaceScaleProfile.supports(StateValueKind::Text));
         assert!(!StateBindingKey::ClockTime.supports(StateValueKind::Token));
-        assert_eq!(
-            StateToken::ALL.map(StateToken::as_str),
-            [
-                "open",
-                "closed",
-                "scale-1",
-                "fractional",
-                "unavailable",
-                "absent",
-                "unknown",
-                "charging",
-                "discharging",
-                "empty",
-                "full",
-                "pending-charge",
-                "pending-discharge",
-                "none",
-                "low",
-                "critical",
-                "action",
-                "enabled",
-                "disabled",
-            ]
-        );
+        assert_eq!(StateToken::ALL.len(), 57);
+        assert!(StateToken::ALL.contains(&StateToken::BluetoothGeneric));
+        assert!(StateToken::ALL.contains(&StateToken::HighTemperature));
         assert!(StateToken::Open.valid_for(StateBindingKey::OverlayStatus));
         assert!(!StateToken::Open.valid_for(StateBindingKey::SurfaceScaleProfile));
         for token in [
@@ -1208,6 +2069,9 @@ mod tests {
                 token_bindings: 0,
                 actions: 1,
                 clock_declarations: 0,
+                value_bindings: 0,
+                boolean_bindings: 0,
+                repeat_declarations: 0,
                 discovery_scans: 1,
             }
         );
@@ -1243,7 +2107,48 @@ mod tests {
             index.element("clock-a").unwrap().kind,
             BuiltInElementKind::StateText
         );
-        assert_eq!(built_in_registry_names().len(), 4);
+        assert_eq!(built_in_registry_names().len(), 6);
+    }
+
+    #[test]
+    fn standard_template_repeat_is_analyzed_once_with_scoped_descendants() {
+        let index = discover(
+            r#"<ul>
+              <template id="device-row" data-htm-element="repeat" data-htm-source="upower.devices">
+                <li class="device">
+                  <span data-htm-element="state-text" data-htm-local-id="model" data-htm-bind="item.model"></span>
+                  <data data-htm-element="state-value" data-htm-local-id="percentage" data-htm-bind="item.percentage" data-htm-format="percent"></data>
+                </li>
+              </template>
+            </ul>"#,
+            BuiltInSurfaceKind::Overlay,
+        )
+        .unwrap();
+        let repeats = index.repeat_declarations();
+        assert_eq!(repeats.len(), 1);
+        assert_eq!(repeats[0].source, RepeatSource::UPowerDevices);
+        assert_eq!(repeats[0].descendants.len(), 2);
+        assert!(repeats[0].prototype_nodes >= 3);
+        assert_eq!(index.summary().repeat_declarations, 1);
+
+        for invalid in [
+            r#"<div id="rows" data-htm-element="repeat" data-htm-source="upower.devices"><span></span></div>"#,
+            r#"<template data-htm-element="repeat" data-htm-source="upower.devices"><span></span></template>"#,
+            r#"<template id="rows" data-htm-element="repeat"><span></span></template>"#,
+            r#"<template id="rows" data-htm-element="repeat" data-htm-source="unknown"><span></span></template>"#,
+            r#"<template id="rows" data-htm-element="repeat" data-htm-source="upower.devices">text<span></span></template>"#,
+            r#"<template id="rows" data-htm-element="repeat" data-htm-source="upower.devices"><li id="duplicate"></li></template>"#,
+            r#"<template id="rows" data-htm-element="repeat" data-htm-source="upower.devices"><li><span data-htm-element="state-text" data-htm-bind="item.model"></span></li></template>"#,
+            r#"<template id="rows" data-htm-element="repeat" data-htm-source="upower.devices"><li><span data-htm-element="state-text" data-htm-local-id="same" data-htm-bind="item.model"></span><span data-htm-element="state-token" data-htm-local-id="same" data-htm-bind="item.state"></span></li></template>"#,
+            r#"<template id="rows" data-htm-element="repeat" data-htm-source="upower.devices"><li><span data-htm-element="state-text" data-htm-local-id="reason" data-htm-bind="item.reason"></span></li></template>"#,
+            r#"<template id="rows" data-htm-element="repeat" data-htm-source="upower.devices"><li><button data-htm-element="action-button" data-htm-local-id="action" data-htm-action="overlay.close"></button></li></template>"#,
+            r#"<template id="rows" data-htm-element="repeat" data-htm-source="upower.devices"><li><time data-htm-element="clock-text" data-htm-local-id="clock" data-htm-format="%H"></time></li></template>"#,
+            r#"<template id="rows" data-htm-element="repeat" data-htm-source="upower.devices"><li></li><li></li></template>"#,
+            r#"<template id="rows" data-htm-element="repeat" data-htm-source="upower.devices"><li><template data-htm-element="repeat" data-htm-source="upower.devices"><span></span></template></li></template>"#,
+            r#"<span data-htm-local-id="outside">plain</span>"#,
+        ] {
+            assert!(discover(invalid, BuiltInSurfaceKind::Overlay).is_err());
+        }
     }
 
     #[test]
@@ -1403,6 +2308,26 @@ mod tests {
             r#"<button id="activate" data-htm-element="action-button" data-htm-action="overlay.activate"></button>"#,
             BuiltInSurfaceKind::Overlay,
         ).is_ok());
+        for action in [
+            "power_profile.set_power_saver",
+            "power_profile.set_balanced",
+            "power_profile.set_performance",
+        ] {
+            assert!(discover(
+                &format!(
+                    r#"<button id="profile" data-htm-element="action-button" data-htm-action="{action}" data-htm-enabled-bind="power_profile.availability"></button>"#
+                ),
+                BuiltInSurfaceKind::Panel,
+            ).is_ok());
+        }
+        assert!(discover(
+            r#"<button id="profile" data-htm-element="action-button" data-htm-action="power_profile.set_balanced" data-htm-target="clock"></button>"#,
+            BuiltInSurfaceKind::Panel,
+        ).is_err());
+        assert!(discover(
+            r#"<button id="profile" data-htm-element="action-button" data-htm-action="power_profile.set_balanced" data-htm-enabled-bind="battery.status"></button>"#,
+            BuiltInSurfaceKind::Panel,
+        ).is_err());
         assert!(discover(
             r#"<button id="close" data-htm-element="action-button" data-htm-action="overlay.close"></button>"#,
             BuiltInSurfaceKind::Panel,

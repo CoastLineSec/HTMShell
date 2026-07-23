@@ -58,9 +58,11 @@ buffer, frame, CSS, icon, or output state.
 - scale and compositor identity do not affect battery state;
 - no new built-in element kind or general service framework is introduced.
 
-Direct sysfs aggregation, per-device presentation, battery controls, history,
-health, time estimates, power profiles, notifications, and automation remain
-deferred.
+At the time of this decision, per-device presentation, health, time estimates,
+and power profiles were deferred. [ADR 0010](0010-keyed-collections-and-power-state.md)
+adds those read-only projections and typed profile selection. Direct sysfs
+aggregation, battery controls, history, notifications, and automation remain
+excluded.
 
 ## Acceptance criteria
 

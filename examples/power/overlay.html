@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="overlay-card" class="overlay-card">
+    <header>
+      <h1>Power details</h1>
+      <button id="overlay-close" data-htm-element="action-button" data-htm-action="overlay.close">Close</button>
+    </header>
+
+    <section class="details">
+      <span id="upower-availability" data-htm-element="state-text" data-htm-bind="upower.availability"></span>
+      <span id="battery-model" data-htm-element="state-text" data-htm-bind="battery.model"></span>
+      <data id="battery-energy" data-htm-element="state-value" data-htm-bind="battery.energy" data-htm-format="energy"></data>
+      <data id="battery-capacity" data-htm-element="state-value" data-htm-bind="battery.energy_capacity" data-htm-format="energy"></data>
+      <data id="battery-rate" data-htm-element="state-value" data-htm-bind="battery.change_rate" data-htm-format="power"></data>
+      <data id="battery-empty" data-htm-element="state-value" data-htm-bind="battery.time_to_empty" data-htm-format="duration"></data>
+      <data id="battery-full" data-htm-element="state-value" data-htm-bind="battery.time_to_full" data-htm-format="duration"></data>
+      <data id="battery-health" data-htm-element="state-value" data-htm-bind="battery.health_percentage" data-htm-format="percent"></data>
+    </section>
+
+    <h2>UPower devices</h2>
+    <ul class="device-list">
+      <template id="device-row" data-htm-element="repeat" data-htm-source="upower.devices">
+        <li class="device">
+          <div class="device-state" data-htm-element="state-token" data-htm-local-id="state" data-htm-bind="item.state">
+            <span data-htm-element="state-text" data-htm-local-id="model" data-htm-bind="item.model"></span>
+            <span data-htm-element="state-token" data-htm-local-id="type" data-htm-bind="item.type"></span>
+            <data data-htm-element="state-value" data-htm-local-id="percentage" data-htm-bind="item.percentage" data-htm-format="percent"></data>
+            <data data-htm-element="state-value" data-htm-local-id="energy" data-htm-bind="item.energy" data-htm-format="energy"></data>
+          </div>
+        </li>
+      </template>
+    </ul>
+
+    <h2>Power profile holds</h2>
+    <ul class="hold-list">
+      <template id="hold-row" data-htm-element="repeat" data-htm-source="power_profile.holds">
+        <li class="hold">
+          <span data-htm-element="state-token" data-htm-local-id="profile" data-htm-bind="item.profile"></span>
+          <span data-htm-element="state-text" data-htm-local-id="application" data-htm-bind="item.application_id"></span>
+          <span data-htm-element="state-text" data-htm-local-id="reason" data-htm-bind="item.reason"></span>
+        </li>
+      </template>
+    </ul>
+
+    <button id="overlay-action" data-htm-element="action-button" data-htm-action="overlay.activate">Activate</button>
+    <span id="overlay-status" data-htm-element="state-text" data-htm-bind="overlay.status"></span>
+    <span id="activation-count" data-htm-element="state-text" data-htm-bind="overlay.activation_count"></span>
+  </main>
+</body>
+</html>

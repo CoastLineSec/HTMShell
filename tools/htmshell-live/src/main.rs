@@ -487,6 +487,11 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
         summary.battery.lifecycle_state
     );
     println!("battery_subscribers={}", summary.battery.subscribers);
+    println!("upower_subscribers={}", summary.battery.upower_subscribers);
+    println!(
+        "power_profile_subscribers={}",
+        summary.battery.profile_subscribers
+    );
     println!(
         "battery_maximum_subscribers={}",
         summary.battery.maximum_subscribers
@@ -497,6 +502,7 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     );
     println!("battery_sequence={}", summary.battery.sequence);
     println!("battery_availability={}", summary.battery.availability);
+    println!("upower_power_source={}", summary.battery.on_battery);
     println!(
         "battery_percentage={}",
         summary
@@ -507,6 +513,30 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     );
     println!("battery_charge_state={}", summary.battery.charge_state);
     println!("battery_warning={}", summary.battery.warning);
+    println!("upower_device_count={}", summary.battery.device_count);
+    println!("power_profile={}", summary.battery.profile);
+    println!(
+        "power_profile_available={}",
+        summary.battery.profile_available
+    );
+    println!(
+        "power_profile_performance_available={}",
+        summary.battery.performance_available
+    );
+    println!("power_profile_degradation={}", summary.battery.degradation);
+    println!("power_profile_hold_count={}", summary.battery.hold_count);
+    println!(
+        "power_profile_source_generation={}",
+        summary.battery.profile_source_generation
+    );
+    println!(
+        "power_profile_requests={}",
+        summary.battery.profile_requests
+    );
+    println!(
+        "power_profile_request_failures={}",
+        summary.battery.profile_request_failures
+    );
     println!(
         "battery_system_bus_connections={}",
         summary.battery.system_bus_connections
@@ -577,6 +607,18 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
         summary.battery.last_property_read_us
     );
     println!(
+        "battery_last_enumeration_us={}",
+        summary.battery.last_enumeration_us
+    );
+    println!(
+        "battery_last_device_read_us={}",
+        summary.battery.last_device_read_us
+    );
+    println!(
+        "battery_last_profiles_read_us={}",
+        summary.battery.last_profiles_read_us
+    );
+    println!(
         "battery_last_signal_to_refresh_us={}",
         summary.battery.last_signal_to_refresh_us
     );
@@ -587,6 +629,18 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     println!(
         "battery_transport_descriptors={}",
         summary.battery.transport_descriptors
+    );
+    println!(
+        "battery_maximum_transport_descriptors={}",
+        summary.battery.maximum_transport_descriptors
+    );
+    println!(
+        "battery_dbus_watch_count_peak={}",
+        summary.battery.dbus_watch_count_peak
+    );
+    println!(
+        "battery_match_rules_installed={}",
+        summary.battery.match_rules_installed
     );
     println!(
         "battery_deadline_descriptors={}",
@@ -784,13 +838,14 @@ fn print_built_in_metrics(prefix: &str, summary: &SurfaceHostSummary) {
         summary.declaration_discovery_us
     );
     println!(
-        "{prefix}_registered_elements={} bindings={} text_bindings={} token_bindings={} registered_actions={} clock_declarations={} registry_scans={}",
+        "{prefix}_registered_elements={} bindings={} text_bindings={} token_bindings={} registered_actions={} clock_declarations={} repeat_declarations={} registry_scans={}",
         summary.registered_element_count,
         summary.binding_count,
         summary.text_binding_count,
         summary.token_binding_count,
         summary.registered_action_count,
         summary.clock_declaration_count,
+        summary.repeat_declaration_count,
         summary.registry_scan_count
     );
     println!(
@@ -803,6 +858,19 @@ fn print_built_in_metrics(prefix: &str, summary: &SurfaceHostSummary) {
         summary.suppressed_token_updates,
         summary.last_state_projection_us,
         summary.last_attribute_mutation_us,
+    );
+    println!(
+        "{prefix}_repeat_updates=insertions:{} removals:{} moves:{} properties:{} unchanged:{} clones:{} identity_reuses:{} items:{} cloned_nodes:{} reconciliation_us:{}",
+        summary.repeat_insertions,
+        summary.repeat_removals,
+        summary.repeat_moves,
+        summary.repeat_property_updates,
+        summary.repeat_unchanged_items,
+        summary.repeat_subtree_clones,
+        summary.repeat_identity_reuses,
+        summary.repeated_item_count,
+        summary.cloned_node_count,
+        summary.last_reconciliation_us,
     );
     println!(
         "{prefix}_component_latency_us=release_to_dispatch:{} dispatch_to_mutation:{} mutation_to_commit:{} mutation_to_callback:{}",

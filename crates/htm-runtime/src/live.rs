@@ -1,13 +1,18 @@
 use crate::adapter::{elapsed_ms, render_rgba_scaled, resolve_resources, validate_document_limits};
 use crate::builtin::{
-    BindingUpdate, BuiltInElementIndex, BuiltInElementSummary, BuiltInSurfaceKind,
-    ClockDeclaration, DATETIME_ATTRIBUTE, ElementDeclaration, ElementInstanceId, STATE_ATTRIBUTE,
-    ShellAction, StateBindingKey, StateToken, StateValueKind, ensure_registry_valid,
+    BindingUpdate, BuiltInElementIndex, BuiltInElementKind, BuiltInElementSummary,
+    BuiltInSurfaceKind, ClockDeclaration, DATETIME_ATTRIBUTE, ElementDeclaration,
+    ElementInstanceId, RepeatDeclaration, RepeatedElementDeclaration, STATE_ATTRIBUTE, ShellAction,
+    StateBindingKey, StateToken, StateValueKind, ensure_registry_valid,
 };
 use crate::identity::IdentityRegistry;
 use crate::model::{DiagnosticMessage, LogicalRect, ViewportSpec};
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
-use crate::{ExperimentalDocumentIdentity, ExperimentalNodeIdentity, RuntimeError};
+use crate::{
+    ExperimentalDocumentIdentity, ExperimentalNodeIdentity, MAX_CLONED_NODES_PER_DOCUMENT,
+    MAX_CLONED_NODES_PER_REPEAT, MAX_ITEMS_PER_REPEAT, NumericValue, RepeatItemSnapshot,
+    RepeatSource, RepeatSourceSnapshot, RuntimeError,
+};
 use blitz_dom::node::NodeData;
 use blitz_dom::{Document, DocumentConfig, LocalName, QualName, StyleThreading, local_name, ns};
 use blitz_html::{HtmlDocument, HtmlProvider};
@@ -16,6 +21,7 @@ use blitz_traits::events::{
     PointerDetails, UiEvent,
 };
 use blitz_traits::shell::{ColorScheme, Viewport};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -114,6 +120,9 @@ pub enum LiveAction {
     ClockEnable(ElementInstanceId),
     ClockDisable(ElementInstanceId),
     ClockToggle(ElementInstanceId),
+    PowerProfileSetPowerSaver,
+    PowerProfileSetBalanced,
+    PowerProfileSetPerformance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +149,9 @@ impl LiveAction {
             ShellAction::ClockToggle => Self::ClockToggle(target.ok_or_else(|| {
                 RuntimeError::InvalidMutationTarget("clock.toggle has no target".into())
             })?),
+            ShellAction::PowerProfileSetPowerSaver => Self::PowerProfileSetPowerSaver,
+            ShellAction::PowerProfileSetBalanced => Self::PowerProfileSetBalanced,
+            ShellAction::PowerProfileSetPerformance => Self::PowerProfileSetPerformance,
         })
     }
 }
@@ -182,12 +194,25 @@ pub struct LiveRuntimeMeasurements {
     pub binding_count: u64,
     pub text_binding_count: u64,
     pub token_binding_count: u64,
+    pub value_binding_count: u64,
+    pub boolean_binding_count: u64,
     pub action_count: u64,
     pub clock_declaration_count: u64,
+    pub repeat_declaration_count: u64,
     pub registry_scan_count: u64,
     pub suppressed_binding_updates: u64,
     pub changed_token_updates: u64,
     pub suppressed_token_updates: u64,
+    pub repeat_insertions: u64,
+    pub repeat_removals: u64,
+    pub repeat_moves: u64,
+    pub repeat_property_updates: u64,
+    pub repeat_unchanged_items: u64,
+    pub repeat_subtree_clones: u64,
+    pub repeat_identity_reuses: u64,
+    pub repeated_item_count: u64,
+    pub cloned_node_count: u64,
+    pub last_reconciliation_ms: f64,
     pub last_state_projection_ms: f64,
     pub last_attribute_mutation_ms: f64,
 }
@@ -204,6 +229,7 @@ pub struct LiveDocument {
     viewport: ViewportSpec,
     document_identity: ExperimentalDocumentIdentity,
     builtins: BuiltInElementIndex,
+    repeats: BTreeMap<String, LiveRepeat>,
     parse_count: u32,
     started: Instant,
     frame_generation: u64,
@@ -214,6 +240,43 @@ pub struct LiveDocument {
     click_count: u64,
     measurements: LiveRuntimeMeasurements,
     diagnostics: Vec<DiagnosticMessage>,
+}
+
+#[derive(Debug, Clone)]
+struct LiveRepeatedElement {
+    declaration: RepeatedElementDeclaration,
+    node: ExperimentalNodeIdentity,
+}
+
+#[derive(Debug, Clone)]
+struct LiveRepeatedItem {
+    root: ExperimentalNodeIdentity,
+    elements: Vec<LiveRepeatedElement>,
+}
+
+#[derive(Debug, Clone)]
+struct LiveRepeat {
+    declaration: RepeatDeclaration,
+    source_generation: u64,
+    items: BTreeMap<String, LiveRepeatedItem>,
+    order: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RepeatMutation {
+    pub insertions: usize,
+    pub removals: usize,
+    pub moves: usize,
+    pub property_updates: usize,
+    pub unchanged_items: usize,
+    pub subtree_clones: usize,
+    pub identity_reuses: usize,
+}
+
+impl RepeatMutation {
+    pub const fn changed(self) -> bool {
+        self.insertions > 0 || self.removals > 0 || self.moves > 0 || self.property_updates > 0
+    }
 }
 
 impl LiveDocument {
@@ -369,6 +432,21 @@ impl LiveDocument {
         )?;
         let declaration_discovery_ms = elapsed_ms(discovery_started);
         let builtin_summary = builtins.summary();
+        let repeats = builtins
+            .repeat_declarations()
+            .into_iter()
+            .map(|declaration| {
+                (
+                    declaration.id.html_id.clone(),
+                    LiveRepeat {
+                        declaration,
+                        source_generation: 0,
+                        items: BTreeMap::new(),
+                        order: Vec::new(),
+                    },
+                )
+            })
+            .collect();
 
         let mut live = Self {
             document,
@@ -379,6 +457,7 @@ impl LiveDocument {
             viewport,
             document_identity,
             builtins,
+            repeats,
             parse_count: 1,
             started: Instant::now(),
             frame_generation: 0,
@@ -399,14 +478,18 @@ impl LiveDocument {
                 binding_count: builtin_summary.bindings as u64,
                 text_binding_count: builtin_summary.text_bindings as u64,
                 token_binding_count: builtin_summary.token_bindings as u64,
+                value_binding_count: builtin_summary.value_bindings as u64,
+                boolean_binding_count: builtin_summary.boolean_bindings as u64,
                 action_count: builtin_summary.actions as u64,
                 clock_declaration_count: builtin_summary.clock_declarations as u64,
+                repeat_declaration_count: builtin_summary.repeat_declarations as u64,
                 registry_scan_count: u64::from(builtin_summary.discovery_scans),
                 suppressed_binding_updates: 0,
                 changed_token_updates: 0,
                 suppressed_token_updates: 0,
                 last_state_projection_ms: 0.0,
                 last_attribute_mutation_ms: 0.0,
+                ..LiveRuntimeMeasurements::default()
             },
             diagnostics,
         };
@@ -415,6 +498,16 @@ impl LiveDocument {
             (StateBindingKey::SurfaceScaleProfile, StateToken::Scale1),
             (StateBindingKey::BatteryStatus, StateToken::Unavailable),
             (StateBindingKey::BatteryWarning, StateToken::Unknown),
+        ])?;
+        let unknown_values: Vec<_> = StateBindingKey::ALL
+            .into_iter()
+            .filter(|key| key.supports(StateValueKind::Value))
+            .map(|key| (key, NumericValue::Unknown))
+            .collect();
+        live.apply_bound_values(&unknown_values)?;
+        live.apply_bound_booleans(&[
+            (StateBindingKey::PowerProfileAvailability, None),
+            (StateBindingKey::PowerProfilePerformanceAvailable, None),
         ])?;
         Ok(live)
     }
@@ -729,7 +822,10 @@ impl LiveDocument {
     }
 
     pub fn binding_target_count(&self, key: StateBindingKey) -> usize {
-        self.text_binding_target_count(key) + self.token_binding_target_count(key)
+        self.text_binding_target_count(key)
+            + self.token_binding_target_count(key)
+            + self.value_binding_target_count(key)
+            + self.boolean_binding_target_count(key)
     }
 
     pub fn text_binding_target_count(&self, key: StateBindingKey) -> usize {
@@ -742,6 +838,25 @@ impl LiveDocument {
         self.builtins
             .binding_targets(key, StateValueKind::Token)
             .len()
+    }
+
+    pub fn value_binding_target_count(&self, key: StateBindingKey) -> usize {
+        self.builtins
+            .binding_targets(key, StateValueKind::Value)
+            .len()
+    }
+
+    pub fn boolean_binding_target_count(&self, key: StateBindingKey) -> usize {
+        self.builtins
+            .binding_targets(key, StateValueKind::Boolean)
+            .len()
+    }
+
+    pub fn repeat_source_target_count(&self, source: RepeatSource) -> usize {
+        self.repeats
+            .values()
+            .filter(|repeat| repeat.declaration.source == source)
+            .count()
     }
 
     pub fn element_identity(&self, html_id: &str) -> Result<ElementInstanceId, RuntimeError> {
@@ -985,6 +1100,232 @@ impl LiveDocument {
         Ok(update)
     }
 
+    pub fn apply_bound_values(
+        &mut self,
+        values: &[(StateBindingKey, NumericValue)],
+    ) -> Result<BindingUpdate, RuntimeError> {
+        let started = Instant::now();
+        let mut seen = BTreeSet::new();
+        let mut update = BindingUpdate::default();
+        for (key, value) in values {
+            if !key.supports(StateValueKind::Value) {
+                return Err(RuntimeError::InvalidMutationTarget(format!(
+                    "binding `{}` does not support numeric presentation",
+                    key.as_str()
+                )));
+            }
+            if !seen.insert(*key) {
+                return Err(RuntimeError::InvalidMutationTarget(format!(
+                    "numeric binding `{}` was supplied more than once",
+                    key.as_str()
+                )));
+            }
+            let targets = self
+                .builtins
+                .binding_targets(*key, StateValueKind::Value)
+                .to_vec();
+            for html_id in targets {
+                let declaration = self.builtins.element(&html_id).cloned().ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "numeric binding target `#{html_id}` disappeared"
+                    ))
+                })?;
+                let format = declaration.value_format.ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "numeric binding target `#{html_id}` has no format"
+                    ))
+                })?;
+                let formatted = value.format(format).map_err(|error| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "numeric binding `{}` could not be formatted: {error}",
+                        key.as_str()
+                    ))
+                })?;
+                let node = self.builtins.indexed_node(&html_id).ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "numeric binding target `#{html_id}` disappeared"
+                    ))
+                })?;
+                if self.apply_value_to_node(node, &formatted.display, formatted.value.as_deref())? {
+                    update.changed_elements = update.changed_elements.saturating_add(1);
+                    update.changed_value_elements = update.changed_value_elements.saturating_add(1);
+                }
+            }
+        }
+        if update.changed_elements > 0 {
+            self.resolve();
+        }
+        self.measurements.last_attribute_mutation_ms = elapsed_ms(started);
+        Ok(update)
+    }
+
+    pub fn apply_bound_booleans(
+        &mut self,
+        values: &[(StateBindingKey, Option<bool>)],
+    ) -> Result<BindingUpdate, RuntimeError> {
+        let started = Instant::now();
+        let mut seen = BTreeSet::new();
+        let mut update = BindingUpdate::default();
+        for (key, value) in values {
+            if !key.supports(StateValueKind::Boolean) {
+                return Err(RuntimeError::InvalidMutationTarget(format!(
+                    "binding `{}` does not support Boolean presentation",
+                    key.as_str()
+                )));
+            }
+            if !seen.insert(*key) {
+                return Err(RuntimeError::InvalidMutationTarget(format!(
+                    "Boolean binding `{}` was supplied more than once",
+                    key.as_str()
+                )));
+            }
+            let targets = self
+                .builtins
+                .binding_targets(*key, StateValueKind::Boolean)
+                .to_vec();
+            for html_id in targets {
+                let declaration = self.builtins.element(&html_id).cloned().ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "Boolean binding target `#{html_id}` disappeared"
+                    ))
+                })?;
+                let disabled = declaration.disabled || *value != Some(true);
+                let current = self.registered_attribute(&html_id, "disabled")?.is_some();
+                if current == disabled {
+                    continue;
+                }
+                if disabled {
+                    self.set_registered_attribute(&html_id, "disabled", "")?;
+                } else {
+                    self.clear_registered_attribute(&html_id, "disabled")?;
+                }
+                update.changed_elements = update.changed_elements.saturating_add(1);
+                update.changed_boolean_elements = update.changed_boolean_elements.saturating_add(1);
+            }
+        }
+        if update.changed_elements > 0 {
+            self.resolve();
+        }
+        self.measurements.last_attribute_mutation_ms = elapsed_ms(started);
+        Ok(update)
+    }
+
+    pub fn apply_repeat_source(
+        &mut self,
+        snapshot: &RepeatSourceSnapshot,
+    ) -> Result<RepeatMutation, RuntimeError> {
+        let started = Instant::now();
+        if snapshot.items.len() > MAX_ITEMS_PER_REPEAT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "repeat source `{}` has {} items; limit is {MAX_ITEMS_PER_REPEAT}",
+                snapshot.source.as_str(),
+                snapshot.items.len()
+            )));
+        }
+        let mut keys = BTreeSet::new();
+        for item in &snapshot.items {
+            if item.key.is_empty() || !keys.insert(item.key.clone()) {
+                return Err(RuntimeError::InvalidMutationTarget(format!(
+                    "repeat source `{}` contains an empty or duplicate item key",
+                    snapshot.source.as_str()
+                )));
+            }
+        }
+        let repeat_ids: Vec<_> = self
+            .repeats
+            .iter()
+            .filter(|(_, repeat)| repeat.declaration.source == snapshot.source)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut projected_document_nodes = self.total_repeated_nodes();
+        for repeat_id in &repeat_ids {
+            let repeat = &self.repeats[repeat_id];
+            let current = repeat
+                .items
+                .len()
+                .checked_mul(repeat.declaration.prototype_nodes)
+                .ok_or_else(|| {
+                    RuntimeError::LimitExceeded("current repeat node count overflow".into())
+                })?;
+            let desired = snapshot
+                .items
+                .len()
+                .checked_mul(repeat.declaration.prototype_nodes)
+                .ok_or_else(|| {
+                    RuntimeError::LimitExceeded("desired repeat node count overflow".into())
+                })?;
+            if desired > MAX_CLONED_NODES_PER_REPEAT {
+                return Err(RuntimeError::LimitExceeded(format!(
+                    "repeat `#{repeat_id}` would exceed the per-repeat node limit of {MAX_CLONED_NODES_PER_REPEAT}"
+                )));
+            }
+            projected_document_nodes = projected_document_nodes
+                .checked_sub(current)
+                .and_then(|nodes| nodes.checked_add(desired))
+                .ok_or_else(|| {
+                    RuntimeError::LimitExceeded("projected repeat node count overflow".into())
+                })?;
+        }
+        if projected_document_nodes > MAX_CLONED_NODES_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "repeat source `{}` would exceed the document node limit of {MAX_CLONED_NODES_PER_DOCUMENT}",
+                snapshot.source.as_str()
+            )));
+        }
+        let mut total = RepeatMutation::default();
+        for repeat_id in repeat_ids {
+            let update = self.reconcile_repeat(&repeat_id, snapshot)?;
+            total.insertions = total.insertions.saturating_add(update.insertions);
+            total.removals = total.removals.saturating_add(update.removals);
+            total.moves = total.moves.saturating_add(update.moves);
+            total.property_updates = total
+                .property_updates
+                .saturating_add(update.property_updates);
+            total.unchanged_items = total.unchanged_items.saturating_add(update.unchanged_items);
+            total.subtree_clones = total.subtree_clones.saturating_add(update.subtree_clones);
+            total.identity_reuses = total.identity_reuses.saturating_add(update.identity_reuses);
+        }
+        if total.changed() {
+            self.resolve();
+        }
+        self.measurements.repeat_insertions = self
+            .measurements
+            .repeat_insertions
+            .saturating_add(total.insertions as u64);
+        self.measurements.repeat_removals = self
+            .measurements
+            .repeat_removals
+            .saturating_add(total.removals as u64);
+        self.measurements.repeat_moves = self
+            .measurements
+            .repeat_moves
+            .saturating_add(total.moves as u64);
+        self.measurements.repeat_property_updates = self
+            .measurements
+            .repeat_property_updates
+            .saturating_add(total.property_updates as u64);
+        self.measurements.repeat_unchanged_items = self
+            .measurements
+            .repeat_unchanged_items
+            .saturating_add(total.unchanged_items as u64);
+        self.measurements.repeat_subtree_clones = self
+            .measurements
+            .repeat_subtree_clones
+            .saturating_add(total.subtree_clones as u64);
+        self.measurements.repeat_identity_reuses = self
+            .measurements
+            .repeat_identity_reuses
+            .saturating_add(total.identity_reuses as u64);
+        self.measurements.repeated_item_count = self
+            .repeats
+            .values()
+            .map(|repeat| repeat.items.len() as u64)
+            .sum();
+        self.measurements.cloned_node_count = self.total_repeated_nodes() as u64;
+        self.measurements.last_reconciliation_ms = elapsed_ms(started);
+        Ok(total)
+    }
+
     pub fn update_panel_state(
         &mut self,
         overlay_open: bool,
@@ -1119,6 +1460,385 @@ impl LiveDocument {
         Ok(())
     }
 
+    fn reconcile_repeat(
+        &mut self,
+        repeat_id: &str,
+        snapshot: &RepeatSourceSnapshot,
+    ) -> Result<RepeatMutation, RuntimeError> {
+        let mut repeat = self.repeats.remove(repeat_id).ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget(format!(
+                "repeat declaration `#{repeat_id}` disappeared"
+            ))
+        })?;
+        let result = self.reconcile_repeat_inner(&mut repeat, snapshot);
+        self.repeats.insert(repeat_id.to_owned(), repeat);
+        result
+    }
+
+    fn reconcile_repeat_inner(
+        &mut self,
+        repeat: &mut LiveRepeat,
+        snapshot: &RepeatSourceSnapshot,
+    ) -> Result<RepeatMutation, RuntimeError> {
+        if repeat.declaration.source != snapshot.source {
+            return Err(RuntimeError::InvalidMutationTarget(
+                "repeat source does not match its declaration".into(),
+            ));
+        }
+        if snapshot.source_generation < repeat.source_generation {
+            return Err(RuntimeError::InvalidMutationTarget(format!(
+                "stale `{}` source generation {} follows {}",
+                snapshot.source.as_str(),
+                snapshot.source_generation,
+                repeat.source_generation
+            )));
+        }
+        let desired_repeat_nodes = snapshot
+            .items
+            .len()
+            .checked_mul(repeat.declaration.prototype_nodes)
+            .ok_or_else(|| RuntimeError::LimitExceeded("repeat node count overflow".into()))?;
+        if desired_repeat_nodes > MAX_CLONED_NODES_PER_REPEAT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "repeat clone would exceed the per-repeat node limit of {MAX_CLONED_NODES_PER_REPEAT}"
+            )));
+        }
+        let desired_document_nodes = self
+            .total_repeated_nodes()
+            .checked_add(desired_repeat_nodes)
+            .ok_or_else(|| RuntimeError::LimitExceeded("repeated node count overflow".into()))?;
+        if desired_document_nodes > MAX_CLONED_NODES_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "repeat clone would exceed the document node limit of {MAX_CLONED_NODES_PER_DOCUMENT}"
+            )));
+        }
+        let mut update = RepeatMutation::default();
+        if repeat.source_generation != 0 && repeat.source_generation != snapshot.source_generation {
+            let old_keys = repeat.order.clone();
+            for key in old_keys {
+                self.remove_repeat_item(repeat, &key)?;
+                update.removals = update.removals.saturating_add(1);
+            }
+        }
+        repeat.source_generation = snapshot.source_generation;
+        let desired_keys: BTreeSet<_> = snapshot
+            .items
+            .iter()
+            .map(|item| item.key.as_str())
+            .collect();
+        let removed: Vec<_> = repeat
+            .order
+            .iter()
+            .filter(|key| !desired_keys.contains(key.as_str()))
+            .cloned()
+            .collect();
+        for key in removed {
+            self.remove_repeat_item(repeat, &key)?;
+            update.removals = update.removals.saturating_add(1);
+        }
+
+        for item in &snapshot.items {
+            if repeat.items.contains_key(&item.key) {
+                update.identity_reuses = update.identity_reuses.saturating_add(1);
+                let changed = self.update_repeat_item(repeat, item)?;
+                if changed == 0 {
+                    update.unchanged_items = update.unchanged_items.saturating_add(1);
+                } else {
+                    update.property_updates = update.property_updates.saturating_add(changed);
+                }
+            } else {
+                let repeat_nodes_after = repeat
+                    .items
+                    .len()
+                    .checked_add(1)
+                    .and_then(|items| items.checked_mul(repeat.declaration.prototype_nodes))
+                    .ok_or_else(|| {
+                        RuntimeError::LimitExceeded("repeat node count overflow".into())
+                    })?;
+                let nodes_after = self
+                    .total_repeated_nodes()
+                    .checked_add(repeat_nodes_after)
+                    .ok_or_else(|| {
+                        RuntimeError::LimitExceeded("repeated node count overflow".into())
+                    })?;
+                if repeat_nodes_after > MAX_CLONED_NODES_PER_REPEAT {
+                    return Err(RuntimeError::LimitExceeded(format!(
+                        "repeat clone would exceed the per-repeat node limit of {MAX_CLONED_NODES_PER_REPEAT}"
+                    )));
+                }
+                if nodes_after > MAX_CLONED_NODES_PER_DOCUMENT {
+                    return Err(RuntimeError::LimitExceeded(format!(
+                        "repeat clone would exceed the document node limit of {MAX_CLONED_NODES_PER_DOCUMENT}"
+                    )));
+                }
+                self.insert_repeat_item(repeat, item)?;
+                update.insertions = update.insertions.saturating_add(1);
+                update.subtree_clones = update.subtree_clones.saturating_add(1);
+            }
+        }
+        let desired_order: Vec<_> = snapshot.items.iter().map(|item| item.key.clone()).collect();
+        if repeat.order != desired_order {
+            update.moves = desired_order
+                .iter()
+                .enumerate()
+                .filter(|(index, key)| repeat.order.get(*index) != Some(*key))
+                .count();
+            let template = self
+                .identities
+                .resolve(&self.document, repeat.declaration.template_node)?;
+            for key in &desired_order {
+                let root = repeat.items.get(key).ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "repeat item `{key}` disappeared during reorder"
+                    ))
+                })?;
+                let slot = self.identities.resolve(&self.document, root.root)?;
+                self.document
+                    .mutate()
+                    .insert_nodes_before(template, &[slot]);
+            }
+            repeat.order = desired_order;
+        }
+        Ok(update)
+    }
+
+    fn total_repeated_nodes(&self) -> usize {
+        self.repeats
+            .values()
+            .map(|repeat| {
+                repeat
+                    .items
+                    .len()
+                    .saturating_mul(repeat.declaration.prototype_nodes)
+            })
+            .sum()
+    }
+
+    fn insert_repeat_item(
+        &mut self,
+        repeat: &mut LiveRepeat,
+        item: &RepeatItemSnapshot,
+    ) -> Result<(), RuntimeError> {
+        let prototype = self
+            .identities
+            .resolve(&self.document, repeat.declaration.root_node)?;
+        let clone = self.document.mutate().deep_clone_node(prototype);
+        let clone_slots = subtree_slots(&self.document, clone)?;
+        if clone_slots.len() != repeat.declaration.prototype_nodes {
+            return Err(RuntimeError::InvalidMutationTarget(format!(
+                "repeat `#{}` cloned {} nodes; expected {}",
+                repeat.declaration.id.html_id,
+                clone_slots.len(),
+                repeat.declaration.prototype_nodes
+            )));
+        }
+        let mut clone_identities = Vec::with_capacity(clone_slots.len());
+        for slot in &clone_slots {
+            clone_identities.push(self.identities.activate_created(&self.document, *slot)?);
+        }
+        let template = self
+            .identities
+            .resolve(&self.document, repeat.declaration.template_node)?;
+        self.document
+            .mutate()
+            .insert_nodes_before(template, &[clone]);
+        let elements = repeat
+            .declaration
+            .descendants
+            .iter()
+            .map(|declaration| {
+                let node = clone_identities
+                    .get(declaration.prototype_order)
+                    .copied()
+                    .ok_or_else(|| {
+                        RuntimeError::InvalidMutationTarget(format!(
+                            "repeat local id `{}` has an invalid prototype position",
+                            declaration.local_id
+                        ))
+                    })?;
+                Ok(LiveRepeatedElement {
+                    declaration: declaration.clone(),
+                    node,
+                })
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        repeat.items.insert(
+            item.key.clone(),
+            LiveRepeatedItem {
+                root: clone_identities[0],
+                elements,
+            },
+        );
+        repeat.order.push(item.key.clone());
+        self.update_repeat_item(repeat, item)?;
+        Ok(())
+    }
+
+    fn remove_repeat_item(
+        &mut self,
+        repeat: &mut LiveRepeat,
+        key: &str,
+    ) -> Result<(), RuntimeError> {
+        let Some(item) = repeat.items.remove(key) else {
+            return Ok(());
+        };
+        let slots = self.identities.subtree_slots(&self.document, item.root)?;
+        let root = self.identities.resolve(&self.document, item.root)?;
+        self.document.mutate().remove_and_drop_node(root);
+        self.identities.retire_removed(&self.document, &slots)?;
+        repeat.order.retain(|current| current != key);
+        Ok(())
+    }
+
+    fn update_repeat_item(
+        &mut self,
+        repeat: &LiveRepeat,
+        item: &RepeatItemSnapshot,
+    ) -> Result<usize, RuntimeError> {
+        let live = repeat.items.get(&item.key).ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget(format!("repeat item `{}` disappeared", item.key))
+        })?;
+        let mut changed = 0usize;
+        for element in &live.elements {
+            let element_changed = match element.declaration.kind {
+                BuiltInElementKind::StateText => {
+                    let value = item
+                        .text
+                        .get(&element.declaration.binding)
+                        .map(String::as_str)
+                        .unwrap_or("—");
+                    self.apply_text_to_node(element.node, value)?
+                }
+                BuiltInElementKind::StateToken => {
+                    let token = item
+                        .tokens
+                        .get(&element.declaration.binding)
+                        .copied()
+                        .unwrap_or(StateToken::Unknown);
+                    self.apply_attribute_to_node(
+                        element.node,
+                        STATE_ATTRIBUTE,
+                        Some(token.as_str()),
+                    )?
+                }
+                BuiltInElementKind::StateValue => {
+                    let value = item
+                        .values
+                        .get(&element.declaration.binding)
+                        .copied()
+                        .unwrap_or(NumericValue::Unknown);
+                    let format = element.declaration.value_format.ok_or_else(|| {
+                        RuntimeError::InvalidMutationTarget(format!(
+                            "repeat value `{}` has no numeric format",
+                            element.declaration.local_id
+                        ))
+                    })?;
+                    let formatted = value.format(format).map_err(|error| {
+                        RuntimeError::InvalidMutationTarget(format!(
+                            "repeat value `{}` could not be formatted: {error}",
+                            element.declaration.local_id
+                        ))
+                    })?;
+                    self.apply_value_to_node(
+                        element.node,
+                        &formatted.display,
+                        formatted.value.as_deref(),
+                    )?
+                }
+                _ => {
+                    return Err(RuntimeError::InvalidMutationTarget(
+                        "repeat contains a forbidden live element kind".into(),
+                    ));
+                }
+            };
+            changed = changed.saturating_add(usize::from(element_changed));
+        }
+        Ok(changed)
+    }
+
+    fn apply_value_to_node(
+        &mut self,
+        identity: ExperimentalNodeIdentity,
+        display: &str,
+        value: Option<&str>,
+    ) -> Result<bool, RuntimeError> {
+        let text_changed = self.apply_text_to_node(identity, display)?;
+        let value_changed = self.apply_attribute_to_node(identity, "value", value)?;
+        Ok(text_changed || value_changed)
+    }
+
+    fn apply_text_to_node(
+        &mut self,
+        identity: ExperimentalNodeIdentity,
+        value: &str,
+    ) -> Result<bool, RuntimeError> {
+        let parent = self.identities.resolve(&self.document, identity)?;
+        let current = self
+            .document
+            .get_node(parent)
+            .ok_or(RuntimeError::StaleIdentity {
+                slot: identity.slot,
+                generation: identity.generation,
+            })?
+            .text_content();
+        if current == value {
+            return Ok(false);
+        }
+        let children = self
+            .document
+            .get_node(parent)
+            .expect("resolved above")
+            .children
+            .clone();
+        let text_nodes: Vec<_> = children
+            .into_iter()
+            .filter(|child| {
+                self.document
+                    .get_node(*child)
+                    .is_some_and(|node| matches!(node.data, NodeData::Text(_)))
+            })
+            .collect();
+        if let Some((first, remaining)) = text_nodes.split_first() {
+            self.document.mutate().set_node_text(*first, value);
+            for text in remaining {
+                self.document.mutate().set_node_text(*text, "");
+            }
+        } else {
+            let text = self.document.mutate().create_text_node(value);
+            self.document.mutate().append_children(parent, &[text]);
+            self.identities.activate_created(&self.document, text)?;
+        }
+        Ok(true)
+    }
+
+    fn apply_attribute_to_node(
+        &mut self,
+        identity: ExperimentalNodeIdentity,
+        attribute: &str,
+        value: Option<&str>,
+    ) -> Result<bool, RuntimeError> {
+        let node = self.identities.resolve(&self.document, identity)?;
+        let current = self
+            .document
+            .get_node(node)
+            .and_then(|node| node.element_data())
+            .and_then(|element| element.attr(LocalName::from(attribute)));
+        if current == value {
+            return Ok(false);
+        }
+        let name = QualName {
+            prefix: None,
+            ns: ns!(),
+            local: LocalName::from(attribute),
+        };
+        if let Some(value) = value {
+            self.document.mutate().set_attribute(node, name, value);
+        } else {
+            self.document.mutate().clear_attribute(node, name);
+        }
+        Ok(true)
+    }
+
     fn set_registered_text(&mut self, html_id: &str, value: &str) -> Result<(), RuntimeError> {
         let identity = self.builtins.indexed_node(html_id).ok_or_else(|| {
             RuntimeError::InvalidMutationTarget(format!(
@@ -1184,6 +1904,28 @@ impl LiveDocument {
                 local: LocalName::from(attribute),
             },
             value,
+        );
+        Ok(())
+    }
+
+    fn clear_registered_attribute(
+        &mut self,
+        html_id: &str,
+        attribute: &str,
+    ) -> Result<(), RuntimeError> {
+        let identity = self.builtins.indexed_node(html_id).ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget(format!(
+                "registered element `#{html_id}` disappeared"
+            ))
+        })?;
+        let node = self.identities.resolve(&self.document, identity)?;
+        self.document.mutate().clear_attribute(
+            node,
+            QualName {
+                prefix: None,
+                ns: ns!(),
+                local: LocalName::from(attribute),
+            },
         );
         Ok(())
     }
@@ -1332,6 +2074,19 @@ fn required_selector(document: &HtmlDocument, selector: &str) -> Result<usize, R
         })
 }
 
+fn subtree_slots(document: &HtmlDocument, root: usize) -> Result<Vec<usize>, RuntimeError> {
+    let mut slots = Vec::new();
+    let mut stack = vec![root];
+    while let Some(slot) = stack.pop() {
+        let node = document.get_node(slot).ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget(format!("repeat subtree node {slot} disappeared"))
+        })?;
+        slots.push(slot);
+        stack.extend(node.children.iter().rev().copied());
+    }
+    Ok(slots)
+}
+
 fn node_bounds(node: &blitz_dom::Node) -> LogicalRect {
     let absolute = node.absolute_position(0.0, 0.0);
     LogicalRect {
@@ -1470,6 +2225,10 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/formatted-clock")
     }
 
+    fn power_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/power")
+    }
+
     fn element_attribute(live: &LiveDocument, html_id: &str, name: &str) -> Option<String> {
         let identity = live.builtins.indexed_node(html_id)?;
         let slot = live.identities.resolve(&live.document, identity).ok()?;
@@ -1526,6 +2285,218 @@ mod tests {
             });
         }
         bounds
+    }
+
+    fn device_item(key: &str, model: &str, percentage: f64) -> RepeatItemSnapshot {
+        RepeatItemSnapshot {
+            key: key.into(),
+            text: BTreeMap::from([(crate::ItemBindingKey::Model, model.into())]),
+            tokens: BTreeMap::from([
+                (crate::ItemBindingKey::State, StateToken::Discharging),
+                (crate::ItemBindingKey::Type, StateToken::Battery),
+            ]),
+            values: BTreeMap::from([
+                (
+                    crate::ItemBindingKey::Percentage,
+                    NumericValue::Decimal(percentage),
+                ),
+                (crate::ItemBindingKey::Energy, NumericValue::Decimal(42.0)),
+            ]),
+        }
+    }
+
+    #[test]
+    fn standard_template_reconciles_keyed_items_without_reparse_or_rescan() {
+        let mut overlay = LiveDocument::load_surface_document(
+            power_fixture(),
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            800,
+            600,
+        )
+        .unwrap();
+        assert_eq!(overlay.built_in_summary().repeat_declarations, 2);
+        let parse_count = overlay.snapshot().unwrap().document_parse_count;
+        let scans = overlay.measurements().registry_scan_count;
+        let first = RepeatSourceSnapshot {
+            source: RepeatSource::UPowerDevices,
+            source_generation: 7,
+            items: vec![
+                device_item("7:/device/a", "Battery A", 41.0),
+                device_item("7:/device/b", "Battery B", 72.0),
+            ],
+        };
+        let inserted = overlay.apply_repeat_source(&first).unwrap();
+        assert_eq!(inserted.insertions, 2);
+        assert_eq!(inserted.subtree_clones, 2);
+        let identities: BTreeMap<_, _> = overlay.repeats["device-row"]
+            .items
+            .iter()
+            .map(|(key, item)| (key.clone(), item.root))
+            .collect();
+
+        let second = RepeatSourceSnapshot {
+            source: RepeatSource::UPowerDevices,
+            source_generation: 7,
+            items: vec![
+                device_item("7:/device/b", "Battery B updated", 73.0),
+                device_item("7:/device/a", "Battery A", 41.0),
+            ],
+        };
+        let updated = overlay.apply_repeat_source(&second).unwrap();
+        assert!(updated.moves > 0);
+        assert!(updated.property_updates > 0);
+        assert_eq!(updated.identity_reuses, 2);
+        for (key, identity) in identities {
+            assert_eq!(overlay.repeats["device-row"].items[&key].root, identity);
+        }
+        let third = RepeatSourceSnapshot {
+            source: RepeatSource::UPowerDevices,
+            source_generation: 7,
+            items: vec![device_item("7:/device/b", "Battery B updated", 73.0)],
+        };
+        let removed = overlay.apply_repeat_source(&third).unwrap();
+        assert_eq!(removed.removals, 1);
+        let stale = RepeatSourceSnapshot {
+            source: RepeatSource::UPowerDevices,
+            source_generation: 6,
+            items: Vec::new(),
+        };
+        assert!(overlay.apply_repeat_source(&stale).is_err());
+        let duplicate = RepeatSourceSnapshot {
+            source: RepeatSource::UPowerDevices,
+            source_generation: 7,
+            items: vec![
+                device_item("duplicate", "One", 1.0),
+                device_item("duplicate", "Two", 2.0),
+            ],
+        };
+        assert!(overlay.apply_repeat_source(&duplicate).is_err());
+        assert_eq!(
+            overlay.snapshot().unwrap().document_parse_count,
+            parse_count
+        );
+        assert_eq!(overlay.measurements().registry_scan_count, scans);
+        assert!(overlay.render().is_ok());
+    }
+
+    #[test]
+    fn five_hundred_collection_changes_and_duplicates_remain_bounded() {
+        let mut overlay = LiveDocument::load_surface_document(
+            power_fixture(),
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            800,
+            600,
+        )
+        .unwrap();
+        let parse_count = overlay.snapshot().unwrap().document_parse_count;
+        let scans = overlay.measurements().registry_scan_count;
+        let mut last = RepeatSourceSnapshot {
+            source: RepeatSource::UPowerDevices,
+            source_generation: 1,
+            items: Vec::new(),
+        };
+        let mut changed_passes = 0usize;
+        for index in 0..500 {
+            let first = device_item("1:/device/a", "A", index as f64 % 100.0);
+            let second = device_item("1:/device/b", "B", 50.0);
+            last.items = if index % 3 == 0 {
+                vec![first]
+            } else if index % 2 == 0 {
+                vec![second, first]
+            } else {
+                vec![first, second]
+            };
+            let update = overlay.apply_repeat_source(&last).unwrap();
+            changed_passes += usize::from(update.changed());
+            assert!(overlay.repeats["device-row"].items.len() <= 2);
+        }
+        assert_eq!(changed_passes, 500);
+        for _ in 0..500 {
+            assert!(!overlay.apply_repeat_source(&last).unwrap().changed());
+        }
+        assert_eq!(
+            overlay.snapshot().unwrap().document_parse_count,
+            parse_count
+        );
+        let measurements = overlay.measurements();
+        assert_eq!(measurements.registry_scan_count, scans);
+        assert!(measurements.repeat_insertions > 0);
+        assert!(measurements.repeat_removals > 0);
+        assert!(measurements.repeat_moves > 0);
+        assert!(measurements.repeat_property_updates > 0);
+        assert!(measurements.repeat_unchanged_items >= 500);
+        assert!(measurements.repeat_subtree_clones > 0);
+        assert!(measurements.repeat_identity_reuses > 0);
+        assert!(measurements.repeated_item_count <= 2);
+        assert!(measurements.cloned_node_count <= MAX_CLONED_NODES_PER_REPEAT as u64);
+    }
+
+    #[test]
+    fn state_value_and_dynamic_action_disable_mutate_incrementally() {
+        let mut panel = LiveDocument::load_surface_document(
+            power_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            58,
+        )
+        .unwrap();
+        assert!(element_attribute(&panel, "performance", "disabled").is_some());
+        let disabled_bounds = panel.element_bounds("performance").unwrap();
+        let x = f64::from(disabled_bounds.x + disabled_bounds.width / 2.0);
+        let y = f64::from(disabled_bounds.y + disabled_bounds.height / 2.0);
+        panel.pointer_move(x, y).unwrap();
+        assert!(!panel.pointer_primary(true).unwrap());
+        assert!(!panel.pointer_primary(false).unwrap());
+        assert_eq!(panel.take_action(), None);
+        let enabled = panel
+            .apply_bound_booleans(&[
+                (StateBindingKey::PowerProfileAvailability, Some(true)),
+                (
+                    StateBindingKey::PowerProfilePerformanceAvailable,
+                    Some(true),
+                ),
+            ])
+            .unwrap();
+        assert_eq!(enabled.changed_boolean_elements, 3);
+        assert!(element_attribute(&panel, "performance", "disabled").is_none());
+        assert_eq!(
+            click_action(&mut panel, &disabled_bounds),
+            LiveAction::PowerProfileSetPerformance
+        );
+
+        let mut overlay = LiveDocument::load_surface_document(
+            power_fixture(),
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            800,
+            600,
+        )
+        .unwrap();
+        let energy_identity = overlay.element_identity("battery-energy").unwrap();
+        let value = overlay
+            .apply_bound_values(&[(StateBindingKey::BatteryEnergy, NumericValue::Decimal(42.25))])
+            .unwrap();
+        assert_eq!(value.changed_elements, 1);
+        assert_eq!(overlay.element_text("battery-energy").unwrap(), "42.2 Wh");
+        assert_eq!(
+            element_attribute(&overlay, "battery-energy", "value").as_deref(),
+            Some("42.25")
+        );
+        let unknown = overlay
+            .apply_bound_values(&[(StateBindingKey::BatteryEnergy, NumericValue::Unknown)])
+            .unwrap();
+        assert_eq!(unknown.changed_elements, 1);
+        assert_eq!(element_attribute(&overlay, "battery-energy", "value"), None);
+        assert_eq!(
+            overlay.element_identity("battery-energy").unwrap(),
+            energy_identity
+        );
+        assert_eq!(panel.snapshot().unwrap().document_parse_count, 1);
+        assert_eq!(overlay.snapshot().unwrap().document_parse_count, 1);
+        assert_eq!(overlay.measurements().registry_scan_count, 1);
     }
 
     #[test]
@@ -1805,6 +2776,9 @@ mod tests {
                 token_bindings: 0,
                 actions: 2,
                 clock_declarations: 0,
+                value_bindings: 0,
+                boolean_bindings: 0,
+                repeat_declarations: 0,
                 discovery_scans: 1,
             }
         );

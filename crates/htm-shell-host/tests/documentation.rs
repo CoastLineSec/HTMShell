@@ -1,8 +1,12 @@
 use htm_runtime::{
     CLOCK_FORMAT_CONVERSIONS, CLOCK_FORMAT_FLAGS, CLOCK_PUBLIC_ATTRIBUTES, ClockFormat,
-    ShellAction, StateBindingKey, StateToken, built_in_registry_names,
+    ItemBindingKey, RepeatSource, ShellAction, StateBindingKey, StateToken, StateValueFormat,
+    built_in_registry_names,
 };
-use htm_shell_host::{SurfaceKind, ValidatedManifest};
+use htm_shell_host::{
+    PerformanceDegradationReason, PowerProfile, SurfaceKind, UPowerDeviceState, UPowerDeviceType,
+    ValidatedManifest,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -119,6 +123,11 @@ fn public_documentation_links_and_example_paths_resolve() {
         "examples/formatted-clock/style.css",
         "examples/battery-panel/shell.json",
         "examples/battery-panel/assets/battery.svg",
+        "examples/power/shell.json",
+        "examples/power/panel.html",
+        "examples/power/overlay.html",
+        "examples/power/style.css",
+        "examples/power/assets/power.svg",
     ] {
         assert!(
             root.join(path).is_file(),
@@ -189,6 +198,67 @@ fn typed_public_names_are_covered_by_the_reference() {
             token.as_str()
         );
     }
+    for source in RepeatSource::ALL {
+        assert!(
+            documented_name(&reference, source.as_str()),
+            "repeat source is undocumented: {}",
+            source.as_str()
+        );
+    }
+    for binding in ItemBindingKey::ALL {
+        assert!(
+            documented_name(&reference, binding.as_str()),
+            "repeat item binding is undocumented: {}",
+            binding.as_str()
+        );
+    }
+    for format in StateValueFormat::ALL {
+        assert!(
+            documented_name(&reference, format.as_str()),
+            "state-value format is undocumented: {}",
+            format.as_str()
+        );
+    }
+    for attribute in [
+        "data-htm-source",
+        "data-htm-local-id",
+        "data-htm-format",
+        "data-htm-enabled-bind",
+        "value",
+    ] {
+        assert!(
+            documented_name(&reference, attribute),
+            "power declaration attribute is undocumented: {attribute}"
+        );
+    }
+    for device_type in UPowerDeviceType::ALL {
+        assert!(
+            documented_name(&reference, device_type.token().as_str()),
+            "UPower device type is undocumented: {}",
+            device_type.token().as_str()
+        );
+    }
+    for state in UPowerDeviceState::ALL {
+        assert!(
+            documented_name(&reference, state.token().as_str()),
+            "UPower device state is undocumented: {}",
+            state.token().as_str()
+        );
+    }
+    for profile in PowerProfile::ALL {
+        assert!(
+            documented_name(&reference, profile.wire()),
+            "power profile is undocumented: {}",
+            profile.wire()
+        );
+    }
+    for degradation in PerformanceDegradationReason::ALL {
+        assert!(
+            documented_name(&reference, degradation.token().as_str()),
+            "degradation reason is undocumented: {}",
+            degradation.token().as_str()
+        );
+    }
     for attribute in CLOCK_PUBLIC_ATTRIBUTES {
         assert!(
             documented_name(&reference, attribute),
@@ -230,6 +300,7 @@ fn documented_manifests_validate_without_wayland() {
         "examples/clock-panel/shell.json",
         "examples/formatted-clock/shell.json",
         "examples/battery-panel/shell.json",
+        "examples/power/shell.json",
     ] {
         let manifest = ValidatedManifest::load(root.join(path))
             .unwrap_or_else(|error| panic!("documented manifest {path} is invalid: {error}"));
@@ -280,6 +351,68 @@ fn private_clock_parity_matrix_is_resolved_when_present() {
         if row.contains("Quickshell capability") {
             continue;
         }
+        assert!(
+            row.ends_with("| EQUIVALENT |")
+                || row.ends_with("| IMPLEMENTED |")
+                || row.ends_with("| NOT APPLICABLE |")
+                || row.ends_with("| DEFERRED BY JAMES |"),
+            "invalid final parity classification: {row}"
+        );
+    }
+}
+
+#[test]
+fn private_upower_parity_matrix_is_complete_when_present() {
+    let path = workspace_root().join(".internal/research/upower-parity.md");
+    if !path.is_file() {
+        return;
+    }
+    let text = fs::read_to_string(&path).expect("private parity matrix is UTF-8");
+    for capability in [
+        "`UPower.displayDevice`",
+        "`UPower.onBattery`",
+        "`UPower.devices`",
+        "`UPowerDevice.ready`",
+        "`UPowerDevice.model`",
+        "`UPowerDeviceState.toString`",
+        "`UPowerDeviceType.toString`",
+        "`PowerProfiles.profile`",
+        "`PowerProfiles.hasPerformanceProfile`",
+        "`PowerProfiles.holds`",
+        "`PowerProfiles.degradationReason`",
+        "`PowerProfile.toString`",
+        "`PerformanceDegradationReason.toString`",
+    ] {
+        assert!(
+            text.contains(capability),
+            "UPower parity row is missing: {capability}"
+        );
+    }
+    for device_type in UPowerDeviceType::ALL {
+        assert!(
+            text.contains(&format!("`{}`", device_type.token().as_str()))
+                || text.contains(&format!("Type `{:?}`", device_type)),
+            "UPower device type parity row is missing: {device_type:?}"
+        );
+    }
+    for unresolved in ["| PENDING |", "UNRESOLVED", "TODO"] {
+        assert!(
+            !text.contains(unresolved),
+            "UPower parity matrix remains unresolved: {unresolved}"
+        );
+    }
+    let rows: Vec<_> = text
+        .lines()
+        .filter(|line| line.starts_with('|') && !line.starts_with("| ---"))
+        .filter(|line| !line.contains("Quickshell capability"))
+        .collect();
+    assert_eq!(rows.len(), 73, "UPower parity row count changed");
+    for row in rows {
+        assert_eq!(
+            row.matches('|').count(),
+            10,
+            "parity row must contain all nine fields: {row}"
+        );
         assert!(
             row.ends_with("| EQUIVALENT |")
                 || row.ends_with("| IMPLEMENTED |")

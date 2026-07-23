@@ -1,17 +1,17 @@
 use crate::ShellHostError;
-use crate::battery::{
-    BatteryFanoutMetrics, BatteryService, BatteryServiceSummary, BatterySnapshot,
-};
 use crate::buffer::{BufferData, BufferPoolStats, ShmBufferPool};
 use crate::clock::{ClockService, ClockServiceSummary, ClockUpdate};
 use crate::lifecycle::LayerLifecycle;
 use crate::manifest::{SurfaceKind as ManifestSurfaceKind, ValidatedManifest};
 use crate::output::{OutputCatalog, OutputEligibility, OutputKey};
+use crate::power::{
+    BatteryServiceSummary, PowerFanoutMetrics, PowerProfile, PowerService, PowerSnapshot,
+};
 use crate::scale::{PresentationProfile, SurfaceScaleState};
 use crate::scheduler::{FrameScheduler, ScheduleDecision};
 use htm_runtime::{
-    LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind, LiveFrame, StateBindingKey,
-    StateToken,
+    LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind, LiveFrame, RepeatSource,
+    StateBindingKey, StateToken,
 };
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::fd::BorrowedFd;
@@ -162,10 +162,21 @@ pub struct SurfaceHostSummary {
     pub token_binding_count: u64,
     pub registered_action_count: u64,
     pub clock_declaration_count: u64,
+    pub repeat_declaration_count: u64,
     pub registry_scan_count: u64,
     pub suppressed_binding_updates: u64,
     pub changed_token_updates: u64,
     pub suppressed_token_updates: u64,
+    pub repeat_insertions: u64,
+    pub repeat_removals: u64,
+    pub repeat_moves: u64,
+    pub repeat_property_updates: u64,
+    pub repeat_unchanged_items: u64,
+    pub repeat_subtree_clones: u64,
+    pub repeat_identity_reuses: u64,
+    pub repeated_item_count: u64,
+    pub cloned_node_count: u64,
+    pub last_reconciliation_us: u64,
     pub last_state_projection_us: u64,
     pub last_attribute_mutation_us: u64,
     pub last_pointer_release_to_action_dispatch_us: u64,
@@ -558,7 +569,7 @@ struct State {
     combined_mapped_memory_peak: usize,
     failure: Option<String>,
     clock: ClockService,
-    battery: BatteryService,
+    battery: PowerService,
 }
 
 impl State {
@@ -625,7 +636,7 @@ impl State {
             combined_mapped_memory_peak: 0,
             failure: None,
             clock: ClockService::default(),
-            battery: BatteryService::default(),
+            battery: PowerService::default(),
         }
     }
 
@@ -1271,32 +1282,47 @@ impl State {
         Ok(())
     }
 
-    fn battery_subscriber_count(&self) -> usize {
-        self.surfaces
+    fn power_subscriber_counts(&self) -> (usize, usize) {
+        let mut upower = 0usize;
+        let mut profiles = 0usize;
+        for runtime in self
+            .surfaces
             .iter()
-            .filter(|surface| {
-                surface.runtime.as_ref().is_some_and(|runtime| {
-                    [
-                        StateBindingKey::BatteryPercentage,
-                        StateBindingKey::BatteryStatus,
-                        StateBindingKey::BatteryWarning,
-                    ]
-                    .into_iter()
-                    .any(|key| runtime.binding_target_count(key) > 0)
-                })
-            })
-            .count()
+            .filter_map(|surface| surface.runtime.as_ref())
+        {
+            let declarations = runtime.built_in_declarations();
+            let upower_bound =
+                StateBindingKey::ALL.into_iter().any(|key| {
+                    (key.as_str().starts_with("upower.") || key.as_str().starts_with("battery."))
+                        && runtime.binding_target_count(key) > 0
+                }) || runtime.repeat_source_target_count(RepeatSource::UPowerDevices) > 0;
+            let profile_bound = StateBindingKey::ALL.into_iter().any(|key| {
+                key.as_str().starts_with("power_profile.") && runtime.binding_target_count(key) > 0
+            }) || runtime
+                .repeat_source_target_count(RepeatSource::PowerProfileHolds)
+                > 0
+                || declarations.iter().any(|declaration| {
+                    declaration
+                        .action
+                        .is_some_and(|action| action.as_str().starts_with("power_profile."))
+                        || declaration
+                            .enabled_binding
+                            .is_some_and(|key| key.as_str().starts_with("power_profile."))
+                });
+            upower = upower.saturating_add(usize::from(upower_bound));
+            profiles = profiles.saturating_add(usize::from(profile_bound));
+        }
+        (upower, profiles)
     }
 
     fn reconcile_battery_subscribers(&mut self) {
-        let subscribers = self.battery_subscriber_count();
-        let previous = self.battery.subscriber_count();
-        let snapshot = self.battery.set_subscriber_count(subscribers);
-        if subscribers > previous {
-            let snapshot = snapshot.or_else(|| self.battery.current_snapshot().cloned());
-            if let Some(snapshot) = snapshot {
-                self.fanout_battery_snapshot(&snapshot);
-            }
+        let (upower, profiles) = self.power_subscriber_counts();
+        let previous_upower = self.battery.upower_subscriber_count();
+        let previous_profiles = self.battery.profile_subscriber_count();
+        let snapshot = self.battery.set_subscriber_counts(upower, profiles);
+        if upower > previous_upower || profiles > previous_profiles {
+            let snapshot = snapshot.unwrap_or_else(|| self.battery.current_snapshot().clone());
+            self.fanout_battery_snapshot(&snapshot);
         }
     }
 
@@ -1321,11 +1347,10 @@ impl State {
         self.maybe_stop_after_battery_updates();
     }
 
-    fn fanout_battery_snapshot(&mut self, snapshot: &BatterySnapshot) {
+    fn fanout_battery_snapshot(&mut self, snapshot: &PowerSnapshot) {
         let started = Instant::now();
         let projection_started = Instant::now();
-        let text = snapshot.text_projections();
-        let tokens = snapshot.token_projections();
+        let projections = snapshot.projections();
         let projection_us = elapsed_us(projection_started);
         let mut documents = 0usize;
         let mut elements = 0usize;
@@ -1336,21 +1361,40 @@ impl State {
             let Some(runtime) = surface.runtime.as_mut() else {
                 continue;
             };
-            let subscribes = [
-                StateBindingKey::BatteryPercentage,
-                StateBindingKey::BatteryStatus,
-                StateBindingKey::BatteryWarning,
-            ]
-            .into_iter()
-            .any(|key| runtime.binding_target_count(key) > 0);
+            let subscribes = StateBindingKey::ALL.into_iter().any(|key| {
+                (key.as_str().starts_with("battery.")
+                    || key.as_str().starts_with("upower.")
+                    || key.as_str().starts_with("power_profile."))
+                    && runtime.binding_target_count(key) > 0
+            }) || runtime.repeat_source_target_count(RepeatSource::UPowerDevices)
+                > 0
+                || runtime.repeat_source_target_count(RepeatSource::PowerProfileHolds) > 0;
             if !subscribes {
                 continue;
             }
             documents = documents.saturating_add(1);
-            match runtime.apply_bound_state(&text, &tokens) {
-                Ok(update) => {
-                    elements = elements.saturating_add(update.changed_elements);
-                    if update.changed_elements > 0 {
+            let result = (|| {
+                let state = runtime.apply_bound_state(&projections.text, &projections.tokens)?;
+                let values = runtime.apply_bound_values(&projections.values)?;
+                let booleans = runtime.apply_bound_booleans(&projections.booleans)?;
+                let mut changed = state
+                    .changed_elements
+                    .saturating_add(values.changed_elements)
+                    .saturating_add(booleans.changed_elements);
+                for repeat in &projections.repeats {
+                    let mutation = runtime.apply_repeat_source(repeat)?;
+                    changed = changed
+                        .saturating_add(mutation.insertions)
+                        .saturating_add(mutation.removals)
+                        .saturating_add(mutation.moves)
+                        .saturating_add(mutation.property_updates);
+                }
+                Ok::<usize, htm_runtime::RuntimeError>(changed)
+            })();
+            match result {
+                Ok(changed) => {
+                    elements = elements.saturating_add(changed);
+                    if changed > 0 {
                         if surface.desired_mapped {
                             surface
                                 .pending_binding_mutation_started
@@ -1371,7 +1415,7 @@ impl State {
                 }
             }
         }
-        self.battery.record_fanout(BatteryFanoutMetrics {
+        self.battery.record_fanout(PowerFanoutMetrics {
             documents,
             elements,
             frames,
@@ -1784,12 +1828,26 @@ impl State {
         surface_state.summary.registered_action_count = runtime_measurements.action_count;
         surface_state.summary.clock_declaration_count =
             runtime_measurements.clock_declaration_count;
+        surface_state.summary.repeat_declaration_count =
+            runtime_measurements.repeat_declaration_count;
         surface_state.summary.registry_scan_count = runtime_measurements.registry_scan_count;
         surface_state.summary.suppressed_binding_updates =
             runtime_measurements.suppressed_binding_updates;
         surface_state.summary.changed_token_updates = runtime_measurements.changed_token_updates;
         surface_state.summary.suppressed_token_updates =
             runtime_measurements.suppressed_token_updates;
+        surface_state.summary.repeat_insertions = runtime_measurements.repeat_insertions;
+        surface_state.summary.repeat_removals = runtime_measurements.repeat_removals;
+        surface_state.summary.repeat_moves = runtime_measurements.repeat_moves;
+        surface_state.summary.repeat_property_updates =
+            runtime_measurements.repeat_property_updates;
+        surface_state.summary.repeat_unchanged_items = runtime_measurements.repeat_unchanged_items;
+        surface_state.summary.repeat_subtree_clones = runtime_measurements.repeat_subtree_clones;
+        surface_state.summary.repeat_identity_reuses = runtime_measurements.repeat_identity_reuses;
+        surface_state.summary.repeated_item_count = runtime_measurements.repeated_item_count;
+        surface_state.summary.cloned_node_count = runtime_measurements.cloned_node_count;
+        surface_state.summary.last_reconciliation_us =
+            milliseconds_to_microseconds(runtime_measurements.last_reconciliation_ms);
         surface_state.summary.last_state_projection_us =
             milliseconds_to_microseconds(runtime_measurements.last_state_projection_ms);
         surface_state.summary.last_attribute_mutation_us =
@@ -1881,6 +1939,18 @@ impl State {
             }
             return Ok(());
         }
+        if matches!(
+            action,
+            LiveAction::PowerProfileSetPowerSaver
+                | LiveAction::PowerProfileSetBalanced
+                | LiveAction::PowerProfileSetPerformance
+        ) {
+            self.handle_power_profile_action(owner, action)?;
+            if matches!(self.options, SessionOptions::Manifest(_)) {
+                self.manifest_actions = self.manifest_actions.saturating_add(1);
+            }
+            return Ok(());
+        }
         if matches!(self.options, SessionOptions::Manifest(_)) {
             return self.handle_manifest_action(owner, action);
         }
@@ -1922,8 +1992,40 @@ impl State {
             }
             LiveAction::ClockEnable(_)
             | LiveAction::ClockDisable(_)
-            | LiveAction::ClockToggle(_) => unreachable!("handled above"),
+            | LiveAction::ClockToggle(_)
+            | LiveAction::PowerProfileSetPowerSaver
+            | LiveAction::PowerProfileSetBalanced
+            | LiveAction::PowerProfileSetPerformance => unreachable!("handled above"),
         }
+        Ok(())
+    }
+
+    fn handle_power_profile_action(
+        &mut self,
+        owner: u64,
+        action: LiveAction,
+    ) -> Result<(), ShellHostError> {
+        let index = self
+            .surface_index_by_owner(owner)
+            .ok_or_else(|| ShellHostError::Wayland(format!("surface instance {owner} is stale")))?;
+        if !self.surfaces[index].desired_mapped {
+            return Err(ShellHostError::Wayland(
+                "unmapped surface cannot dispatch a power-profile action".into(),
+            ));
+        }
+        let profile = match action {
+            LiveAction::PowerProfileSetPowerSaver => PowerProfile::PowerSaver,
+            LiveAction::PowerProfileSetBalanced => PowerProfile::Balanced,
+            LiveAction::PowerProfileSetPerformance => PowerProfile::Performance,
+            _ => {
+                return Err(ShellHostError::Wayland(
+                    "non-profile action entered power-profile dispatch".into(),
+                ));
+            }
+        };
+        self.battery
+            .request_profile(profile)
+            .map_err(ShellHostError::Wayland)?;
         Ok(())
     }
 
@@ -2035,7 +2137,12 @@ impl State {
             }
             LiveAction::ClockEnable(_)
             | LiveAction::ClockDisable(_)
-            | LiveAction::ClockToggle(_) => unreachable!("handled before manifest dispatch"),
+            | LiveAction::ClockToggle(_)
+            | LiveAction::PowerProfileSetPowerSaver
+            | LiveAction::PowerProfileSetBalanced
+            | LiveAction::PowerProfileSetPerformance => {
+                unreachable!("handled before manifest dispatch")
+            }
         }
         self.manifest_actions = self.manifest_actions.saturating_add(1);
         Ok(())
@@ -2751,12 +2858,25 @@ impl State {
                             metrics.token_binding_count = measurements.token_binding_count;
                             metrics.registered_action_count = measurements.action_count;
                             metrics.clock_declaration_count = measurements.clock_declaration_count;
+                            metrics.repeat_declaration_count =
+                                measurements.repeat_declaration_count;
                             metrics.registry_scan_count = measurements.registry_scan_count;
                             metrics.suppressed_binding_updates =
                                 measurements.suppressed_binding_updates;
                             metrics.changed_token_updates = measurements.changed_token_updates;
                             metrics.suppressed_token_updates =
                                 measurements.suppressed_token_updates;
+                            metrics.repeat_insertions = measurements.repeat_insertions;
+                            metrics.repeat_removals = measurements.repeat_removals;
+                            metrics.repeat_moves = measurements.repeat_moves;
+                            metrics.repeat_property_updates = measurements.repeat_property_updates;
+                            metrics.repeat_unchanged_items = measurements.repeat_unchanged_items;
+                            metrics.repeat_subtree_clones = measurements.repeat_subtree_clones;
+                            metrics.repeat_identity_reuses = measurements.repeat_identity_reuses;
+                            metrics.repeated_item_count = measurements.repeated_item_count;
+                            metrics.cloned_node_count = measurements.cloned_node_count;
+                            metrics.last_reconciliation_us =
+                                milliseconds_to_microseconds(measurements.last_reconciliation_ms);
                             metrics.last_state_projection_us =
                                 milliseconds_to_microseconds(measurements.last_state_projection_ms);
                             metrics.last_attribute_mutation_us = milliseconds_to_microseconds(
@@ -3184,6 +3304,9 @@ fn validate_manifest_action_source(
         LiveAction::ClockEnable(_) | LiveAction::ClockDisable(_) | LiveAction::ClockToggle(_) => {
             Ok(())
         }
+        LiveAction::PowerProfileSetPowerSaver
+        | LiveAction::PowerProfileSetBalanced
+        | LiveAction::PowerProfileSetPerformance => Ok(()),
     }
 }
 
