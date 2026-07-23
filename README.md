@@ -1,8 +1,10 @@
 # HTMShell
 
-**HTMShell — Hypertext Theming & Markup Shell** is an experimental native desktop-shell platform that uses HTML and CSS as authoring languages for Linux desktop interfaces.
+**HTMShell (Hypertext Theming & Markup Shell)** is an experimental native desktop-shell platform that uses HTML and CSS as authoring languages for Linux desktop interfaces.
 
-The goal is to make it possible to build panels, launchers, widgets, overlays, notifications, and other shell components using familiar web-style markup and styling—without embedding a browser, WebView, Electron, GTK, Qt, or QML.
+The goal is to make it possible to build panels, launchers, widgets, overlays, notifications, and other shell components using familiar web-style markup and styling without embedding a browser, WebView, Electron, GTK, Qt, or QML.
+
+[Developer documentation](docs/README.md)
 
 ## Vision
 

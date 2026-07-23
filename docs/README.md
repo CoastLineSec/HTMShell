@@ -1,0 +1,27 @@
+# HTMShell documentation
+
+HTMShell is an experimental native shell runtime authored with local HTML, CSS, and a small JSON surface manifest.
+
+## Usage Guide
+
+- [Introduction](guide/introduction.md)
+- [Running from source](guide/running-from-source.md)
+- [Create the first shell](guide/first-shell.md)
+- [Surfaces](guide/surfaces.md)
+- [State and actions](guide/state-and-actions.md)
+- [Native state](guide/native-state.md)
+
+## HTMShell API
+
+- [`HTMShell`](types/HTMShell/README.md)
+- [`HTMShell.Elements`](types/HTMShell.Elements/README.md)
+- [`HTMShell.State`](types/HTMShell.State/README.md)
+- [`HTMShell.Actions`](types/HTMShell.Actions/README.md)
+- [`HTMShell.Services.Clock`](types/HTMShell.Services.Clock/README.md)
+- [`HTMShell.Services.UPower`](types/HTMShell.Services.UPower/README.md)
+
+## Other references
+
+- [Protocol documentation](protocol/htm-shell-v1.md)
+- [Compositor integration](compositor-integration.md)
+- [Architecture decisions](adr/)
