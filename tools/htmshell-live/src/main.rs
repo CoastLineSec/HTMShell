@@ -560,6 +560,13 @@ fn print_surface(prefix: &str, summary: &SurfaceHostSummary) {
     );
     println!("{prefix}_mapped_memory_peak={}", summary.mapped_memory_peak);
     println!("{prefix}_busy_buffer_skips={}", summary.busy_buffer_skips);
+    println!("{prefix}_package_read_us={}", summary.package_read_us);
+    println!("{prefix}_html_parse_us={}", summary.html_parse_us);
+    println!(
+        "{prefix}_initial_resource_resolve_us={}",
+        summary.initial_resolve_us
+    );
+    println!("{prefix}_last_resolve_us={}", summary.last_resolve_us);
     println!("{prefix}_last_render_us={}", summary.last_render_us);
     println!(
         "{prefix}_last_pixel_conversion_us={}",
@@ -578,15 +585,24 @@ fn print_built_in_metrics(prefix: &str, summary: &SurfaceHostSummary) {
         summary.declaration_discovery_us
     );
     println!(
-        "{prefix}_registered_elements={} bindings={} registered_actions={} registry_scans={}",
+        "{prefix}_registered_elements={} bindings={} text_bindings={} token_bindings={} registered_actions={} registry_scans={}",
         summary.registered_element_count,
         summary.binding_count,
+        summary.text_binding_count,
+        summary.token_binding_count,
         summary.registered_action_count,
         summary.registry_scan_count
     );
     println!(
         "{prefix}_suppressed_binding_updates={}",
         summary.suppressed_binding_updates
+    );
+    println!(
+        "{prefix}_token_updates=changed:{} suppressed:{} projection_us:{} attribute_mutation_us:{}",
+        summary.changed_token_updates,
+        summary.suppressed_token_updates,
+        summary.last_state_projection_us,
+        summary.last_attribute_mutation_us,
     );
     println!(
         "{prefix}_component_latency_us=release_to_dispatch:{} dispatch_to_mutation:{} mutation_to_commit:{} mutation_to_callback:{}",

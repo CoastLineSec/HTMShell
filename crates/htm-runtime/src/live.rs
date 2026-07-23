@@ -1,14 +1,15 @@
 use crate::adapter::{elapsed_ms, render_rgba_scaled, resolve_resources, validate_document_limits};
 use crate::builtin::{
     BindingUpdate, BuiltInElementIndex, BuiltInElementSummary, BuiltInSurfaceKind,
-    ElementDeclaration, ElementInstanceId, ShellAction, StateBindingKey, ensure_registry_valid,
+    ElementDeclaration, ElementInstanceId, STATE_ATTRIBUTE, ShellAction, StateBindingKey,
+    StateToken, StateValueKind, ensure_registry_valid,
 };
 use crate::identity::IdentityRegistry;
 use crate::model::{DiagnosticMessage, LogicalRect, ViewportSpec};
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
 use crate::{ExperimentalDocumentIdentity, ExperimentalNodeIdentity, RuntimeError};
 use blitz_dom::node::NodeData;
-use blitz_dom::{Document, DocumentConfig, QualName, StyleThreading, local_name, ns};
+use blitz_dom::{Document, DocumentConfig, LocalName, QualName, StyleThreading, local_name, ns};
 use blitz_html::{HtmlDocument, HtmlProvider};
 use blitz_traits::events::{
     BlitzPointerEvent, BlitzPointerId, MouseEventButton, MouseEventButtons, Point, PointerCoords,
@@ -151,9 +152,15 @@ pub struct LiveRuntimeMeasurements {
     pub declaration_discovery_ms: f64,
     pub registered_element_count: u64,
     pub binding_count: u64,
+    pub text_binding_count: u64,
+    pub token_binding_count: u64,
     pub action_count: u64,
     pub registry_scan_count: u64,
     pub suppressed_binding_updates: u64,
+    pub changed_token_updates: u64,
+    pub suppressed_token_updates: u64,
+    pub last_state_projection_ms: f64,
+    pub last_attribute_mutation_ms: f64,
 }
 
 /// Experimental parse-once document session for the portable live host.
@@ -334,7 +341,7 @@ impl LiveDocument {
         let declaration_discovery_ms = elapsed_ms(discovery_started);
         let builtin_summary = builtins.summary();
 
-        Ok(Self {
+        let mut live = Self {
             document,
             identities,
             audit,
@@ -361,12 +368,23 @@ impl LiveDocument {
                 declaration_discovery_ms,
                 registered_element_count: builtin_summary.registered_elements as u64,
                 binding_count: builtin_summary.bindings as u64,
+                text_binding_count: builtin_summary.text_bindings as u64,
+                token_binding_count: builtin_summary.token_bindings as u64,
                 action_count: builtin_summary.actions as u64,
                 registry_scan_count: u64::from(builtin_summary.discovery_scans),
                 suppressed_binding_updates: 0,
+                changed_token_updates: 0,
+                suppressed_token_updates: 0,
+                last_state_projection_ms: 0.0,
+                last_attribute_mutation_ms: 0.0,
             },
             diagnostics,
-        })
+        };
+        live.apply_bound_tokens(&[
+            (StateBindingKey::OverlayStatus, StateToken::Closed),
+            (StateBindingKey::SurfaceScaleProfile, StateToken::Scale1),
+        ])?;
+        Ok(live)
     }
 
     pub fn set_viewport(
@@ -595,7 +613,19 @@ impl LiveDocument {
     }
 
     pub fn binding_target_count(&self, key: StateBindingKey) -> usize {
-        self.builtins.binding_targets(key).len()
+        self.text_binding_target_count(key) + self.token_binding_target_count(key)
+    }
+
+    pub fn text_binding_target_count(&self, key: StateBindingKey) -> usize {
+        self.builtins
+            .binding_targets(key, StateValueKind::Text)
+            .len()
+    }
+
+    pub fn token_binding_target_count(&self, key: StateBindingKey) -> usize {
+        self.builtins
+            .binding_targets(key, StateValueKind::Token)
+            .len()
     }
 
     pub fn element_identity(&self, html_id: &str) -> Result<ElementInstanceId, RuntimeError> {
@@ -645,6 +675,25 @@ impl LiveDocument {
             })
     }
 
+    pub fn element_state_token(&self, html_id: &str) -> Result<String, RuntimeError> {
+        let node = self.builtins.indexed_node(html_id).ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget(format!(
+                "registered element `#{html_id}` does not exist"
+            ))
+        })?;
+        let slot = self.identities.resolve(&self.document, node)?;
+        self.document
+            .get_node(slot)
+            .and_then(|node| node.element_data())
+            .and_then(|element| element.attr(LocalName::from(STATE_ATTRIBUTE)))
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                RuntimeError::InvalidMutationTarget(format!(
+                    "registered token element `#{html_id}` has no runtime state"
+                ))
+            })
+    }
+
     pub fn element_bounds(&self, html_id: &str) -> Result<LogicalRect, RuntimeError> {
         let node = self.builtins.indexed_node(html_id).ok_or_else(|| {
             RuntimeError::InvalidMutationTarget(format!(
@@ -668,21 +717,48 @@ impl LiveDocument {
         &mut self,
         values: &[(StateBindingKey, String)],
     ) -> Result<BindingUpdate, RuntimeError> {
+        self.apply_bound_state(values, &[])
+    }
+
+    pub fn apply_bound_tokens(
+        &mut self,
+        values: &[(StateBindingKey, StateToken)],
+    ) -> Result<BindingUpdate, RuntimeError> {
+        self.apply_bound_state(&[], values)
+    }
+
+    pub fn apply_bound_state(
+        &mut self,
+        text_values: &[(StateBindingKey, String)],
+        token_values: &[(StateBindingKey, StateToken)],
+    ) -> Result<BindingUpdate, RuntimeError> {
+        let projection_started = Instant::now();
         let mut seen = std::collections::BTreeSet::new();
-        let mut pending = Vec::new();
+        let mut pending_text = Vec::new();
+        let mut pending_tokens = Vec::new();
+        let mut changed_keys = std::collections::BTreeSet::new();
         let mut update = BindingUpdate::default();
-        for (key, value) in values {
-            if !seen.insert(*key) {
+        for (key, value) in text_values {
+            if !key.supports(StateValueKind::Text) {
                 return Err(RuntimeError::InvalidMutationTarget(format!(
-                    "binding `{}` was supplied more than once",
+                    "binding `{}` does not support text presentation",
                     key.as_str()
                 )));
             }
-            let targets = self.builtins.binding_targets(*key);
+            if !seen.insert((*key, StateValueKind::Text)) {
+                return Err(RuntimeError::InvalidMutationTarget(format!(
+                    "text binding `{}` was supplied more than once",
+                    key.as_str()
+                )));
+            }
+            let targets = self.builtins.binding_targets(*key, StateValueKind::Text);
             if targets.is_empty() {
                 continue;
             }
-            if self.builtins.binding_is_unchanged(*key, value) {
+            if self
+                .builtins
+                .binding_is_unchanged(*key, StateValueKind::Text, value)
+            {
                 update.suppressed_keys = update.suppressed_keys.saturating_add(1);
                 continue;
             }
@@ -695,16 +771,74 @@ impl LiveDocument {
                 })?;
                 self.identities.resolve(&self.document, identity)?;
             }
-            pending.push((*key, value.clone(), targets));
+            pending_text.push((*key, value.clone(), targets));
         }
-        for (key, value, targets) in pending {
+        for (key, token) in token_values {
+            if !key.supports(StateValueKind::Token) || !token.valid_for(*key) {
+                return Err(RuntimeError::InvalidMutationTarget(format!(
+                    "token `{}` is invalid for binding `{}`",
+                    token.as_str(),
+                    key.as_str()
+                )));
+            }
+            if !seen.insert((*key, StateValueKind::Token)) {
+                return Err(RuntimeError::InvalidMutationTarget(format!(
+                    "token binding `{}` was supplied more than once",
+                    key.as_str()
+                )));
+            }
+            let targets = self.builtins.binding_targets(*key, StateValueKind::Token);
+            if targets.is_empty() {
+                continue;
+            }
+            let value = token.as_str();
+            if self
+                .builtins
+                .binding_is_unchanged(*key, StateValueKind::Token, value)
+            {
+                update.suppressed_keys = update.suppressed_keys.saturating_add(1);
+                self.measurements.suppressed_token_updates =
+                    self.measurements.suppressed_token_updates.saturating_add(1);
+                continue;
+            }
+            let targets = targets.to_vec();
+            for html_id in &targets {
+                let identity = self.builtins.indexed_node(html_id).ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "token binding target `#{html_id}` disappeared"
+                    ))
+                })?;
+                self.identities.resolve(&self.document, identity)?;
+            }
+            pending_tokens.push((*key, *token, targets));
+        }
+        for (key, value, targets) in pending_text {
             for html_id in &targets {
                 self.set_registered_text(html_id, &value)?;
                 update.changed_elements = update.changed_elements.saturating_add(1);
+                update.changed_text_elements = update.changed_text_elements.saturating_add(1);
             }
-            self.builtins.record_binding(key, value);
-            update.changed_keys = update.changed_keys.saturating_add(1);
+            self.builtins
+                .record_binding(key, StateValueKind::Text, value);
+            changed_keys.insert(key);
         }
+        let attribute_started = Instant::now();
+        for (key, token, targets) in pending_tokens {
+            for html_id in &targets {
+                self.set_registered_token(html_id, token)?;
+                update.changed_elements = update.changed_elements.saturating_add(1);
+                update.changed_token_elements = update.changed_token_elements.saturating_add(1);
+            }
+            self.builtins
+                .record_binding(key, StateValueKind::Token, token.as_str().to_owned());
+            changed_keys.insert(key);
+        }
+        update.changed_keys = changed_keys.len();
+        self.measurements.last_attribute_mutation_ms = elapsed_ms(attribute_started);
+        self.measurements.changed_token_updates = self
+            .measurements
+            .changed_token_updates
+            .saturating_add(update.changed_token_elements as u64);
         self.measurements.suppressed_binding_updates = self
             .measurements
             .suppressed_binding_updates
@@ -712,6 +846,7 @@ impl LiveDocument {
         if update.changed_elements > 0 {
             self.resolve();
         }
+        self.measurements.last_state_projection_ms = elapsed_ms(projection_started);
         Ok(update)
     }
 
@@ -886,6 +1021,29 @@ impl LiveDocument {
         Ok(())
     }
 
+    fn set_registered_token(
+        &mut self,
+        html_id: &str,
+        token: StateToken,
+    ) -> Result<(), RuntimeError> {
+        let identity = self.builtins.indexed_node(html_id).ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget(format!(
+                "registered token element `#{html_id}` disappeared"
+            ))
+        })?;
+        let node = self.identities.resolve(&self.document, identity)?;
+        self.document.mutate().set_attribute(
+            node,
+            QualName {
+                prefix: None,
+                ns: ns!(),
+                local: LocalName::from(STATE_ATTRIBUTE),
+            },
+            token.as_str(),
+        );
+        Ok(())
+    }
+
     fn action_at(&self, x: f32, y: f32) -> Result<Option<PendingActivation>, RuntimeError> {
         if !self.builtins.is_empty() {
             for html_id in self.builtins.action_candidates() {
@@ -990,7 +1148,7 @@ impl LiveDocumentKind {
     fn required_selectors(self) -> &'static [&'static str] {
         match self {
             Self::SingleOverlay => &["#shell-card", "#primary-action", "#status-label"],
-            Self::Panel => &["#panel-root", "#overlay-toggle", "#panel-status"],
+            Self::Panel => &["#panel-root", "#overlay-toggle"],
             Self::TransientOverlay => &[
                 "#overlay-card",
                 "#overlay-close",
@@ -1154,6 +1312,25 @@ mod tests {
 
     fn clock_fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/clock-panel")
+    }
+
+    fn static_panel_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/static-panel")
+    }
+
+    fn element_attribute(live: &LiveDocument, html_id: &str, name: &str) -> Option<String> {
+        let identity = live.builtins.indexed_node(html_id)?;
+        let slot = live.identities.resolve(&live.document, identity).ok()?;
+        live.document
+            .get_node(slot)?
+            .element_data()?
+            .attr(LocalName::from(name))
+            .map(str::to_owned)
+    }
+
+    fn selector_bounds(live: &LiveDocument, selector: &str) -> LogicalRect {
+        let slot = required_selector(&live.document, selector).unwrap();
+        node_bounds(live.document.get_node(slot).expect("selector node exists"))
     }
 
     fn binding_values(
@@ -1472,6 +1649,8 @@ mod tests {
             BuiltInElementSummary {
                 registered_elements: 7,
                 bindings: 5,
+                text_bindings: 5,
+                token_bindings: 0,
                 actions: 2,
                 discovery_scans: 1,
             }
@@ -1617,6 +1796,374 @@ mod tests {
         );
         let close = first.element_bounds("overlay-close").unwrap();
         assert_eq!(click_action(&mut first, &close), LiveAction::CloseOverlay);
+    }
+
+    #[test]
+    fn typed_visual_state_is_incremental_and_preserves_author_markup() {
+        let mut panel = LiveDocument::load_surface_document(
+            static_panel_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            62,
+        )
+        .unwrap();
+        let summary = panel.built_in_summary();
+        assert_eq!(summary.registered_elements, 6);
+        assert_eq!(summary.bindings, 5);
+        assert_eq!(summary.text_bindings, 3);
+        assert_eq!(summary.token_bindings, 2);
+        assert_eq!(summary.actions, 1);
+        assert_eq!(summary.discovery_scans, 1);
+        assert!(panel.resource_request_count() >= 3);
+        assert!(
+            panel
+                .diagnostics()
+                .iter()
+                .all(|diagnostic| !diagnostic.code.starts_with("resource."))
+        );
+        assert_eq!(
+            panel.element_state_token("scale-profile").unwrap(),
+            "scale-1"
+        );
+        assert_eq!(
+            panel.element_state_token("overlay-toggle-state").unwrap(),
+            "closed"
+        );
+        assert_eq!(
+            element_attribute(&panel, "scale-profile", "class").as_deref(),
+            Some("profile-pill")
+        );
+        assert_eq!(
+            element_attribute(&panel, "scale-profile", "data-role").as_deref(),
+            Some("presentation-profile")
+        );
+        let profile_identity = panel.element_identity("scale-profile").unwrap();
+        let button_identity = panel.element_identity("overlay-toggle").unwrap();
+        let parse_count = panel.snapshot().unwrap().document_parse_count;
+
+        let update = panel
+            .apply_bound_state(
+                &[(StateBindingKey::OutputScale, "Scale: 1.50×".to_owned())],
+                &[
+                    (StateBindingKey::OverlayStatus, StateToken::Open),
+                    (StateBindingKey::SurfaceScaleProfile, StateToken::Fractional),
+                ],
+            )
+            .unwrap();
+        assert_eq!(update.changed_keys, 3);
+        assert_eq!(update.changed_elements, 3);
+        assert_eq!(update.changed_text_elements, 1);
+        assert_eq!(update.changed_token_elements, 2);
+        assert_eq!(panel.element_text("scale-label").unwrap(), "Scale: 1.50×");
+        assert_eq!(
+            panel.element_state_token("overlay-toggle-state").unwrap(),
+            "open"
+        );
+        assert_eq!(
+            panel.element_state_token("scale-profile").unwrap(),
+            "fractional"
+        );
+        assert_eq!(
+            element_attribute(&panel, "scale-profile", "class").as_deref(),
+            Some("profile-pill")
+        );
+        assert_eq!(
+            element_attribute(&panel, "scale-profile", "data-role").as_deref(),
+            Some("presentation-profile")
+        );
+        assert_eq!(
+            panel.element_identity("scale-profile").unwrap(),
+            profile_identity
+        );
+        assert_eq!(
+            panel.element_identity("overlay-toggle").unwrap(),
+            button_identity
+        );
+        assert_eq!(panel.snapshot().unwrap().document_parse_count, parse_count);
+        assert_eq!(panel.measurements().registry_scan_count, 1);
+
+        let duplicate = panel
+            .apply_bound_state(
+                &[(StateBindingKey::OutputScale, "Scale: 1.50×".to_owned())],
+                &[
+                    (StateBindingKey::OverlayStatus, StateToken::Open),
+                    (StateBindingKey::SurfaceScaleProfile, StateToken::Fractional),
+                ],
+            )
+            .unwrap();
+        assert_eq!(duplicate.changed_elements, 0);
+        assert_eq!(duplicate.suppressed_keys, 3);
+        assert_eq!(panel.measurements().suppressed_token_updates, 2);
+    }
+
+    #[test]
+    fn token_change_drives_css_without_reparse_or_rescan() {
+        let mut panel = LiveDocument::load_surface_document(
+            static_panel_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            62,
+        )
+        .unwrap();
+        let identity = panel.element_identity("overlay-toggle-state").unwrap();
+        let before = panel.render().unwrap();
+        let update = panel
+            .apply_bound_tokens(&[(StateBindingKey::OverlayStatus, StateToken::Open)])
+            .unwrap();
+        assert_eq!(update.changed_token_elements, 1);
+        let after = panel.render().unwrap();
+        assert_ne!(before.premultiplied_rgba, after.premultiplied_rgba);
+        assert_eq!(
+            panel.element_identity("overlay-toggle-state").unwrap(),
+            identity
+        );
+        assert_eq!(panel.snapshot().unwrap().document_parse_count, 1);
+        assert_eq!(panel.measurements().registry_scan_count, 1);
+    }
+
+    #[test]
+    fn one_state_key_coalesces_text_and_token_projections() {
+        let mut overlay = LiveDocument::load_surface_document(
+            static_panel_fixture(),
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            1280,
+            720,
+        )
+        .unwrap();
+        let text_identity = overlay.element_identity("overlay-status").unwrap();
+        let token_identity = overlay.element_identity("overlay-state-token").unwrap();
+        let update = overlay
+            .apply_bound_state(
+                &[(StateBindingKey::OverlayStatus, "Overlay: open".to_owned())],
+                &[(StateBindingKey::OverlayStatus, StateToken::Open)],
+            )
+            .unwrap();
+        assert_eq!(update.changed_keys, 1);
+        assert_eq!(update.changed_elements, 2);
+        assert_eq!(update.changed_text_elements, 1);
+        assert_eq!(update.changed_token_elements, 1);
+        assert_eq!(
+            overlay.element_text("overlay-status").unwrap(),
+            "Overlay: open"
+        );
+        assert_eq!(
+            overlay.element_state_token("overlay-state-token").unwrap(),
+            "open"
+        );
+        assert_eq!(
+            overlay.element_identity("overlay-status").unwrap(),
+            text_identity
+        );
+        assert_eq!(
+            overlay.element_identity("overlay-state-token").unwrap(),
+            token_identity
+        );
+        assert_eq!(overlay.snapshot().unwrap().document_parse_count, 1);
+        assert_eq!(overlay.measurements().registry_scan_count, 1);
+    }
+
+    #[test]
+    fn invalid_typed_token_is_contained_before_mutation() {
+        let mut panel = LiveDocument::load_surface_document(
+            static_panel_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            62,
+        )
+        .unwrap();
+        assert!(
+            panel
+                .apply_bound_tokens(&[(StateBindingKey::OverlayStatus, StateToken::Scale1,)])
+                .is_err()
+        );
+        assert_eq!(
+            panel.element_state_token("overlay-toggle-state").unwrap(),
+            "closed"
+        );
+    }
+
+    #[test]
+    fn nested_action_descendant_and_token_update_preserve_click() {
+        for selector in ["#overlay-toggle img", "#overlay-toggle > span"] {
+            let mut panel = LiveDocument::load_surface_document(
+                static_panel_fixture(),
+                "panel.html",
+                LiveDocumentKind::Panel,
+                1280,
+                62,
+            )
+            .unwrap();
+            let bounds = selector_bounds(&panel, selector);
+            assert_eq!(click_action(&mut panel, &bounds), LiveAction::ToggleOverlay);
+        }
+
+        let mut panel = LiveDocument::load_surface_document(
+            static_panel_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            62,
+        )
+        .unwrap();
+        let token = panel.element_bounds("overlay-toggle-state").unwrap();
+        let x = f64::from(token.x + token.width / 2.0);
+        let y = f64::from(token.y + token.height / 2.0);
+        assert!(panel.pointer_move(x, y).unwrap());
+        assert!(panel.pointer_primary(true).unwrap());
+        panel
+            .apply_bound_tokens(&[(StateBindingKey::OverlayStatus, StateToken::Open)])
+            .unwrap();
+        assert!(panel.pointer_primary(false).unwrap());
+        assert_eq!(panel.take_action(), Some(LiveAction::ToggleOverlay));
+    }
+
+    #[test]
+    fn token_identity_survives_viewport_and_fractional_render_changes() {
+        let mut panel = LiveDocument::load_surface_document(
+            static_panel_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            62,
+        )
+        .unwrap();
+        let identity = panel.element_identity("scale-profile").unwrap();
+        panel.set_viewport(1440, 62).unwrap();
+        panel
+            .render_for(LiveRenderRequest::new(1440, 62, 180).unwrap())
+            .unwrap();
+        panel
+            .apply_bound_tokens(&[(StateBindingKey::SurfaceScaleProfile, StateToken::Fractional)])
+            .unwrap();
+        assert_eq!(panel.element_identity("scale-profile").unwrap(), identity);
+        assert_eq!(panel.snapshot().unwrap().document_parse_count, 1);
+        assert_eq!(panel.measurements().registry_scan_count, 1);
+    }
+
+    #[test]
+    fn token_state_is_isolated_across_output_document_generations() {
+        let mut panel_a = LiveDocument::load_surface_document(
+            static_panel_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            62,
+        )
+        .unwrap();
+        let panel_b = LiveDocument::load_surface_document(
+            static_panel_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            62,
+        )
+        .unwrap();
+        let a_identity = panel_a.element_identity("overlay-toggle-state").unwrap();
+        let b_identity = panel_b.element_identity("overlay-toggle-state").unwrap();
+        assert_ne!(a_identity, b_identity);
+
+        panel_a
+            .apply_bound_tokens(&[
+                (StateBindingKey::OverlayStatus, StateToken::Open),
+                (StateBindingKey::SurfaceScaleProfile, StateToken::Fractional),
+            ])
+            .unwrap();
+        assert_eq!(
+            panel_a.element_state_token("overlay-toggle-state").unwrap(),
+            "open"
+        );
+        assert_eq!(
+            panel_b.element_state_token("overlay-toggle-state").unwrap(),
+            "closed"
+        );
+        assert_eq!(
+            panel_a.element_state_token("scale-profile").unwrap(),
+            "fractional"
+        );
+        assert_eq!(
+            panel_b.element_state_token("scale-profile").unwrap(),
+            "scale-1"
+        );
+
+        drop(panel_a);
+        let mut stale_identity = a_identity;
+        for _ in 0..25 {
+            let replacement_a = LiveDocument::load_surface_document(
+                static_panel_fixture(),
+                "panel.html",
+                LiveDocumentKind::Panel,
+                1280,
+                62,
+            )
+            .unwrap();
+            assert!(
+                replacement_a
+                    .validate_element_identity(&stale_identity)
+                    .is_err()
+            );
+            assert_eq!(
+                replacement_a
+                    .element_state_token("overlay-toggle-state")
+                    .unwrap(),
+                "closed"
+            );
+            stale_identity = replacement_a
+                .element_identity("overlay-toggle-state")
+                .unwrap();
+        }
+        assert_eq!(
+            panel_b.element_state_token("overlay-toggle-state").unwrap(),
+            "closed"
+        );
+    }
+
+    #[test]
+    fn repeated_token_changes_and_suppressions_remain_parse_once() {
+        let mut panel = LiveDocument::load_surface_document(
+            static_panel_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            62,
+        )
+        .unwrap();
+        let identity = panel.element_identity("overlay-toggle-state").unwrap();
+        let initial_changed = panel.measurements().changed_token_updates;
+        let initial_suppressed = panel.measurements().suppressed_token_updates;
+        for index in 0..100 {
+            let token = if index % 2 == 0 {
+                StateToken::Open
+            } else {
+                StateToken::Closed
+            };
+            let changed = panel
+                .apply_bound_tokens(&[(StateBindingKey::OverlayStatus, token)])
+                .unwrap();
+            assert_eq!(changed.changed_token_elements, 1);
+            let suppressed = panel
+                .apply_bound_tokens(&[(StateBindingKey::OverlayStatus, token)])
+                .unwrap();
+            assert_eq!(suppressed.changed_elements, 0);
+            assert_eq!(suppressed.suppressed_keys, 1);
+        }
+        assert_eq!(
+            panel.element_identity("overlay-toggle-state").unwrap(),
+            identity
+        );
+        assert_eq!(panel.snapshot().unwrap().document_parse_count, 1);
+        assert_eq!(panel.measurements().registry_scan_count, 1);
+        assert_eq!(
+            panel.measurements().changed_token_updates,
+            initial_changed + 100
+        );
+        assert_eq!(
+            panel.measurements().suppressed_token_updates,
+            initial_suppressed + 100
+        );
     }
 
     #[test]

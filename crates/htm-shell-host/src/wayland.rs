@@ -8,6 +8,7 @@ use crate::scale::{PresentationProfile, SurfaceScaleState};
 use crate::scheduler::{FrameScheduler, ScheduleDecision};
 use htm_runtime::{
     LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind, LiveFrame, StateBindingKey,
+    StateToken,
 };
 use rustix::event::{PollFd, PollFlags, poll};
 use std::path::PathBuf;
@@ -142,15 +143,25 @@ pub struct SurfaceHostSummary {
     pub first_configure_us: u64,
     pub first_commit_us: u64,
     pub first_frame_callback_us: u64,
+    pub package_read_us: u64,
+    pub html_parse_us: u64,
+    pub initial_resolve_us: u64,
+    pub last_resolve_us: u64,
     pub last_render_us: u64,
     pub last_pixel_conversion_us: u64,
     pub registry_initialization_us: u64,
     pub declaration_discovery_us: u64,
     pub registered_element_count: u64,
     pub binding_count: u64,
+    pub text_binding_count: u64,
+    pub token_binding_count: u64,
     pub registered_action_count: u64,
     pub registry_scan_count: u64,
     pub suppressed_binding_updates: u64,
+    pub changed_token_updates: u64,
+    pub suppressed_token_updates: u64,
+    pub last_state_projection_us: u64,
+    pub last_attribute_mutation_us: u64,
     pub last_pointer_release_to_action_dispatch_us: u64,
     pub last_action_dispatch_to_state_mutation_us: u64,
     pub last_state_mutation_to_commit_us: u64,
@@ -1046,14 +1057,16 @@ impl State {
         )?;
         panel_runtime.set_instance_context(panel.id(), &diagnostic_label)?;
         panel_runtime.update_panel_state(overlay_initially_open, "Ready")?;
-        panel_runtime.apply_bound_text(&built_in_binding_values(
+        apply_surface_bindings(
+            &mut panel_runtime,
             panel.id(),
             &diagnostic_label,
             LIVE_SCALE_DENOMINATOR,
+            PresentationProfile::Scale1,
             overlay_initially_open,
             0,
             "Ready",
-        ))?;
+        )?;
         self.next_instance_generation = self.next_instance_generation.saturating_add(1);
         let overlay_generation = self.next_instance_generation;
         let mut overlay_runtime = LiveDocument::load_surface_document(
@@ -1065,14 +1078,16 @@ impl State {
         )?;
         overlay_runtime.set_instance_context(overlay.id(), &diagnostic_label)?;
         overlay_runtime.update_overlay_state(0, "Ready")?;
-        overlay_runtime.apply_bound_text(&built_in_binding_values(
+        apply_surface_bindings(
+            &mut overlay_runtime,
             overlay.id(),
             &diagnostic_label,
             LIVE_SCALE_DENOMINATOR,
+            PresentationProfile::Scale1,
             overlay_initially_open,
             0,
             "Ready",
-        ))?;
+        )?;
         self.create_surface_for_output(
             qh,
             SurfaceKind::Panel,
@@ -1184,7 +1199,7 @@ impl State {
             .iter()
             .filter(|surface| {
                 surface.runtime.as_ref().is_some_and(|runtime| {
-                    runtime.binding_target_count(StateBindingKey::ClockTime) > 0
+                    runtime.text_binding_target_count(StateBindingKey::ClockTime) > 0
                 })
             })
             .count()
@@ -1229,7 +1244,7 @@ impl State {
             let Some(runtime) = surface.runtime.as_mut() else {
                 continue;
             };
-            if runtime.binding_target_count(StateBindingKey::ClockTime) == 0 {
+            if runtime.text_binding_target_count(StateBindingKey::ClockTime) == 0 {
                 continue;
             }
             documents = documents.saturating_add(1);
@@ -1378,7 +1393,8 @@ impl State {
                     }
                     SurfaceKind::SingleOverlay => {}
                 }
-                runtime.apply_bound_text(&built_in_binding_values(
+                apply_surface_bindings(
+                    &mut runtime,
                     &surface_state.template_id,
                     surface_state
                         .instance_context
@@ -1386,10 +1402,11 @@ impl State {
                         .map(|(_, output_label)| output_label.as_str())
                         .unwrap_or("output"),
                     surface_state.scale_state.effective_numerator(),
+                    surface_state.scale_state.profile(),
                     shared.overlay_open,
                     shared.overlay_activation_count,
                     &shared.last_action,
-                ))?;
+                )?;
             }
             surface_state.runtime = Some(runtime);
             if surface_state.desired_mapped {
@@ -1422,18 +1439,24 @@ impl State {
                 .runtime
                 .as_mut()
                 .expect("initialized above")
-                .apply_bound_text(&built_in_binding_values(
-                    &surface_state.template_id,
-                    surface_state
-                        .instance_context
-                        .as_ref()
-                        .map(|(_, output_label)| output_label.as_str())
-                        .unwrap_or("output"),
-                    surface_state.scale_state.effective_numerator(),
-                    shared.overlay_open,
-                    shared.overlay_activation_count,
-                    &shared.last_action,
-                ))?;
+                .apply_bound_state(
+                    &built_in_binding_values(
+                        &surface_state.template_id,
+                        surface_state
+                            .instance_context
+                            .as_ref()
+                            .map(|(_, output_label)| output_label.as_str())
+                            .unwrap_or("output"),
+                        surface_state.scale_state.effective_numerator(),
+                        shared.overlay_open,
+                        shared.overlay_activation_count,
+                        &shared.last_action,
+                    ),
+                    &built_in_token_values(
+                        surface_state.scale_state.profile(),
+                        shared.overlay_open,
+                    ),
+                )?;
         }
         let buffer_width = render_request.buffer_width;
         let buffer_height = render_request.buffer_height;
@@ -1544,6 +1567,14 @@ impl State {
             .as_ref()
             .expect("initialized above")
             .measurements();
+        surface_state.summary.package_read_us =
+            milliseconds_to_microseconds(runtime_measurements.package_read_ms);
+        surface_state.summary.html_parse_us =
+            milliseconds_to_microseconds(runtime_measurements.html_parse_ms);
+        surface_state.summary.initial_resolve_us =
+            milliseconds_to_microseconds(runtime_measurements.initial_resolve_ms);
+        surface_state.summary.last_resolve_us =
+            milliseconds_to_microseconds(runtime_measurements.last_resolve_ms);
         surface_state.summary.registry_initialization_us =
             milliseconds_to_microseconds(runtime_measurements.registry_initialization_ms);
         surface_state.summary.declaration_discovery_us =
@@ -1551,10 +1582,19 @@ impl State {
         surface_state.summary.registered_element_count =
             runtime_measurements.registered_element_count;
         surface_state.summary.binding_count = runtime_measurements.binding_count;
+        surface_state.summary.text_binding_count = runtime_measurements.text_binding_count;
+        surface_state.summary.token_binding_count = runtime_measurements.token_binding_count;
         surface_state.summary.registered_action_count = runtime_measurements.action_count;
         surface_state.summary.registry_scan_count = runtime_measurements.registry_scan_count;
         surface_state.summary.suppressed_binding_updates =
             runtime_measurements.suppressed_binding_updates;
+        surface_state.summary.changed_token_updates = runtime_measurements.changed_token_updates;
+        surface_state.summary.suppressed_token_updates =
+            runtime_measurements.suppressed_token_updates;
+        surface_state.summary.last_state_projection_us =
+            milliseconds_to_microseconds(runtime_measurements.last_state_projection_ms);
+        surface_state.summary.last_attribute_mutation_us =
+            milliseconds_to_microseconds(runtime_measurements.last_attribute_mutation_ms);
         surface_state.refresh_pool_summary();
         Ok(())
     }
@@ -1922,14 +1962,16 @@ impl State {
             .as_ref()
             .map(|(_, label)| label.as_str())
             .unwrap_or("output");
-        let update = runtime.apply_bound_text(&built_in_binding_values(
+        let update = apply_surface_bindings(
+            runtime,
             &surface.template_id,
             output_label,
             surface.scale_state.effective_numerator(),
+            surface.scale_state.profile(),
             shared.overlay_open,
             shared.overlay_activation_count,
             &shared.last_action,
-        ))?;
+        )?;
         let changed = update.changed_elements > 0;
         if changed && surface.desired_mapped {
             surface
@@ -2415,6 +2457,14 @@ impl State {
                                 metrics.html_parse_count = snapshot.document_parse_count;
                             }
                             let measurements = runtime.measurements();
+                            metrics.package_read_us =
+                                milliseconds_to_microseconds(measurements.package_read_ms);
+                            metrics.html_parse_us =
+                                milliseconds_to_microseconds(measurements.html_parse_ms);
+                            metrics.initial_resolve_us =
+                                milliseconds_to_microseconds(measurements.initial_resolve_ms);
+                            metrics.last_resolve_us =
+                                milliseconds_to_microseconds(measurements.last_resolve_ms);
                             metrics.registry_initialization_us = milliseconds_to_microseconds(
                                 measurements.registry_initialization_ms,
                             );
@@ -2423,10 +2473,20 @@ impl State {
                             metrics.registered_element_count =
                                 measurements.registered_element_count;
                             metrics.binding_count = measurements.binding_count;
+                            metrics.text_binding_count = measurements.text_binding_count;
+                            metrics.token_binding_count = measurements.token_binding_count;
                             metrics.registered_action_count = measurements.action_count;
                             metrics.registry_scan_count = measurements.registry_scan_count;
                             metrics.suppressed_binding_updates =
                                 measurements.suppressed_binding_updates;
+                            metrics.changed_token_updates = measurements.changed_token_updates;
+                            metrics.suppressed_token_updates =
+                                measurements.suppressed_token_updates;
+                            metrics.last_state_projection_us =
+                                milliseconds_to_microseconds(measurements.last_state_projection_ms);
+                            metrics.last_attribute_mutation_us = milliseconds_to_microseconds(
+                                measurements.last_attribute_mutation_ms,
+                            );
                         }
                         ManifestSurfaceHostSummary {
                             template_id: surface.template_id.clone(),
@@ -2717,6 +2777,53 @@ fn built_in_binding_values(
             format!("Last action: {last_action}"),
         ),
     ]
+}
+
+fn built_in_token_values(
+    profile: PresentationProfile,
+    overlay_open: bool,
+) -> [(StateBindingKey, StateToken); 2] {
+    [
+        (
+            StateBindingKey::OverlayStatus,
+            if overlay_open {
+                StateToken::Open
+            } else {
+                StateToken::Closed
+            },
+        ),
+        (
+            StateBindingKey::SurfaceScaleProfile,
+            match profile {
+                PresentationProfile::Scale1 => StateToken::Scale1,
+                PresentationProfile::FractionalViewport => StateToken::Fractional,
+            },
+        ),
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_surface_bindings(
+    runtime: &mut LiveDocument,
+    template_id: &str,
+    output_label: &str,
+    scale_numerator: u32,
+    profile: PresentationProfile,
+    overlay_open: bool,
+    overlay_activation_count: u64,
+    last_action: &str,
+) -> Result<htm_runtime::BindingUpdate, htm_runtime::RuntimeError> {
+    runtime.apply_bound_state(
+        &built_in_binding_values(
+            template_id,
+            output_label,
+            scale_numerator,
+            overlay_open,
+            overlay_activation_count,
+            last_action,
+        ),
+        &built_in_token_values(profile, overlay_open),
+    )
 }
 
 fn validate_manifest_action_source(
@@ -3270,7 +3377,7 @@ mod tests {
     fn built_in_display_values_are_typed_deterministic_and_output_local() {
         let a = built_in_binding_values("panel", "output-a", 192, true, 7, "Opened");
         let b = built_in_binding_values("panel", "output-b", 120, false, 0, "Ready");
-        assert_eq!(a.len(), StateBindingKey::ALL.len() - 1);
+        assert_eq!(a.len(), StateBindingKey::ALL.len() - 2);
         assert_eq!(
             a[0],
             (StateBindingKey::OutputLabel, "Output: output-a".into())
@@ -3291,6 +3398,20 @@ mod tests {
         assert_eq!(b[0].1, "Output: output-b");
         assert_eq!(b[1].1, "Scale: 1.00×");
         assert_eq!(b[3].1, "Overlay: closed");
+        assert_eq!(
+            built_in_token_values(PresentationProfile::Scale1, false),
+            [
+                (StateBindingKey::OverlayStatus, StateToken::Closed),
+                (StateBindingKey::SurfaceScaleProfile, StateToken::Scale1,),
+            ]
+        );
+        assert_eq!(
+            built_in_token_values(PresentationProfile::FractionalViewport, true),
+            [
+                (StateBindingKey::OverlayStatus, StateToken::Open),
+                (StateBindingKey::SurfaceScaleProfile, StateToken::Fractional,),
+            ]
+        );
     }
 
     #[test]

@@ -9,11 +9,13 @@ use std::sync::OnceLock;
 const ELEMENT_ATTRIBUTE: &str = "data-htm-element";
 const BIND_ATTRIBUTE: &str = "data-htm-bind";
 const ACTION_ATTRIBUTE: &str = "data-htm-action";
+pub(crate) const STATE_ATTRIBUTE: &str = "data-htm-state";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BuiltInElementKind {
     StateText,
     ActionButton,
+    StateToken,
 }
 
 impl BuiltInElementKind {
@@ -21,6 +23,7 @@ impl BuiltInElementKind {
         match self {
             Self::StateText => "state-text",
             Self::ActionButton => "action-button",
+            Self::StateToken => "state-token",
         }
     }
 
@@ -28,6 +31,7 @@ impl BuiltInElementKind {
         match value {
             "state-text" => Some(Self::StateText),
             "action-button" => Some(Self::ActionButton),
+            "state-token" => Some(Self::StateToken),
             _ => None,
         }
     }
@@ -39,17 +43,19 @@ pub enum StateBindingKey {
     OutputLabel,
     OutputScale,
     SurfaceTemplateId,
+    SurfaceScaleProfile,
     OverlayStatus,
     OverlayActivationCount,
     ShellLastAction,
 }
 
 impl StateBindingKey {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::ClockTime,
         Self::OutputLabel,
         Self::OutputScale,
         Self::SurfaceTemplateId,
+        Self::SurfaceScaleProfile,
         Self::OverlayStatus,
         Self::OverlayActivationCount,
         Self::ShellLastAction,
@@ -61,6 +67,7 @@ impl StateBindingKey {
             Self::OutputLabel => "output.label",
             Self::OutputScale => "output.scale",
             Self::SurfaceTemplateId => "surface.template_id",
+            Self::SurfaceScaleProfile => "surface.scale_profile",
             Self::OverlayStatus => "overlay.status",
             Self::OverlayActivationCount => "overlay.activation_count",
             Self::ShellLastAction => "shell.last_action",
@@ -75,8 +82,27 @@ impl StateBindingKey {
             | Self::OverlayStatus
             | Self::OverlayActivationCount
             | Self::ShellLastAction => StateBindingScope::Output,
-            Self::SurfaceTemplateId => StateBindingScope::Surface,
+            Self::SurfaceTemplateId | Self::SurfaceScaleProfile => StateBindingScope::Surface,
         }
+    }
+
+    pub const fn supports(self, kind: StateValueKind) -> bool {
+        matches!(
+            (self, kind),
+            (
+                Self::OverlayStatus,
+                StateValueKind::Text | StateValueKind::Token
+            ) | (Self::SurfaceScaleProfile, StateValueKind::Token)
+                | (
+                    Self::ClockTime
+                        | Self::OutputLabel
+                        | Self::OutputScale
+                        | Self::SurfaceTemplateId
+                        | Self::OverlayActivationCount
+                        | Self::ShellLastAction,
+                    StateValueKind::Text,
+                )
+        )
     }
 }
 
@@ -89,6 +115,7 @@ impl std::str::FromStr for StateBindingKey {
             "output.label" => Ok(Self::OutputLabel),
             "output.scale" => Ok(Self::OutputScale),
             "surface.template_id" => Ok(Self::SurfaceTemplateId),
+            "surface.scale_profile" => Ok(Self::SurfaceScaleProfile),
             "overlay.status" => Ok(Self::OverlayStatus),
             "overlay.activation_count" => Ok(Self::OverlayActivationCount),
             "shell.last_action" => Ok(Self::ShellLastAction),
@@ -102,6 +129,44 @@ pub enum StateBindingScope {
     Process,
     Output,
     Surface,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StateValueKind {
+    Text,
+    Token,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StateToken {
+    Open,
+    Closed,
+    Scale1,
+    Fractional,
+}
+
+impl StateToken {
+    pub const ALL: [Self; 4] = [Self::Open, Self::Closed, Self::Scale1, Self::Fractional];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+            Self::Scale1 => "scale-1",
+            Self::Fractional => "fractional",
+        }
+    }
+
+    pub const fn valid_for(self, key: StateBindingKey) -> bool {
+        matches!(
+            (key, self),
+            (StateBindingKey::OverlayStatus, Self::Open | Self::Closed)
+                | (
+                    StateBindingKey::SurfaceScaleProfile,
+                    Self::Scale1 | Self::Fractional
+                )
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -171,6 +236,7 @@ pub struct ElementDeclaration {
     pub id: ElementInstanceId,
     pub kind: BuiltInElementKind,
     pub binding: Option<StateBindingKey>,
+    pub binding_kind: Option<StateValueKind>,
     pub action: Option<ShellAction>,
     pub disabled: bool,
 }
@@ -179,6 +245,8 @@ pub struct ElementDeclaration {
 pub struct BuiltInElementSummary {
     pub registered_elements: usize,
     pub bindings: usize,
+    pub text_bindings: usize,
+    pub token_bindings: usize,
     pub actions: usize,
     pub discovery_scans: u32,
 }
@@ -187,6 +255,8 @@ pub struct BuiltInElementSummary {
 pub struct BindingUpdate {
     pub changed_keys: usize,
     pub changed_elements: usize,
+    pub changed_text_elements: usize,
+    pub changed_token_elements: usize,
     pub suppressed_keys: usize,
 }
 
@@ -197,7 +267,7 @@ struct BuiltInElementDefinition {
     required_attribute: &'static str,
 }
 
-const DEFINITIONS: [BuiltInElementDefinition; 2] = [
+const DEFINITIONS: [BuiltInElementDefinition; 3] = [
     BuiltInElementDefinition {
         name: "state-text",
         allowed_tags: &["span", "p", "output"],
@@ -207,6 +277,11 @@ const DEFINITIONS: [BuiltInElementDefinition; 2] = [
         name: "action-button",
         allowed_tags: &["button"],
         required_attribute: ACTION_ATTRIBUTE,
+    },
+    BuiltInElementDefinition {
+        name: "state-token",
+        allowed_tags: &["div", "span", "section"],
+        required_attribute: BIND_ATTRIBUTE,
     },
 ];
 
@@ -230,9 +305,10 @@ pub(crate) struct ActionTarget {
 #[derive(Debug, Clone)]
 pub(crate) struct BuiltInElementIndex {
     elements: BTreeMap<String, IndexedElement>,
-    bindings: BTreeMap<StateBindingKey, Vec<String>>,
+    text_bindings: BTreeMap<StateBindingKey, Vec<String>>,
+    token_bindings: BTreeMap<StateBindingKey, Vec<String>>,
     actions: Vec<String>,
-    applied_values: BTreeMap<StateBindingKey, String>,
+    applied_values: BTreeMap<(StateBindingKey, StateValueKind), String>,
     surface_kind: BuiltInSurfaceKind,
     summary: BuiltInElementSummary,
 }
@@ -247,7 +323,8 @@ impl BuiltInElementIndex {
     ) -> Result<Self, RuntimeError> {
         ensure_registry_valid()?;
         let mut elements = BTreeMap::new();
-        let mut bindings: BTreeMap<StateBindingKey, Vec<String>> = BTreeMap::new();
+        let mut text_bindings: BTreeMap<StateBindingKey, Vec<String>> = BTreeMap::new();
+        let mut token_bindings: BTreeMap<StateBindingKey, Vec<String>> = BTreeMap::new();
         let mut actions = Vec::new();
         let slots = author_slots(document);
         let mut id_counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -320,7 +397,7 @@ impl BuiltInElementIndex {
                     ),
                 )
             })?;
-            let (binding, action) = match kind {
+            let (binding, binding_kind, action) = match kind {
                 BuiltInElementKind::StateText => {
                     validate_state_text_children(document, slot, &context)?;
                     let binding = required.parse::<StateBindingKey>().map_err(|()| {
@@ -329,7 +406,15 @@ impl BuiltInElementIndex {
                             format!("unsupported state binding `{required}`"),
                         )
                     })?;
-                    (Some(binding), None)
+                    if !binding.supports(StateValueKind::Text) {
+                        return Err(invalid_declaration(
+                            &context,
+                            format!(
+                                "state binding `{required}` does not support text presentation"
+                            ),
+                        ));
+                    }
+                    (Some(binding), Some(StateValueKind::Text), None)
                 }
                 BuiltInElementKind::ActionButton => {
                     let action = required.parse::<ShellAction>().map_err(|()| {
@@ -344,7 +429,24 @@ impl BuiltInElementIndex {
                             ),
                         ));
                     }
-                    (None, Some(action))
+                    (None, None, Some(action))
+                }
+                BuiltInElementKind::StateToken => {
+                    let binding = required.parse::<StateBindingKey>().map_err(|()| {
+                        invalid_declaration(
+                            &context,
+                            format!("unsupported state binding `{required}`"),
+                        )
+                    })?;
+                    if !binding.supports(StateValueKind::Token) {
+                        return Err(invalid_declaration(
+                            &context,
+                            format!(
+                                "state binding `{required}` does not support token presentation"
+                            ),
+                        ));
+                    }
+                    (Some(binding), Some(StateValueKind::Token), None)
                 }
             };
             let instance_id = ElementInstanceId {
@@ -355,6 +457,7 @@ impl BuiltInElementIndex {
                 id: instance_id,
                 kind,
                 binding,
+                binding_kind,
                 action,
                 disabled: element.has_attr(local_name!("disabled")),
             };
@@ -365,7 +468,26 @@ impl BuiltInElementIndex {
                 order,
             };
             if let Some(binding) = binding {
-                bindings.entry(binding).or_default().push(html_id.clone());
+                match binding_kind {
+                    Some(StateValueKind::Text) => {
+                        text_bindings
+                            .entry(binding)
+                            .or_default()
+                            .push(html_id.clone());
+                    }
+                    Some(StateValueKind::Token) => {
+                        token_bindings
+                            .entry(binding)
+                            .or_default()
+                            .push(html_id.clone());
+                    }
+                    None => {
+                        return Err(invalid_declaration(
+                            &context,
+                            "state binding has no presentation kind",
+                        ));
+                    }
+                }
             }
             if action.is_some() {
                 actions.push(html_id.clone());
@@ -380,18 +502,26 @@ impl BuiltInElementIndex {
                 std::cmp::Reverse(element.order),
             )
         });
-        for ids in bindings.values_mut() {
+        for ids in text_bindings.values_mut() {
             ids.sort();
         }
+        for ids in token_bindings.values_mut() {
+            ids.sort();
+        }
+        let text_binding_count = text_bindings.values().map(Vec::len).sum();
+        let token_binding_count = token_bindings.values().map(Vec::len).sum();
         let summary = BuiltInElementSummary {
             registered_elements: elements.len(),
-            bindings: bindings.values().map(Vec::len).sum(),
+            bindings: text_binding_count + token_binding_count,
+            text_bindings: text_binding_count,
+            token_bindings: token_binding_count,
             actions: actions.len(),
             discovery_scans: 1,
         };
         Ok(Self {
             elements,
-            bindings,
+            text_bindings,
+            token_bindings,
             actions,
             applied_values: BTreeMap::new(),
             surface_kind,
@@ -418,18 +548,34 @@ impl BuiltInElementIndex {
         self.elements.get(html_id).map(|entry| &entry.declaration)
     }
 
-    pub(crate) fn binding_targets(&self, key: StateBindingKey) -> &[String] {
-        self.bindings.get(&key).map(Vec::as_slice).unwrap_or(&[])
+    pub(crate) fn binding_targets(&self, key: StateBindingKey, kind: StateValueKind) -> &[String] {
+        match kind {
+            StateValueKind::Text => &self.text_bindings,
+            StateValueKind::Token => &self.token_bindings,
+        }
+        .get(&key)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
     }
 
-    pub(crate) fn binding_is_unchanged(&self, key: StateBindingKey, value: &str) -> bool {
+    pub(crate) fn binding_is_unchanged(
+        &self,
+        key: StateBindingKey,
+        kind: StateValueKind,
+        value: &str,
+    ) -> bool {
         self.applied_values
-            .get(&key)
+            .get(&(key, kind))
             .is_some_and(|old| old == value)
     }
 
-    pub(crate) fn record_binding(&mut self, key: StateBindingKey, value: String) {
-        self.applied_values.insert(key, value);
+    pub(crate) fn record_binding(
+        &mut self,
+        key: StateBindingKey,
+        kind: StateValueKind,
+        value: String,
+    ) {
+        self.applied_values.insert((key, kind), value);
     }
 
     pub(crate) fn indexed_node(&self, html_id: &str) -> Option<ExperimentalNodeIdentity> {
@@ -475,7 +621,7 @@ impl BuiltInElementIndex {
 }
 
 pub fn built_in_registry_names() -> &'static [&'static str] {
-    &["state-text", "action-button"]
+    &["state-text", "action-button", "state-token"]
 }
 
 pub(crate) fn ensure_registry_valid() -> Result<(), RuntimeError> {
@@ -508,6 +654,7 @@ fn definition(kind: BuiltInElementKind) -> &'static BuiltInElementDefinition {
     match kind {
         BuiltInElementKind::StateText => &DEFINITIONS[0],
         BuiltInElementKind::ActionButton => &DEFINITIONS[1],
+        BuiltInElementKind::StateToken => &DEFINITIONS[2],
     }
 }
 
@@ -515,6 +662,7 @@ fn allowed_behavior_attributes(kind: BuiltInElementKind) -> &'static [&'static s
     match kind {
         BuiltInElementKind::StateText => &[ELEMENT_ATTRIBUTE, BIND_ATTRIBUTE],
         BuiltInElementKind::ActionButton => &[ELEMENT_ATTRIBUTE, ACTION_ATTRIBUTE],
+        BuiltInElementKind::StateToken => &[ELEMENT_ATTRIBUTE, BIND_ATTRIBUTE],
     }
 }
 
@@ -588,7 +736,10 @@ mod tests {
 
     #[test]
     fn registry_is_exact_deterministic_and_duplicate_safe() {
-        assert_eq!(built_in_registry_names(), &["state-text", "action-button"]);
+        assert_eq!(
+            built_in_registry_names(),
+            &["state-text", "action-button", "state-token"]
+        );
         assert!(validate_definitions(&DEFINITIONS).is_ok());
         let duplicate = [DEFINITIONS[0], DEFINITIONS[0]];
         assert!(validate_definitions(&duplicate).is_err());
@@ -599,6 +750,7 @@ mod tests {
                 "output.label",
                 "output.scale",
                 "surface.template_id",
+                "surface.scale_profile",
                 "overlay.status",
                 "overlay.activation_count",
                 "shell.last_action",
@@ -623,6 +775,21 @@ mod tests {
             StateBindingKey::SurfaceTemplateId.scope(),
             StateBindingScope::Surface
         );
+        assert_eq!(
+            StateBindingKey::SurfaceScaleProfile.scope(),
+            StateBindingScope::Surface
+        );
+        assert!(StateBindingKey::OverlayStatus.supports(StateValueKind::Text));
+        assert!(StateBindingKey::OverlayStatus.supports(StateValueKind::Token));
+        assert!(StateBindingKey::SurfaceScaleProfile.supports(StateValueKind::Token));
+        assert!(!StateBindingKey::SurfaceScaleProfile.supports(StateValueKind::Text));
+        assert!(!StateBindingKey::ClockTime.supports(StateValueKind::Token));
+        assert_eq!(
+            StateToken::ALL.map(StateToken::as_str),
+            ["open", "closed", "scale-1", "fractional"]
+        );
+        assert!(StateToken::Open.valid_for(StateBindingKey::OverlayStatus));
+        assert!(!StateToken::Open.valid_for(StateBindingKey::SurfaceScaleProfile));
         assert!("unknown.key".parse::<StateBindingKey>().is_err());
         for action in ShellAction::ALL {
             assert_eq!(action.as_str().parse::<ShellAction>(), Ok(action));
@@ -643,6 +810,8 @@ mod tests {
             BuiltInElementSummary {
                 registered_elements: 2,
                 bindings: 1,
+                text_bindings: 1,
+                token_bindings: 0,
                 actions: 1,
                 discovery_scans: 1,
             }
@@ -650,6 +819,10 @@ mod tests {
         assert_eq!(
             index.element("status").unwrap().binding,
             Some(StateBindingKey::OverlayStatus)
+        );
+        assert_eq!(
+            index.element("status").unwrap().binding_kind,
+            Some(StateValueKind::Text)
         );
         assert_eq!(
             index.element("toggle").unwrap().action,
@@ -665,12 +838,61 @@ mod tests {
             BuiltInSurfaceKind::Panel,
         )
         .unwrap();
-        assert_eq!(index.binding_targets(StateBindingKey::ClockTime).len(), 2);
+        assert_eq!(
+            index
+                .binding_targets(StateBindingKey::ClockTime, StateValueKind::Text)
+                .len(),
+            2
+        );
         assert_eq!(
             index.element("clock-a").unwrap().kind,
             BuiltInElementKind::StateText
         );
-        assert_eq!(built_in_registry_names().len(), 2);
+        assert_eq!(built_in_registry_names().len(), 3);
+    }
+
+    #[test]
+    fn state_tokens_are_typed_indexed_and_limited_to_visual_wrappers() {
+        let index = discover(
+            r#"<span id="status" class="indicator" data-extra="kept"
+                    data-htm-element="state-token" data-htm-bind="overlay.status"></span>
+               <section id="scale" data-htm-element="state-token"
+                    data-htm-bind="surface.scale_profile"></section>"#,
+            BuiltInSurfaceKind::Panel,
+        )
+        .unwrap();
+        assert_eq!(
+            index.binding_targets(StateBindingKey::OverlayStatus, StateValueKind::Token),
+            &["status"]
+        );
+        assert_eq!(
+            index.element("status").unwrap().binding_kind,
+            Some(StateValueKind::Token)
+        );
+        assert_eq!(index.summary().text_bindings, 0);
+        assert_eq!(index.summary().token_bindings, 2);
+        for tag in ["div", "span", "section"] {
+            assert!(
+                discover(
+                    &format!(
+                        r#"<{tag} id="token" data-htm-element="state-token" data-htm-bind="overlay.status"></{tag}>"#
+                    ),
+                    BuiltInSurfaceKind::Panel,
+                )
+                .is_ok()
+            );
+        }
+        for tag in ["button", "img", "svg", "input"] {
+            assert!(
+                discover(
+                    &format!(
+                        r#"<{tag} id="token" data-htm-element="state-token" data-htm-bind="overlay.status"></{tag}>"#
+                    ),
+                    BuiltInSurfaceKind::Panel,
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -687,6 +909,10 @@ mod tests {
             r#"<button id="x" data-htm-element="action-button" data-htm-action="unknown.action"></button>"#,
             r#"<span id="x" data-htm-element="state-text" data-htm-bind="overlay.status" data-htm-action="overlay.close"></span>"#,
             r#"<span id="x" data-htm-element="state-text" data-htm-bind="overlay.status"><b>nested</b></span>"#,
+            r#"<span id="x" data-htm-element="state-token"></span>"#,
+            r#"<span id="x" data-htm-element="state-token" data-htm-bind="clock.time"></span>"#,
+            r#"<span id="x" data-htm-element="state-text" data-htm-bind="surface.scale_profile"></span>"#,
+            r#"<span id="x" data-htm-element="state-token" data-htm-bind="overlay.status" data-htm-state="open"></span>"#,
         ] {
             assert!(discover(body, BuiltInSurfaceKind::Panel).is_err(), "{body}");
         }

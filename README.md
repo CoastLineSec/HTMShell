@@ -73,14 +73,17 @@ The project has demonstrated:
 * One portable host process managing independent panel and overlay layer surfaces
 * A validated local surface manifest expanded into independent instances for each eligible output
 * Generation-safe output addition and removal through standard Wayland registry events
-* A small built-in state-text and action-button registry for ordinary HTML, without JavaScript
+* A small built-in registry for typed text, finite visual state, and actions on ordinary HTML
 * Event-driven native state, beginning with one shared local-time scheduler for ordinary state-text bindings
 
 The portable host renders at the compositor's preferred fractional scale when
 fractional-scale and viewporter are available, with scale 1 as the fallback.
 Native state is supplied through typed bindings without adding JavaScript or
-per-element timers. Presentation remains experimental CPU-rendered `wl_shm`;
-HTMShell is not yet a usable desktop shell, and no stable release is available.
+per-element timers. Finite state can be projected into a runtime-owned HTML
+attribute for ordinary CSS selectors; arbitrary attribute, class, and style
+binding are not supported. Presentation remains experimental CPU-rendered
+`wl_shm`; HTMShell is not yet a usable desktop shell, and no stable release is
+available.
 
 ## Non-goals
 

@@ -9,9 +9,9 @@ The ID is stable within one parsed document. A live element identity combines
 that ID with the document generation, so the same author-provided ID on two
 outputs still names two independent runtime elements.
 
-The initial registry contains exactly `state-text` and `action-button`. It is
-compiled into the runtime, immutable, and independent of the compositor and
-output.
+The registry contains exactly `state-text`, `action-button`, and `state-token`.
+It is compiled into the runtime, immutable, and independent of the compositor
+and output.
 
 ## State text
 
@@ -104,6 +104,55 @@ or pointer-capability loss cancels a pending activation. Descendant content
 inside a button remains part of the owning button's hit area. The standard
 HTML `disabled` attribute prevents dispatch.
 
+## State token
+
+A state-token declaration projects one approved finite state into the
+runtime-owned `data-htm-state` attribute:
+
+```html
+<span
+  id="overlay-indicator"
+  class="status-dot"
+  data-htm-element="state-token"
+  data-htm-bind="overlay.status">
+</span>
+```
+
+State tokens require a stable ID and may use only `div`, `span`, or `section`.
+The approved token bindings and their complete domains are:
+
+| Key | Scope | Token domain |
+| --- | --- | --- |
+| `overlay.status` | Output | `open`, `closed` |
+| `surface.scale_profile` | Surface | `scale-1`, `fractional` |
+
+`surface.scale_profile` describes the effective presentation profile, not the
+exact fractional numerator. A change between fractional numerators therefore
+does not change this token.
+
+HTMShell alone writes `data-htm-state`; author-provided values are rejected.
+Tokens are typed enum values, never arbitrary state strings, whitespace token
+lists, expressions, class names, or CSS declarations. Author classes and
+unrelated attributes remain unchanged. Token changes use the same incremental
+document-mutation boundary as text bindings and preserve the element identity
+and one-time declaration index.
+
+Appearance remains ordinary CSS:
+
+```css
+#overlay-indicator[data-htm-state="open"] {
+  opacity: 1;
+}
+
+#overlay-indicator[data-htm-state="closed"] {
+  opacity: 0.5;
+}
+```
+
+An action button may contain images, labels, and state-token descendants.
+Those descendants remain within the owning button's normal hit area; no
+separate icon-button kind or generalized event propagation system is added.
+
 ## Validation
 
 Declarations are discovered once after the HTML document is parsed. Document
@@ -113,6 +162,8 @@ initialization rejects:
 - missing or duplicate registered IDs;
 - a declaration on an unsupported HTML tag;
 - missing or unknown binding keys and actions;
+- text-only keys used as token bindings, or tokens on unsupported tags;
+- author-provided `data-htm-state` attributes;
 - actions used from an unauthorized surface kind;
 - conflicting or unknown `data-htm-*` behavior attributes;
 - state-text elements containing child elements.
@@ -127,7 +178,8 @@ Built-in behavior injects no colors, layout, or materials. Authors use normal
 tag, ID, class, attribute, `:hover`, `:active`, and `[disabled]` CSS selectors.
 Layout and hit geometry remain logical at scale 1 and fractional scales.
 
-The current model has no JavaScript, expressions, templates, dynamic
-components, event propagation framework, author-defined timers, service
-plugins, component packages, or user-defined registry entries. The clock is a
-narrow native state source, not a general service or widget framework.
+The current model has no JavaScript, expressions, arbitrary attribute/class/
+style bindings, templates, dynamic components, event propagation framework,
+author-defined timers, service plugins, component packages, or user-defined
+registry entries. The clock is a narrow native state source, not a general
+service or widget framework.
