@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>HTMShell built-in overlay experiment</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main id="overlay-root">
+      <section id="overlay-card" class="overlay-card">
+        <header class="overlay-header">
+          <div>
+            <p class="eyebrow">
+              <span id="surface-id-label" data-htm-element="state-text" data-htm-bind="surface.template_id">Surface</span>
+              <span id="output-label" data-htm-element="state-text" data-htm-bind="output.label">Output</span>
+            </p>
+            <h1>Built-in element probe</h1>
+          </div>
+          <button data-htm-element="action-button" data-htm-action="overlay.close" id="overlay-close" type="button"><span>Close</span></button>
+        </header>
+        <div class="state-grid">
+          <span id="overlay-status" data-htm-element="state-text" data-htm-bind="overlay.status">Overlay</span>
+          <span id="overlay-count" data-htm-element="state-text" data-htm-bind="overlay.activation_count">Activations</span>
+          <span id="overlay-last-action" data-htm-element="state-text" data-htm-bind="shell.last_action">Last action</span>
+          <span id="overlay-scale" data-htm-element="state-text" data-htm-bind="output.scale">Scale</span>
+        </div>
+        <div class="clip-window"><div class="clip-accent"></div></div>
+        <button data-htm-element="action-button" data-htm-action="overlay.activate" id="overlay-action" type="button"><span>Update this output</span></button>
+      </section>
+    </main>
+  </body>
+</html>

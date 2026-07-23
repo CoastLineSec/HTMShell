@@ -5,7 +5,9 @@ use crate::manifest::{SurfaceKind as ManifestSurfaceKind, ValidatedManifest};
 use crate::output::{OutputCatalog, OutputEligibility, OutputKey};
 use crate::scale::{PresentationProfile, SurfaceScaleState};
 use crate::scheduler::{FrameScheduler, ScheduleDecision};
-use htm_runtime::{LiveAction, LiveDocument, LiveDocumentKind, LiveFrame};
+use htm_runtime::{
+    LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind, LiveFrame, StateBindingKey,
+};
 use std::path::PathBuf;
 use std::time::Instant;
 use wayland_client::{
@@ -137,6 +139,17 @@ pub struct SurfaceHostSummary {
     pub first_frame_callback_us: u64,
     pub last_render_us: u64,
     pub last_pixel_conversion_us: u64,
+    pub registry_initialization_us: u64,
+    pub declaration_discovery_us: u64,
+    pub registered_element_count: u64,
+    pub binding_count: u64,
+    pub registered_action_count: u64,
+    pub registry_scan_count: u64,
+    pub suppressed_binding_updates: u64,
+    pub last_pointer_release_to_action_dispatch_us: u64,
+    pub last_action_dispatch_to_state_mutation_us: u64,
+    pub last_state_mutation_to_commit_us: u64,
+    pub last_state_mutation_to_frame_callback_us: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -437,6 +450,8 @@ struct ShellSurfaceState {
     presentation_failed: bool,
     pending_scale_started: Option<Instant>,
     scaled_commit_started: Option<Instant>,
+    pending_binding_mutation_started: Option<Instant>,
+    binding_commit_started: Option<Instant>,
 }
 
 impl ShellSurfaceState {
@@ -733,6 +748,8 @@ impl State {
             presentation_failed: false,
             pending_scale_started: None,
             scaled_commit_started: None,
+            pending_binding_mutation_started: None,
+            binding_commit_started: None,
         });
         if desired_mapped && let Err(error) = self.ensure_surface_role(owner) {
             self.surfaces.retain(|surface| surface.owner != owner);
@@ -1021,6 +1038,33 @@ impl State {
         )?;
         panel_runtime.set_instance_context(panel.id(), &diagnostic_label)?;
         panel_runtime.update_panel_state(overlay_initially_open, "Ready")?;
+        panel_runtime.apply_bound_text(&built_in_binding_values(
+            panel.id(),
+            &diagnostic_label,
+            LIVE_SCALE_DENOMINATOR,
+            overlay_initially_open,
+            0,
+            "Ready",
+        ))?;
+        self.next_instance_generation = self.next_instance_generation.saturating_add(1);
+        let overlay_generation = self.next_instance_generation;
+        let mut overlay_runtime = LiveDocument::load_surface_document(
+            options.manifest.package_root(),
+            overlay.document(),
+            LiveDocumentKind::TransientOverlay,
+            1,
+            1,
+        )?;
+        overlay_runtime.set_instance_context(overlay.id(), &diagnostic_label)?;
+        overlay_runtime.update_overlay_state(0, "Ready")?;
+        overlay_runtime.apply_bound_text(&built_in_binding_values(
+            overlay.id(),
+            &diagnostic_label,
+            LIVE_SCALE_DENOMINATOR,
+            overlay_initially_open,
+            0,
+            "Ready",
+        ))?;
         self.create_surface_for_output(
             qh,
             SurfaceKind::Panel,
@@ -1039,17 +1083,6 @@ impl State {
             self.surfaces[index].instance_generation = panel_generation;
             self.surfaces[index].runtime = Some(panel_runtime);
         }
-        self.next_instance_generation = self.next_instance_generation.saturating_add(1);
-        let overlay_generation = self.next_instance_generation;
-        let mut overlay_runtime = LiveDocument::load_surface_document(
-            options.manifest.package_root(),
-            overlay.document(),
-            LiveDocumentKind::TransientOverlay,
-            1,
-            1,
-        )?;
-        overlay_runtime.set_instance_context(overlay.id(), &diagnostic_label)?;
-        overlay_runtime.update_overlay_state(0, "Ready")?;
         if let Err(error) = self.create_surface_for_output(
             qh,
             SurfaceKind::Overlay,
@@ -1239,6 +1272,18 @@ impl State {
                     }
                     SurfaceKind::SingleOverlay => {}
                 }
+                runtime.apply_bound_text(&built_in_binding_values(
+                    &surface_state.template_id,
+                    surface_state
+                        .instance_context
+                        .as_ref()
+                        .map(|(_, output_label)| output_label.as_str())
+                        .unwrap_or("output"),
+                    surface_state.scale_state.effective_numerator(),
+                    shared.overlay_open,
+                    shared.overlay_activation_count,
+                    &shared.last_action,
+                ))?;
             }
             surface_state.runtime = Some(runtime);
             if surface_state.desired_mapped {
@@ -1266,6 +1311,24 @@ impl State {
             .scale_state
             .render_request()?
             .ok_or_else(|| ShellHostError::Wayland("presentation size is unavailable".into()))?;
+        if let Some(shared) = &manifest_shared {
+            surface_state
+                .runtime
+                .as_mut()
+                .expect("initialized above")
+                .apply_bound_text(&built_in_binding_values(
+                    &surface_state.template_id,
+                    surface_state
+                        .instance_context
+                        .as_ref()
+                        .map(|(_, output_label)| output_label.as_str())
+                        .unwrap_or("output"),
+                    surface_state.scale_state.effective_numerator(),
+                    shared.overlay_open,
+                    shared.overlay_activation_count,
+                    &shared.last_action,
+                ))?;
+        }
         let buffer_width = render_request.buffer_width;
         let buffer_height = render_request.buffer_height;
         if surface_state
@@ -1354,6 +1417,10 @@ impl State {
             surface_state.summary.last_scale_change_to_commit_us = elapsed_us(scale_started);
             surface_state.scaled_commit_started = Some(scale_started);
         }
+        if let Some(mutation_started) = surface_state.pending_binding_mutation_started.take() {
+            surface_state.summary.last_state_mutation_to_commit_us = elapsed_us(mutation_started);
+            surface_state.binding_commit_started = Some(mutation_started);
+        }
         if surface_state.summary.first_commit_us == 0 {
             surface_state.summary.first_commit_us = elapsed_us(started);
         }
@@ -1366,6 +1433,22 @@ impl State {
             surface_state.summary.html_parse_count = snapshot.document_parse_count;
             surface_state.last_click_count = snapshot.interaction.click_count;
         }
+        let runtime_measurements = surface_state
+            .runtime
+            .as_ref()
+            .expect("initialized above")
+            .measurements();
+        surface_state.summary.registry_initialization_us =
+            milliseconds_to_microseconds(runtime_measurements.registry_initialization_ms);
+        surface_state.summary.declaration_discovery_us =
+            milliseconds_to_microseconds(runtime_measurements.declaration_discovery_ms);
+        surface_state.summary.registered_element_count =
+            runtime_measurements.registered_element_count;
+        surface_state.summary.binding_count = runtime_measurements.binding_count;
+        surface_state.summary.registered_action_count = runtime_measurements.action_count;
+        surface_state.summary.registry_scan_count = runtime_measurements.registry_scan_count;
+        surface_state.summary.suppressed_binding_updates =
+            runtime_measurements.suppressed_binding_updates;
         surface_state.refresh_pool_summary();
         Ok(())
     }
@@ -1398,6 +1481,7 @@ impl State {
         ) {
             return;
         }
+        let release_started = (!pressed).then(Instant::now);
         let Some(index) = self.surface_index_by_owner(owner) else {
             return;
         };
@@ -1416,8 +1500,20 @@ impl State {
                     if let Some(action) = action {
                         self.surfaces[index].summary.action_count =
                             self.surfaces[index].summary.action_count.saturating_add(1);
+                        if let Some(release_started) = release_started {
+                            self.surfaces[index]
+                                .summary
+                                .last_pointer_release_to_action_dispatch_us =
+                                elapsed_us(release_started);
+                        }
+                        let dispatch_started = Instant::now();
                         if let Err(error) = self.handle_action(owner, action) {
                             self.fail(format!("live action rejected: {error}"));
+                        } else if let Some(index) = self.surface_index_by_owner(owner) {
+                            self.surfaces[index]
+                                .summary
+                                .last_action_dispatch_to_state_mutation_us =
+                                elapsed_us(dispatch_started);
                         }
                     }
                 }
@@ -1487,13 +1583,17 @@ impl State {
         let group_index = self
             .output_instance_index_by_owner(owner)
             .ok_or_else(|| ShellHostError::Wayland(format!("surface instance {owner} is stale")))?;
+        let instance = &self.output_instances[group_index];
+        validate_manifest_action_source(
+            action,
+            owner,
+            instance.panel_owner,
+            instance.overlay_owner,
+            instance.shared.overlay_open,
+        )
+        .map_err(|message| ShellHostError::Wayland(message.into()))?;
         match action {
             LiveAction::ToggleOverlay => {
-                if self.output_instances[group_index].panel_owner != owner {
-                    return Err(ShellHostError::Wayland(
-                        "overlay toggle came from a non-panel instance".into(),
-                    ));
-                }
                 if self.output_instances[group_index].shared.overlay_open {
                     self.close_manifest_overlay(group_index, "Closed from panel")?;
                 } else {
@@ -1501,34 +1601,33 @@ impl State {
                 }
             }
             LiveAction::CloseOverlay => {
-                if self.output_instances[group_index].overlay_owner != owner {
-                    return Err(ShellHostError::Wayland(
-                        "overlay close came from a non-overlay instance".into(),
-                    ));
-                }
                 self.close_manifest_overlay(group_index, "Closed from overlay")?;
             }
             LiveAction::ActivateOverlay => {
-                let instance = &mut self.output_instances[group_index];
-                if instance.overlay_owner != owner {
-                    return Err(ShellHostError::Wayland(
-                        "overlay action came from a non-overlay instance".into(),
-                    ));
-                }
-                instance.shared.overlay_activation_count =
-                    instance.shared.overlay_activation_count.saturating_add(1);
-                instance.shared.last_action = "Overlay state updated".into();
-                let count = instance.shared.overlay_activation_count;
-                let action = instance.shared.last_action.clone();
-                let overlay_owner = instance.overlay_owner;
+                let (count, action, overlay_owner, panel_owner) = {
+                    let instance = &mut self.output_instances[group_index];
+                    instance.shared.overlay_activation_count =
+                        instance.shared.overlay_activation_count.saturating_add(1);
+                    instance.shared.last_action = "Overlay state updated".into();
+                    (
+                        instance.shared.overlay_activation_count,
+                        instance.shared.last_action.clone(),
+                        instance.overlay_owner,
+                        instance.panel_owner,
+                    )
+                };
                 if let Some(index) = self.surface_index_by_owner(overlay_owner) {
-                    self.surfaces[index]
+                    let legacy_changed = self.surfaces[index]
                         .runtime
                         .as_mut()
                         .ok_or_else(|| ShellHostError::Wayland("overlay runtime missing".into()))?
                         .update_overlay_state(count, &action)?;
-                    self.surfaces[index].scheduler.mark_dirty();
+                    if legacy_changed {
+                        self.surfaces[index].scheduler.mark_dirty();
+                    }
                 }
+                self.refresh_manifest_surface_bindings(overlay_owner)?;
+                self.refresh_manifest_surface_bindings(panel_owner)?;
             }
             LiveAction::SingleOverlayActivate => {
                 return Err(ShellHostError::Wayland(
@@ -1605,6 +1704,7 @@ impl State {
             }
             self.surfaces[index].scheduler.mark_dirty();
         }
+        self.refresh_manifest_surface_bindings(overlay_owner)?;
         self.update_manifest_panel(panel_owner, true, &last_action)
     }
 
@@ -1658,6 +1758,7 @@ impl State {
             surface.refresh_pool_summary();
         }
         self.destroy_transient_surface_role(overlay_owner);
+        self.refresh_manifest_surface_bindings(overlay_owner)?;
         self.update_manifest_panel(panel_owner, false, &last_action)
     }
 
@@ -1667,13 +1768,54 @@ impl State {
         overlay_open: bool,
         last_action: &str,
     ) -> Result<(), ShellHostError> {
-        if let Some(index) = self.surface_index_by_owner(panel_owner)
-            && let Some(runtime) = &mut self.surfaces[index].runtime
-        {
-            runtime.update_panel_state(overlay_open, last_action)?;
-            self.surfaces[index].scheduler.mark_dirty();
+        if let Some(index) = self.surface_index_by_owner(panel_owner) {
+            let legacy_changed = self.surfaces[index]
+                .runtime
+                .as_mut()
+                .map(|runtime| runtime.update_panel_state(overlay_open, last_action))
+                .transpose()?
+                .unwrap_or(false);
+            if legacy_changed {
+                self.surfaces[index].scheduler.mark_dirty();
+            }
         }
+        self.refresh_manifest_surface_bindings(panel_owner)?;
         Ok(())
+    }
+
+    fn refresh_manifest_surface_bindings(&mut self, owner: u64) -> Result<bool, ShellHostError> {
+        let Some(group_index) = self.output_instance_index_by_owner(owner) else {
+            return Ok(false);
+        };
+        let shared = self.output_instances[group_index].shared.clone();
+        let Some(index) = self.surface_index_by_owner(owner) else {
+            return Ok(false);
+        };
+        let surface = &mut self.surfaces[index];
+        let Some(runtime) = surface.runtime.as_mut() else {
+            return Ok(false);
+        };
+        let output_label = surface
+            .instance_context
+            .as_ref()
+            .map(|(_, label)| label.as_str())
+            .unwrap_or("output");
+        let update = runtime.apply_bound_text(&built_in_binding_values(
+            &surface.template_id,
+            output_label,
+            surface.scale_state.effective_numerator(),
+            shared.overlay_open,
+            shared.overlay_activation_count,
+            &shared.last_action,
+        ))?;
+        let changed = update.changed_elements > 0;
+        if changed && surface.desired_mapped {
+            surface
+                .pending_binding_mutation_started
+                .get_or_insert_with(Instant::now);
+            surface.scheduler.mark_dirty();
+        }
+        Ok(changed)
     }
 
     fn open_overlay(&mut self, action: &str) -> Result<(), ShellHostError> {
@@ -1805,6 +1947,11 @@ impl State {
             self.surfaces[index]
                 .summary
                 .last_scale_change_to_frame_callback_us = elapsed_us(scale_started);
+        }
+        if let Some(mutation_started) = self.surfaces[index].binding_commit_started.take() {
+            self.surfaces[index]
+                .summary
+                .last_state_mutation_to_frame_callback_us = elapsed_us(mutation_started);
         }
         if matches!(self.options, SessionOptions::Manifest(_))
             && kind == SurfaceKind::Panel
@@ -2137,13 +2284,23 @@ impl State {
                     self.surface_index_by_owner(owner).map(|index| {
                         let surface = &self.surfaces[index];
                         let mut metrics = surface.summary.clone();
-                        if let Some(parse_count) = surface
-                            .runtime
-                            .as_ref()
-                            .and_then(|runtime| runtime.snapshot().ok())
-                            .map(|snapshot| snapshot.document_parse_count)
-                        {
-                            metrics.html_parse_count = parse_count;
+                        if let Some(runtime) = surface.runtime.as_ref() {
+                            if let Ok(snapshot) = runtime.snapshot() {
+                                metrics.html_parse_count = snapshot.document_parse_count;
+                            }
+                            let measurements = runtime.measurements();
+                            metrics.registry_initialization_us = milliseconds_to_microseconds(
+                                measurements.registry_initialization_ms,
+                            );
+                            metrics.declaration_discovery_us =
+                                milliseconds_to_microseconds(measurements.declaration_discovery_ms);
+                            metrics.registered_element_count =
+                                measurements.registered_element_count;
+                            metrics.binding_count = measurements.binding_count;
+                            metrics.registered_action_count = measurements.action_count;
+                            metrics.registry_scan_count = measurements.registry_scan_count;
+                            metrics.suppressed_binding_updates =
+                                measurements.suppressed_binding_updates;
                         }
                         ManifestSurfaceHostSummary {
                             template_id: surface.template_id.clone(),
@@ -2324,6 +2481,63 @@ fn elapsed_us(started: Instant) -> u64 {
 
 fn milliseconds_to_microseconds(value: f64) -> u64 {
     (value * 1_000.0).round().clamp(0.0, u64::MAX as f64) as u64
+}
+
+fn built_in_binding_values(
+    template_id: &str,
+    output_label: &str,
+    scale_numerator: u32,
+    overlay_open: bool,
+    overlay_activation_count: u64,
+    last_action: &str,
+) -> Vec<(StateBindingKey, String)> {
+    let scale = f64::from(scale_numerator) / f64::from(LIVE_SCALE_DENOMINATOR);
+    vec![
+        (
+            StateBindingKey::OutputLabel,
+            format!("Output: {output_label}"),
+        ),
+        (StateBindingKey::OutputScale, format!("Scale: {scale:.2}×")),
+        (
+            StateBindingKey::SurfaceTemplateId,
+            format!("Surface: {template_id}"),
+        ),
+        (
+            StateBindingKey::OverlayStatus,
+            format!("Overlay: {}", if overlay_open { "open" } else { "closed" }),
+        ),
+        (
+            StateBindingKey::OverlayActivationCount,
+            format!("Activations: {overlay_activation_count}"),
+        ),
+        (
+            StateBindingKey::ShellLastAction,
+            format!("Last action: {last_action}"),
+        ),
+    ]
+}
+
+fn validate_manifest_action_source(
+    action: LiveAction,
+    owner: u64,
+    panel_owner: u64,
+    overlay_owner: u64,
+    overlay_open: bool,
+) -> Result<(), &'static str> {
+    match action {
+        LiveAction::ToggleOverlay if owner == panel_owner => Ok(()),
+        LiveAction::ToggleOverlay => Err("overlay toggle came from a non-panel instance"),
+        LiveAction::CloseOverlay | LiveAction::ActivateOverlay if owner != overlay_owner => {
+            Err("overlay action came from a non-overlay instance")
+        }
+        LiveAction::CloseOverlay | LiveAction::ActivateOverlay if !overlay_open => {
+            Err("closed overlay cannot dispatch an action")
+        }
+        LiveAction::CloseOverlay | LiveAction::ActivateOverlay => Ok(()),
+        LiveAction::SingleOverlayActivate => {
+            Err("single-overlay action is invalid in manifest mode")
+        }
+    }
 }
 
 fn release_pointer(pointer: wl_pointer::WlPointer) {
@@ -2825,6 +3039,63 @@ mod tests {
         assert_ne!(
             SurfaceKind::SingleOverlay.owner(),
             SurfaceKind::Panel.owner()
+        );
+    }
+
+    #[test]
+    fn built_in_display_values_are_typed_deterministic_and_output_local() {
+        let a = built_in_binding_values("panel", "output-a", 192, true, 7, "Opened");
+        let b = built_in_binding_values("panel", "output-b", 120, false, 0, "Ready");
+        assert_eq!(a.len(), StateBindingKey::ALL.len());
+        assert_eq!(
+            a[0],
+            (StateBindingKey::OutputLabel, "Output: output-a".into())
+        );
+        assert_eq!(a[1], (StateBindingKey::OutputScale, "Scale: 1.60×".into()));
+        assert_eq!(
+            a[3],
+            (StateBindingKey::OverlayStatus, "Overlay: open".into())
+        );
+        assert_eq!(
+            a[4],
+            (
+                StateBindingKey::OverlayActivationCount,
+                "Activations: 7".into(),
+            )
+        );
+        assert_ne!(a, b);
+        assert_eq!(b[0].1, "Output: output-b");
+        assert_eq!(b[1].1, "Scale: 1.00×");
+        assert_eq!(b[3].1, "Overlay: closed");
+    }
+
+    #[test]
+    fn manifest_action_source_policy_rejects_wrong_stale_or_closed_sources() {
+        assert!(
+            validate_manifest_action_source(LiveAction::ToggleOverlay, 10, 10, 11, false).is_ok()
+        );
+        assert!(
+            validate_manifest_action_source(LiveAction::ToggleOverlay, 11, 10, 11, true).is_err()
+        );
+        assert!(
+            validate_manifest_action_source(LiveAction::CloseOverlay, 11, 10, 11, true).is_ok()
+        );
+        assert!(
+            validate_manifest_action_source(LiveAction::ActivateOverlay, 11, 10, 11, true).is_ok()
+        );
+        assert!(
+            validate_manifest_action_source(LiveAction::CloseOverlay, 11, 10, 11, false).is_err()
+        );
+        assert!(
+            validate_manifest_action_source(LiveAction::ActivateOverlay, 11, 10, 11, false)
+                .is_err()
+        );
+        assert!(
+            validate_manifest_action_source(LiveAction::ActivateOverlay, 12, 10, 11, true).is_err()
+        );
+        assert!(
+            validate_manifest_action_source(LiveAction::SingleOverlayActivate, 10, 10, 11, true)
+                .is_err()
         );
     }
 

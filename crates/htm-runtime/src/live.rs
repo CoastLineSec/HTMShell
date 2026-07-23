@@ -1,4 +1,8 @@
 use crate::adapter::{elapsed_ms, render_rgba_scaled, resolve_resources, validate_document_limits};
+use crate::builtin::{
+    BindingUpdate, BuiltInElementIndex, BuiltInElementSummary, BuiltInSurfaceKind,
+    ElementDeclaration, ElementInstanceId, ShellAction, StateBindingKey, ensure_registry_valid,
+};
 use crate::identity::IdentityRegistry;
 use crate::model::{DiagnosticMessage, LogicalRect, ViewportSpec};
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
@@ -108,6 +112,22 @@ pub enum LiveAction {
     ActivateOverlay,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingActivation {
+    id: ElementInstanceId,
+    action: LiveAction,
+}
+
+impl From<ShellAction> for LiveAction {
+    fn from(action: ShellAction) -> Self {
+        match action {
+            ShellAction::OverlayToggle => Self::ToggleOverlay,
+            ShellAction::OverlayClose => Self::CloseOverlay,
+            ShellAction::OverlayActivate => Self::ActivateOverlay,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LiveRuntimeSnapshot {
     pub document_identity: ExperimentalDocumentIdentity,
@@ -127,6 +147,13 @@ pub struct LiveRuntimeMeasurements {
     pub initial_resolve_ms: f64,
     pub last_resolve_ms: f64,
     pub last_render_ms: f64,
+    pub registry_initialization_ms: f64,
+    pub declaration_discovery_ms: f64,
+    pub registered_element_count: u64,
+    pub binding_count: u64,
+    pub action_count: u64,
+    pub registry_scan_count: u64,
+    pub suppressed_binding_updates: u64,
 }
 
 /// Experimental parse-once document session for the portable live host.
@@ -140,12 +167,13 @@ pub struct LiveDocument {
     source: PathBuf,
     viewport: ViewportSpec,
     document_identity: ExperimentalDocumentIdentity,
+    builtins: BuiltInElementIndex,
     parse_count: u32,
     started: Instant,
     frame_generation: u64,
     kind: LiveDocumentKind,
     last_pointer: Option<Point<f32>>,
-    pressed_action: Option<LiveAction>,
+    pressed_action: Option<PendingActivation>,
     pending_action: Option<LiveAction>,
     click_count: u64,
     measurements: LiveRuntimeMeasurements,
@@ -289,6 +317,22 @@ impl LiveDocument {
         resolve_resources(&mut document, &audit, 0.0, &mut diagnostics);
         let initial_resolve_ms = elapsed_ms(resolve_started);
         let identities = IdentityRegistry::from_document(&document);
+        let document_identity = ExperimentalDocumentIdentity {
+            serial: NEXT_LIVE_DOCUMENT_SERIAL.fetch_add(1, Ordering::Relaxed),
+        };
+        let registry_started = Instant::now();
+        ensure_registry_valid()?;
+        let registry_initialization_ms = elapsed_ms(registry_started);
+        let discovery_started = Instant::now();
+        let builtins = BuiltInElementIndex::discover(
+            &document,
+            &identities,
+            document_identity,
+            kind.builtin_surface_kind(),
+            &source.display().to_string(),
+        )?;
+        let declaration_discovery_ms = elapsed_ms(discovery_started);
+        let builtin_summary = builtins.summary();
 
         Ok(Self {
             document,
@@ -297,9 +341,8 @@ impl LiveDocument {
             package_root,
             source,
             viewport,
-            document_identity: ExperimentalDocumentIdentity {
-                serial: NEXT_LIVE_DOCUMENT_SERIAL.fetch_add(1, Ordering::Relaxed),
-            },
+            document_identity,
+            builtins,
             parse_count: 1,
             started: Instant::now(),
             frame_generation: 0,
@@ -314,6 +357,13 @@ impl LiveDocument {
                 initial_resolve_ms,
                 last_resolve_ms: initial_resolve_ms,
                 last_render_ms: 0.0,
+                registry_initialization_ms,
+                declaration_discovery_ms,
+                registered_element_count: builtin_summary.registered_elements as u64,
+                binding_count: builtin_summary.bindings as u64,
+                action_count: builtin_summary.actions as u64,
+                registry_scan_count: u64::from(builtin_summary.discovery_scans),
+                suppressed_binding_updates: 0,
             },
             diagnostics,
         })
@@ -382,12 +432,17 @@ impl LiveDocument {
                 let pressed_action = self.pressed_action.take().expect("checked above");
                 self.document
                     .handle_ui_event(UiEvent::PointerUp(pointer_event(point.x, point.y, false)));
-                if self.action_at(point.x, point.y)? == Some(pressed_action) {
+                let released_action = self.action_at(point.x, point.y)?;
+                if released_action
+                    .as_ref()
+                    .is_some_and(|released| released.id == pressed_action.id)
+                {
                     self.click_count = self.click_count.saturating_add(1);
-                    if pressed_action == LiveAction::SingleOverlayActivate {
+                    let action = pressed_action.action;
+                    if action == LiveAction::SingleOverlayActivate {
                         self.apply_click_mutation()?;
                     }
-                    self.pending_action = Some(pressed_action);
+                    self.pending_action = Some(action);
                 }
                 self.resolve();
                 Ok(true)
@@ -527,6 +582,135 @@ impl LiveDocument {
         self.pending_action.take()
     }
 
+    pub fn built_in_summary(&self) -> BuiltInElementSummary {
+        self.builtins.summary()
+    }
+
+    pub fn built_in_declarations(&self) -> Vec<ElementDeclaration> {
+        self.builtins.declarations()
+    }
+
+    pub fn has_built_in_elements(&self) -> bool {
+        !self.builtins.is_empty()
+    }
+
+    pub fn element_identity(&self, html_id: &str) -> Result<ElementInstanceId, RuntimeError> {
+        self.builtins
+            .element(html_id)
+            .map(|declaration| declaration.id.clone())
+            .ok_or_else(|| {
+                RuntimeError::InvalidMutationTarget(format!(
+                    "registered element `#{html_id}` does not exist"
+                ))
+            })
+    }
+
+    pub fn validate_element_identity(
+        &self,
+        identity: &ElementInstanceId,
+    ) -> Result<(), RuntimeError> {
+        if identity.document_generation != self.document_identity {
+            return Err(RuntimeError::InvalidMutationTarget(format!(
+                "registered element `#{}` belongs to a stale document generation",
+                identity.html_id
+            )));
+        }
+        let current = self.element_identity(&identity.html_id)?;
+        if current != *identity {
+            return Err(RuntimeError::InvalidMutationTarget(format!(
+                "registered element `#{}` is stale",
+                identity.html_id
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn element_text(&self, html_id: &str) -> Result<String, RuntimeError> {
+        let node = self.builtins.indexed_node(html_id).ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget(format!(
+                "registered element `#{html_id}` does not exist"
+            ))
+        })?;
+        let slot = self.identities.resolve(&self.document, node)?;
+        self.document
+            .get_node(slot)
+            .map(|node| node.text_content())
+            .ok_or(RuntimeError::StaleIdentity {
+                slot: node.slot,
+                generation: node.generation,
+            })
+    }
+
+    pub fn element_bounds(&self, html_id: &str) -> Result<LogicalRect, RuntimeError> {
+        let node = self.builtins.indexed_node(html_id).ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget(format!(
+                "registered element `#{html_id}` does not exist"
+            ))
+        })?;
+        let slot = self.identities.resolve(&self.document, node)?;
+        let bounds =
+            self.document
+                .get_node(slot)
+                .map(node_bounds)
+                .ok_or(RuntimeError::StaleIdentity {
+                    slot: node.slot,
+                    generation: node.generation,
+                })?;
+        validate_rect(&bounds)?;
+        Ok(bounds)
+    }
+
+    pub fn apply_bound_text(
+        &mut self,
+        values: &[(StateBindingKey, String)],
+    ) -> Result<BindingUpdate, RuntimeError> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut pending = Vec::new();
+        let mut update = BindingUpdate::default();
+        for (key, value) in values {
+            if !seen.insert(*key) {
+                return Err(RuntimeError::InvalidMutationTarget(format!(
+                    "binding `{}` was supplied more than once",
+                    key.as_str()
+                )));
+            }
+            let targets = self.builtins.binding_targets(*key);
+            if targets.is_empty() {
+                continue;
+            }
+            if self.builtins.binding_is_unchanged(*key, value) {
+                update.suppressed_keys = update.suppressed_keys.saturating_add(1);
+                continue;
+            }
+            let targets = targets.to_vec();
+            for html_id in &targets {
+                let identity = self.builtins.indexed_node(html_id).ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "binding target `#{html_id}` disappeared"
+                    ))
+                })?;
+                self.identities.resolve(&self.document, identity)?;
+            }
+            pending.push((*key, value.clone(), targets));
+        }
+        for (key, value, targets) in pending {
+            for html_id in &targets {
+                self.set_registered_text(html_id, &value)?;
+                update.changed_elements = update.changed_elements.saturating_add(1);
+            }
+            self.builtins.record_binding(key, value);
+            update.changed_keys = update.changed_keys.saturating_add(1);
+        }
+        self.measurements.suppressed_binding_updates = self
+            .measurements
+            .suppressed_binding_updates
+            .saturating_add(update.suppressed_keys as u64);
+        if update.changed_elements > 0 {
+            self.resolve();
+        }
+        Ok(update)
+    }
+
     pub fn update_panel_state(
         &mut self,
         overlay_open: bool,
@@ -536,6 +720,9 @@ impl LiveDocument {
             return Err(RuntimeError::InvalidMutationTarget(
                 "panel state can only update a panel document".into(),
             ));
+        }
+        if self.has_built_in_elements() {
+            return Ok(false);
         }
         let text = if overlay_open {
             format!("Overlay open · {last_action}")
@@ -560,6 +747,9 @@ impl LiveDocument {
             return Err(RuntimeError::InvalidMutationTarget(
                 "overlay state can only update a transient-overlay document".into(),
             ));
+        }
+        if self.has_built_in_elements() {
+            return Ok(false);
         }
         self.set_text(
             "#overlay-status",
@@ -586,6 +776,9 @@ impl LiveDocument {
             return Err(RuntimeError::InvalidMutationTarget(
                 "instance context is only available to multi-surface fixtures".into(),
             ));
+        }
+        if self.has_built_in_elements() {
+            return Ok(false);
         }
         let mut changed = false;
         for (selector, value) in [
@@ -652,10 +845,78 @@ impl LiveDocument {
         Ok(())
     }
 
-    fn action_at(&self, x: f32, y: f32) -> Result<Option<LiveAction>, RuntimeError> {
+    fn set_registered_text(&mut self, html_id: &str, value: &str) -> Result<(), RuntimeError> {
+        let identity = self.builtins.indexed_node(html_id).ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget(format!(
+                "registered element `#{html_id}` disappeared"
+            ))
+        })?;
+        let parent = self.identities.resolve(&self.document, identity)?;
+        let children = self
+            .document
+            .get_node(parent)
+            .ok_or(RuntimeError::StaleIdentity {
+                slot: identity.slot,
+                generation: identity.generation,
+            })?
+            .children
+            .clone();
+        let text_nodes: Vec<_> = children
+            .into_iter()
+            .filter(|child| {
+                self.document
+                    .get_node(*child)
+                    .is_some_and(|node| matches!(node.data, NodeData::Text(_)))
+            })
+            .collect();
+        if let Some((first, remaining)) = text_nodes.split_first() {
+            self.document.mutate().set_node_text(*first, value);
+            for text in remaining {
+                self.document.mutate().set_node_text(*text, "");
+            }
+        } else {
+            let text = self.document.mutate().create_text_node(value);
+            self.document.mutate().append_children(parent, &[text]);
+            self.identities.activate_created(&self.document, text)?;
+        }
+        Ok(())
+    }
+
+    fn action_at(&self, x: f32, y: f32) -> Result<Option<PendingActivation>, RuntimeError> {
+        if !self.builtins.is_empty() {
+            for html_id in self.builtins.action_candidates() {
+                let Some(target) =
+                    self.builtins
+                        .action_target(html_id, &self.document, &self.identities)?
+                else {
+                    continue;
+                };
+                let slot = self.identities.resolve(&self.document, target.node)?;
+                let bounds = self.document.get_node(slot).map(node_bounds).ok_or(
+                    RuntimeError::StaleIdentity {
+                        slot: target.node.slot,
+                        generation: target.node.generation,
+                    },
+                )?;
+                validate_rect(&bounds)?;
+                if contains(&bounds, x, y) {
+                    return Ok(Some(PendingActivation {
+                        id: target.id,
+                        action: target.action.into(),
+                    }));
+                }
+            }
+            return Ok(None);
+        }
         for (selector, action) in self.kind.actions() {
             if contains(&self.bounds_for(selector)?, x, y) {
-                return Ok(Some(*action));
+                return Ok(Some(PendingActivation {
+                    id: ElementInstanceId {
+                        document_generation: self.document_identity,
+                        html_id: selector.trim_start_matches('#').to_owned(),
+                    },
+                    action: *action,
+                }));
             }
         }
         Ok(None)
@@ -691,6 +952,13 @@ fn checked_scaled_dimension(logical: u32, numerator: u32) -> Result<u32, Runtime
 }
 
 impl LiveDocumentKind {
+    fn builtin_surface_kind(self) -> BuiltInSurfaceKind {
+        match self {
+            Self::SingleOverlay => BuiltInSurfaceKind::SingleOverlay,
+            Self::Panel => BuiltInSurfaceKind::Panel,
+            Self::TransientOverlay => BuiltInSurfaceKind::Overlay,
+        }
+    }
     fn source_file(self) -> &'static str {
         match self {
             Self::SingleOverlay => "index.html",
@@ -874,6 +1142,28 @@ mod tests {
 
     fn manifest_fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/multi-output-shell")
+    }
+
+    fn built_in_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/built-in-panel")
+    }
+
+    fn binding_values(
+        output: &str,
+        scale: &str,
+        surface: &str,
+        status: &str,
+        count: &str,
+        action: &str,
+    ) -> Vec<(StateBindingKey, String)> {
+        vec![
+            (StateBindingKey::OutputLabel, output.into()),
+            (StateBindingKey::OutputScale, scale.into()),
+            (StateBindingKey::SurfaceTemplateId, surface.into()),
+            (StateBindingKey::OverlayStatus, status.into()),
+            (StateBindingKey::OverlayActivationCount, count.into()),
+            (StateBindingKey::ShellLastAction, action.into()),
+        ]
     }
 
     fn click_action(live: &mut LiveDocument, bounds: &LogicalRect) -> LiveAction {
@@ -1157,5 +1447,276 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn built_in_panel_discovers_once_binds_text_and_dispatches_typed_action() {
+        let mut panel = LiveDocument::load_surface_document(
+            built_in_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            58,
+        )
+        .unwrap();
+        assert_eq!(
+            panel.built_in_summary(),
+            BuiltInElementSummary {
+                registered_elements: 7,
+                bindings: 5,
+                actions: 2,
+                discovery_scans: 1,
+            }
+        );
+        let identity = panel.element_identity("panel-status").unwrap();
+        let initial_document = panel.snapshot().unwrap().document_identity;
+        let update = panel
+            .apply_bound_text(&binding_values(
+                "Output: A",
+                "Scale: 1.50×",
+                "Surface: panel",
+                "Overlay: closed",
+                "Activations: 0",
+                "Last action: Ready",
+            ))
+            .unwrap();
+        assert_eq!(update.changed_keys, 4);
+        assert_eq!(update.changed_elements, 5);
+        assert_eq!(
+            panel.element_text("panel-status").unwrap(),
+            "Overlay: closed"
+        );
+        assert_eq!(panel.element_identity("panel-status").unwrap(), identity);
+        let duplicate = panel
+            .apply_bound_text(&binding_values(
+                "Output: A",
+                "Scale: 1.50×",
+                "Surface: panel",
+                "Overlay: closed",
+                "Activations: 0",
+                "Last action: Ready",
+            ))
+            .unwrap();
+        assert_eq!(duplicate.changed_elements, 0);
+        assert_eq!(duplicate.suppressed_keys, 4);
+
+        let bounds = panel.element_bounds("overlay-toggle").unwrap();
+        assert_eq!(click_action(&mut panel, &bounds), LiveAction::ToggleOverlay);
+        panel.set_viewport(1440, 58).unwrap();
+        panel
+            .render_for(LiveRenderRequest::new(1440, 58, 180).unwrap())
+            .unwrap();
+        assert_eq!(
+            panel.snapshot().unwrap().document_identity,
+            initial_document
+        );
+        assert_eq!(panel.element_identity("panel-status").unwrap(), identity);
+        assert_eq!(panel.measurements().registry_scan_count, 1);
+    }
+
+    #[test]
+    fn built_in_action_click_requires_same_enabled_button() {
+        let mut panel = LiveDocument::load_surface_document(
+            built_in_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            58,
+        )
+        .unwrap();
+        let toggle = panel.element_bounds("overlay-toggle").unwrap();
+        let x = f64::from(toggle.x + toggle.width / 2.0);
+        let y = f64::from(toggle.y + toggle.height / 2.0);
+        assert!(panel.pointer_move(x, y).unwrap());
+        assert!(panel.pointer_primary(true).unwrap());
+        assert!(panel.pointer_move(1.0, 1.0).unwrap());
+        assert!(panel.pointer_primary(false).unwrap());
+        assert_eq!(panel.take_action(), None);
+
+        assert!(panel.pointer_move(1.0, 1.0).is_ok());
+        assert!(!panel.pointer_primary(true).unwrap());
+        assert!(panel.pointer_move(x, y).unwrap());
+        assert!(!panel.pointer_primary(false).unwrap());
+        assert_eq!(panel.take_action(), None);
+
+        assert!(!panel.pointer_move(x, y).unwrap());
+        assert!(panel.pointer_primary(true).unwrap());
+        assert!(panel.pointer_leave());
+        assert_eq!(panel.take_action(), None);
+
+        let disabled = panel.element_bounds("disabled-action").unwrap();
+        panel
+            .pointer_move(
+                f64::from(disabled.x + disabled.width / 2.0),
+                f64::from(disabled.y + disabled.height / 2.0),
+            )
+            .unwrap();
+        assert!(!panel.pointer_primary(true).unwrap());
+        assert!(!panel.pointer_primary(false).unwrap());
+        assert_eq!(panel.take_action(), None);
+    }
+
+    #[test]
+    fn built_in_overlay_actions_and_state_are_generation_scoped() {
+        let mut first = LiveDocument::load_surface_document(
+            built_in_fixture(),
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            1280,
+            720,
+        )
+        .unwrap();
+        let second = LiveDocument::load_surface_document(
+            built_in_fixture(),
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            1280,
+            720,
+        )
+        .unwrap();
+        let stale_for_second = first.element_identity("overlay-action").unwrap();
+        assert!(second.validate_element_identity(&stale_for_second).is_err());
+
+        first
+            .apply_bound_text(&binding_values(
+                "Output: A",
+                "Scale: 1.25×",
+                "Surface: overlay",
+                "Overlay: open",
+                "Activations: 0",
+                "Last action: Ready",
+            ))
+            .unwrap();
+        let action_identity = first.element_identity("overlay-action").unwrap();
+        let action = first.element_bounds("overlay-action").unwrap();
+        assert_eq!(
+            click_action(&mut first, &action),
+            LiveAction::ActivateOverlay
+        );
+        first
+            .apply_bound_text(&[(
+                StateBindingKey::OverlayActivationCount,
+                "Activations: 1".into(),
+            )])
+            .unwrap();
+        assert_eq!(
+            first.element_text("overlay-count").unwrap(),
+            "Activations: 1"
+        );
+        assert_eq!(
+            first.element_identity("overlay-action").unwrap(),
+            action_identity
+        );
+        let close = first.element_bounds("overlay-close").unwrap();
+        assert_eq!(click_action(&mut first, &close), LiveAction::CloseOverlay);
+    }
+
+    #[test]
+    fn duplicate_binding_input_is_rejected_before_mutation() {
+        let mut panel = LiveDocument::load_surface_document(
+            built_in_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            58,
+        )
+        .unwrap();
+        let before = panel.element_text("panel-status").unwrap();
+        assert!(
+            panel
+                .apply_bound_text(&[
+                    (StateBindingKey::OverlayStatus, "first".into()),
+                    (StateBindingKey::OverlayStatus, "second".into()),
+                ])
+                .is_err()
+        );
+        assert_eq!(panel.element_text("panel-status").unwrap(), before);
+    }
+
+    #[test]
+    fn one_binding_updates_multiple_elements_without_rescan() {
+        let mut panel = LiveDocument::load_surface_document(
+            built_in_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            58,
+        )
+        .unwrap();
+        let update = panel
+            .apply_bound_text(&[(StateBindingKey::ShellLastAction, "Last action: test".into())])
+            .unwrap();
+        assert_eq!(update.changed_keys, 1);
+        assert_eq!(update.changed_elements, 2);
+        assert_eq!(
+            panel.element_text("panel-last-action").unwrap(),
+            "Last action: test"
+        );
+        assert_eq!(
+            panel.element_text("panel-last-action-copy").unwrap(),
+            "Last action: test"
+        );
+        assert_eq!(panel.measurements().registry_scan_count, 1);
+    }
+
+    #[test]
+    fn stale_binding_target_is_contained_before_mutation() {
+        let mut panel = LiveDocument::load_surface_document(
+            built_in_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            58,
+        )
+        .unwrap();
+        let identity = panel.builtins.indexed_node("panel-status").unwrap();
+        let slots = panel
+            .identities
+            .subtree_slots(&panel.document, identity)
+            .unwrap();
+        assert!(
+            panel
+                .document
+                .mutate()
+                .remove_and_drop_node(identity.slot)
+                .is_some()
+        );
+        panel
+            .identities
+            .retire_removed(&panel.document, &slots)
+            .unwrap();
+        assert!(
+            panel
+                .apply_bound_text(&[(StateBindingKey::OverlayStatus, "Overlay: open".into(),)])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn repeated_valid_clicks_dispatch_once_each_without_reparse() {
+        let mut overlay = LiveDocument::load_surface_document(
+            built_in_fixture(),
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            1280,
+            720,
+        )
+        .unwrap();
+        let document = overlay.snapshot().unwrap().document_identity;
+        let action = overlay.element_bounds("overlay-action").unwrap();
+        let x = f64::from(action.x + action.width / 2.0);
+        let y = f64::from(action.y + action.height / 2.0);
+        for _ in 0..50 {
+            overlay.pointer_move(x, y).unwrap();
+            assert!(overlay.pointer_primary(true).unwrap());
+            assert!(overlay.pointer_primary(false).unwrap());
+            assert_eq!(overlay.take_action(), Some(LiveAction::ActivateOverlay));
+            overlay.pointer_leave();
+        }
+        let snapshot = overlay.snapshot().unwrap();
+        assert_eq!(snapshot.document_identity, document);
+        assert_eq!(snapshot.document_parse_count, 1);
+        assert_eq!(snapshot.interaction.click_count, 50);
+        assert_eq!(overlay.measurements().registry_scan_count, 1);
     }
 }

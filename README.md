@@ -73,6 +73,7 @@ The project has demonstrated:
 * One portable host process managing independent panel and overlay layer surfaces
 * A validated local surface manifest expanded into independent instances for each eligible output
 * Generation-safe output addition and removal through standard Wayland registry events
+* A small built-in state-text and action-button registry for ordinary HTML, without JavaScript
 
 The portable host renders at the compositor's preferred fractional scale when
 fractional-scale and viewporter are available, with scale 1 as the fallback.

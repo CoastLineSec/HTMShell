@@ -262,6 +262,7 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
                 panel.metrics.pointer_motions,
                 panel.metrics.pointer_buttons
             );
+            print_built_in_metrics(&format!("output_{}_panel", key.generation), &panel.metrics);
         }
         if let Some(overlay) = &output.overlay {
             println!(
@@ -315,6 +316,10 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
                 overlay.metrics.pointer_enters,
                 overlay.metrics.pointer_motions,
                 overlay.metrics.pointer_buttons
+            );
+            print_built_in_metrics(
+                &format!("output_{}_overlay", key.generation),
+                &overlay.metrics,
             );
         }
     }
@@ -484,5 +489,35 @@ fn print_surface(prefix: &str, summary: &SurfaceHostSummary) {
     println!(
         "{prefix}_last_pixel_conversion_us={}",
         summary.last_pixel_conversion_us
+    );
+    print_built_in_metrics(prefix, summary);
+}
+
+fn print_built_in_metrics(prefix: &str, summary: &SurfaceHostSummary) {
+    println!(
+        "{prefix}_registry_initialization_us={}",
+        summary.registry_initialization_us
+    );
+    println!(
+        "{prefix}_declaration_discovery_us={}",
+        summary.declaration_discovery_us
+    );
+    println!(
+        "{prefix}_registered_elements={} bindings={} registered_actions={} registry_scans={}",
+        summary.registered_element_count,
+        summary.binding_count,
+        summary.registered_action_count,
+        summary.registry_scan_count
+    );
+    println!(
+        "{prefix}_suppressed_binding_updates={}",
+        summary.suppressed_binding_updates
+    );
+    println!(
+        "{prefix}_component_latency_us=release_to_dispatch:{} dispatch_to_mutation:{} mutation_to_commit:{} mutation_to_callback:{}",
+        summary.last_pointer_release_to_action_dispatch_us,
+        summary.last_action_dispatch_to_state_mutation_us,
+        summary.last_state_mutation_to_commit_us,
+        summary.last_state_mutation_to_frame_callback_us,
     );
 }

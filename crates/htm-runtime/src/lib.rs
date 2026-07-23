@@ -4,6 +4,7 @@
 //! experiment and are not a proposed HTMShell runtime API.
 
 mod adapter;
+mod builtin;
 mod error;
 mod identity;
 mod incremental;
@@ -15,6 +16,10 @@ mod scene;
 mod stylesheet;
 
 pub use adapter::{run_package, run_package_with_options};
+pub use builtin::{
+    BindingUpdate, BuiltInElementKind, BuiltInElementSummary, ElementDeclaration,
+    ElementInstanceId, ShellAction, StateBindingKey, built_in_registry_names,
+};
 pub use error::RuntimeError;
 pub use incremental::{
     DamageEstimate, ExperimentalDocumentIdentity, ExperimentalNodeIdentity, ExperimentalSceneDiff,

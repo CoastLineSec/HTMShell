@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>HTMShell built-in panel experiment</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main id="panel-root" class="panel">
+      <section class="panel-start">
+        <strong>HTMShell</strong>
+      </section>
+      <section class="panel-center">
+        <span id="output-label" data-htm-element="state-text" data-htm-bind="output.label">Output</span>
+        <span id="scale-label" data-htm-element="state-text" data-htm-bind="output.scale">Scale</span>
+        <span id="panel-status" data-htm-element="state-text" data-htm-bind="overlay.status"></span>
+        <span id="panel-last-action" data-htm-element="state-text" data-htm-bind="shell.last_action">Last action</span>
+        <span class="diagnostic-duplicate" id="panel-last-action-copy" data-htm-element="state-text" data-htm-bind="shell.last_action">Last action</span>
+      </section>
+      <section class="panel-end">
+        <button disabled data-htm-element="action-button" data-htm-action="overlay.toggle" id="disabled-action" type="button">Unavailable</button>
+        <button data-htm-element="action-button" data-htm-action="overlay.toggle" id="overlay-toggle" type="button"><span>Overlay</span></button>
+      </section>
+    </main>
+  </body>
+</html>

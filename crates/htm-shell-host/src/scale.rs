@@ -41,6 +41,13 @@ impl SurfaceScaleState {
         self.preferred_numerator
     }
 
+    pub fn effective_numerator(self) -> u32 {
+        match self.profile() {
+            PresentationProfile::Scale1 => LIVE_SCALE_DENOMINATOR,
+            PresentationProfile::FractionalViewport => self.preferred_numerator,
+        }
+    }
+
     pub fn profile(self) -> PresentationProfile {
         if self.fractional_object_present && self.viewport_present && self.preferred_received {
             PresentationProfile::FractionalViewport
@@ -91,10 +98,7 @@ impl SurfaceScaleState {
         let Some((width, height)) = self.logical_size else {
             return Ok(None);
         };
-        let numerator = match self.profile() {
-            PresentationProfile::Scale1 => LIVE_SCALE_DENOMINATOR,
-            PresentationProfile::FractionalViewport => self.preferred_numerator,
-        };
+        let numerator = self.effective_numerator();
         LiveRenderRequest::new(width, height, numerator)
             .map(Some)
             .map_err(ShellHostError::from)
