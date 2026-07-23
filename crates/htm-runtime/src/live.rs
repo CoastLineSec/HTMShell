@@ -1,8 +1,8 @@
 use crate::adapter::{elapsed_ms, render_rgba_scaled, resolve_resources, validate_document_limits};
 use crate::builtin::{
     BindingUpdate, BuiltInElementIndex, BuiltInElementSummary, BuiltInSurfaceKind,
-    ElementDeclaration, ElementInstanceId, STATE_ATTRIBUTE, ShellAction, StateBindingKey,
-    StateToken, StateValueKind, ensure_registry_valid,
+    ClockDeclaration, DATETIME_ATTRIBUTE, ElementDeclaration, ElementInstanceId, STATE_ATTRIBUTE,
+    ShellAction, StateBindingKey, StateToken, StateValueKind, ensure_registry_valid,
 };
 use crate::identity::IdentityRegistry;
 use crate::model::{DiagnosticMessage, LogicalRect, ViewportSpec};
@@ -105,12 +105,15 @@ pub enum LiveDocumentKind {
 }
 
 /// Host-visible action emitted by a parse-once live document.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveAction {
     SingleOverlayActivate,
     ToggleOverlay,
     CloseOverlay,
     ActivateOverlay,
+    ClockEnable(ElementInstanceId),
+    ClockDisable(ElementInstanceId),
+    ClockToggle(ElementInstanceId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,13 +122,38 @@ struct PendingActivation {
     action: LiveAction,
 }
 
-impl From<ShellAction> for LiveAction {
-    fn from(action: ShellAction) -> Self {
-        match action {
+impl LiveAction {
+    fn from_registered(
+        action: ShellAction,
+        target: Option<ElementInstanceId>,
+    ) -> Result<Self, RuntimeError> {
+        Ok(match action {
             ShellAction::OverlayToggle => Self::ToggleOverlay,
             ShellAction::OverlayClose => Self::CloseOverlay,
             ShellAction::OverlayActivate => Self::ActivateOverlay,
-        }
+            ShellAction::ClockEnable => Self::ClockEnable(target.ok_or_else(|| {
+                RuntimeError::InvalidMutationTarget("clock.enable has no target".into())
+            })?),
+            ShellAction::ClockDisable => Self::ClockDisable(target.ok_or_else(|| {
+                RuntimeError::InvalidMutationTarget("clock.disable has no target".into())
+            })?),
+            ShellAction::ClockToggle => Self::ClockToggle(target.ok_or_else(|| {
+                RuntimeError::InvalidMutationTarget("clock.toggle has no target".into())
+            })?),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClockMutation {
+    pub changed_text: bool,
+    pub changed_datetime: bool,
+    pub changed_enabled_state: bool,
+}
+
+impl ClockMutation {
+    pub const fn changed(self) -> bool {
+        self.changed_text || self.changed_datetime || self.changed_enabled_state
     }
 }
 
@@ -155,6 +183,7 @@ pub struct LiveRuntimeMeasurements {
     pub text_binding_count: u64,
     pub token_binding_count: u64,
     pub action_count: u64,
+    pub clock_declaration_count: u64,
     pub registry_scan_count: u64,
     pub suppressed_binding_updates: u64,
     pub changed_token_updates: u64,
@@ -371,6 +400,7 @@ impl LiveDocument {
                 text_binding_count: builtin_summary.text_bindings as u64,
                 token_binding_count: builtin_summary.token_bindings as u64,
                 action_count: builtin_summary.actions as u64,
+                clock_declaration_count: builtin_summary.clock_declarations as u64,
                 registry_scan_count: u64::from(builtin_summary.discovery_scans),
                 suppressed_binding_updates: 0,
                 changed_token_updates: 0,
@@ -458,7 +488,7 @@ impl LiveDocument {
                     .is_some_and(|released| released.id == pressed_action.id)
                 {
                     self.click_count = self.click_count.saturating_add(1);
-                    let action = pressed_action.action;
+                    let action = pressed_action.action.clone();
                     if action == LiveAction::SingleOverlayActivate {
                         self.apply_click_mutation()?;
                     }
@@ -610,6 +640,90 @@ impl LiveDocument {
         self.builtins.declarations()
     }
 
+    pub fn clock_declarations(&self) -> Vec<ClockDeclaration> {
+        self.builtins.clock_declarations()
+    }
+
+    pub fn set_clock_enabled(
+        &mut self,
+        identity: &ElementInstanceId,
+        enabled: bool,
+    ) -> Result<bool, RuntimeError> {
+        self.validate_element_identity(identity)?;
+        self.builtins.set_clock_enabled(identity, enabled)
+    }
+
+    pub fn clock_enabled(&self, identity: &ElementInstanceId) -> Result<bool, RuntimeError> {
+        self.validate_element_identity(identity)?;
+        self.builtins
+            .clock_declaration(identity)
+            .map(|clock| clock.enabled)
+            .ok_or_else(|| {
+                RuntimeError::InvalidMutationTarget(format!(
+                    "target `#{}` is not `clock-text`",
+                    identity.html_id
+                ))
+            })
+    }
+
+    pub fn apply_clock_output(
+        &mut self,
+        identity: &ElementInstanceId,
+        text: &str,
+        datetime: &str,
+        enabled: bool,
+    ) -> Result<ClockMutation, RuntimeError> {
+        self.validate_element_identity(identity)?;
+        let declaration = self.builtins.clock_declaration(identity).ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget(format!(
+                "target `#{}` is not `clock-text`",
+                identity.html_id
+            ))
+        })?;
+        if declaration.enabled != enabled {
+            return Err(RuntimeError::InvalidMutationTarget(format!(
+                "clock target `#{}` enabled state is stale",
+                identity.html_id
+            )));
+        }
+        let state = if enabled { "enabled" } else { "disabled" };
+        let mutation = ClockMutation {
+            changed_text: self.element_text(&identity.html_id)? != text,
+            changed_datetime: self
+                .registered_attribute(&identity.html_id, DATETIME_ATTRIBUTE)?
+                .as_deref()
+                != Some(datetime),
+            changed_enabled_state: self
+                .registered_attribute(&identity.html_id, STATE_ATTRIBUTE)?
+                .as_deref()
+                != Some(state),
+        };
+        if mutation.changed_text {
+            self.set_registered_text(&identity.html_id, text)?;
+        }
+        let attribute_started = Instant::now();
+        if mutation.changed_datetime {
+            self.set_registered_attribute(&identity.html_id, DATETIME_ATTRIBUTE, datetime)?;
+        }
+        if mutation.changed_enabled_state {
+            self.set_registered_attribute(&identity.html_id, STATE_ATTRIBUTE, state)?;
+        }
+        self.measurements.last_attribute_mutation_ms = elapsed_ms(attribute_started);
+        if mutation.changed() {
+            self.resolve();
+        }
+        Ok(mutation)
+    }
+
+    pub fn element_datetime(&self, html_id: &str) -> Result<String, RuntimeError> {
+        self.registered_attribute(html_id, DATETIME_ATTRIBUTE)?
+            .ok_or_else(|| {
+                RuntimeError::InvalidMutationTarget(format!(
+                    "registered clock element `#{html_id}` has no runtime datetime"
+                ))
+            })
+    }
+
     pub fn has_built_in_elements(&self) -> bool {
         !self.builtins.is_empty()
     }
@@ -694,6 +808,25 @@ impl LiveDocument {
                     "registered token element `#{html_id}` has no runtime state"
                 ))
             })
+    }
+
+    fn registered_attribute(
+        &self,
+        html_id: &str,
+        attribute: &str,
+    ) -> Result<Option<String>, RuntimeError> {
+        let node = self.builtins.indexed_node(html_id).ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget(format!(
+                "registered element `#{html_id}` does not exist"
+            ))
+        })?;
+        let slot = self.identities.resolve(&self.document, node)?;
+        Ok(self
+            .document
+            .get_node(slot)
+            .and_then(|node| node.element_data())
+            .and_then(|element| element.attr(LocalName::from(attribute)))
+            .map(str::to_owned))
     }
 
     pub fn element_bounds(&self, html_id: &str) -> Result<LogicalRect, RuntimeError> {
@@ -1028,9 +1161,18 @@ impl LiveDocument {
         html_id: &str,
         token: StateToken,
     ) -> Result<(), RuntimeError> {
+        self.set_registered_attribute(html_id, STATE_ATTRIBUTE, token.as_str())
+    }
+
+    fn set_registered_attribute(
+        &mut self,
+        html_id: &str,
+        attribute: &str,
+        value: &str,
+    ) -> Result<(), RuntimeError> {
         let identity = self.builtins.indexed_node(html_id).ok_or_else(|| {
             RuntimeError::InvalidMutationTarget(format!(
-                "registered token element `#{html_id}` disappeared"
+                "registered element `#{html_id}` disappeared"
             ))
         })?;
         let node = self.identities.resolve(&self.document, identity)?;
@@ -1039,9 +1181,9 @@ impl LiveDocument {
             QualName {
                 prefix: None,
                 ns: ns!(),
-                local: LocalName::from(STATE_ATTRIBUTE),
+                local: LocalName::from(attribute),
             },
-            token.as_str(),
+            value,
         );
         Ok(())
     }
@@ -1066,7 +1208,7 @@ impl LiveDocument {
                 if contains(&bounds, x, y) {
                     return Ok(Some(PendingActivation {
                         id: target.id,
-                        action: target.action.into(),
+                        action: LiveAction::from_registered(target.action, target.target)?,
                     }));
                 }
             }
@@ -1079,7 +1221,7 @@ impl LiveDocument {
                         document_generation: self.document_identity,
                         html_id: selector.trim_start_matches('#').to_owned(),
                     },
-                    action: *action,
+                    action: action.clone(),
                 }));
             }
         }
@@ -1322,6 +1464,10 @@ mod tests {
 
     fn battery_panel_fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/battery-panel")
+    }
+
+    fn formatted_clock_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/formatted-clock")
     }
 
     fn element_attribute(live: &LiveDocument, html_id: &str, name: &str) -> Option<String> {
@@ -1658,6 +1804,7 @@ mod tests {
                 text_bindings: 5,
                 token_bindings: 0,
                 actions: 2,
+                clock_declarations: 0,
                 discovery_scans: 1,
             }
         );
@@ -2339,6 +2486,110 @@ mod tests {
         assert_eq!(panel.take_action(), None);
         assert!(panel.pointer_primary(false).unwrap());
         assert_eq!(panel.take_action(), Some(LiveAction::ToggleOverlay));
+        assert_eq!(panel.snapshot().unwrap().document_parse_count, 1);
+        assert_eq!(panel.measurements().registry_scan_count, 1);
+    }
+
+    #[test]
+    fn clock_text_mutates_semantic_output_without_reparse_or_identity_loss() {
+        let mut panel = LiveDocument::load_surface_document(
+            formatted_clock_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1440,
+            88,
+        )
+        .unwrap();
+        assert_eq!(panel.clock_declarations().len(), 6);
+        assert_eq!(panel.measurements().clock_declaration_count, 6);
+        let document = panel.snapshot().unwrap().document_identity;
+        let identity = panel.element_identity("local-time").unwrap();
+        let first = panel
+            .apply_clock_output(&identity, "09:07", "2026-07-23T09:07:00-04:00", true)
+            .unwrap();
+        assert!(first.changed_text);
+        assert!(first.changed_datetime);
+        assert!(first.changed_enabled_state);
+        assert_eq!(panel.element_text("local-time").unwrap(), "09:07");
+        assert_eq!(
+            panel.element_datetime("local-time").unwrap(),
+            "2026-07-23T09:07:00-04:00"
+        );
+        assert_eq!(
+            element_attribute(&panel, "local-time", STATE_ATTRIBUTE).as_deref(),
+            Some("enabled")
+        );
+        assert_eq!(
+            element_attribute(&panel, "local-time", "class").as_deref(),
+            Some("primary-clock")
+        );
+        assert_eq!(
+            element_attribute(&panel, "local-time", "data-role").as_deref(),
+            Some("local-clock")
+        );
+        assert_eq!(
+            element_attribute(&panel, "local-date", "data-htm-format").as_deref(),
+            Some("%A, %B %-d, %Y")
+        );
+        let duplicate = panel
+            .apply_clock_output(&identity, "09:07", "2026-07-23T09:07:00-04:00", true)
+            .unwrap();
+        assert!(!duplicate.changed());
+        panel.set_viewport(1600, 88).unwrap();
+        panel
+            .render_for(LiveRenderRequest::new(1600, 88, 180).unwrap())
+            .unwrap();
+        assert_eq!(panel.snapshot().unwrap().document_identity, document);
+        assert_eq!(panel.element_identity("local-time").unwrap(), identity);
+        assert_eq!(panel.snapshot().unwrap().document_parse_count, 1);
+        assert_eq!(panel.measurements().registry_scan_count, 1);
+    }
+
+    #[test]
+    fn clock_buttons_emit_exact_generation_safe_targets() {
+        let mut panel = LiveDocument::load_surface_document(
+            formatted_clock_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1440,
+            88,
+        )
+        .unwrap();
+        let target = panel.element_identity("paused-clock").unwrap();
+        for (button, expected) in [
+            ("clock-enable", LiveAction::ClockEnable(target.clone())),
+            ("clock-disable", LiveAction::ClockDisable(target.clone())),
+            ("clock-toggle", LiveAction::ClockToggle(target.clone())),
+        ] {
+            let bounds = panel.element_bounds(button).unwrap();
+            assert_eq!(click_action(&mut panel, &bounds), expected);
+        }
+        let stale = ElementInstanceId {
+            document_generation: ExperimentalDocumentIdentity {
+                serial: target.document_generation.serial.saturating_add(1),
+            },
+            html_id: target.html_id.clone(),
+        };
+        assert!(panel.clock_enabled(&stale).is_err());
+        assert!(panel.set_clock_enabled(&target, true).unwrap());
+        assert!(!panel.set_clock_enabled(&target, true).unwrap());
+        assert!(panel.set_clock_enabled(&target, false).unwrap());
+        panel
+            .apply_clock_output(&target, "10:00:10", "2026-07-23T10:00:10-04:00", false)
+            .unwrap();
+        let toggle = panel.element_bounds("clock-toggle").unwrap();
+        let x = f64::from(toggle.x + toggle.width / 2.0);
+        let y = f64::from(toggle.y + toggle.height / 2.0);
+        panel.pointer_move(x, y).unwrap();
+        assert!(panel.pointer_primary(true).unwrap());
+        panel
+            .apply_clock_output(&target, "10:00:11", "2026-07-23T10:00:11-04:00", false)
+            .unwrap();
+        assert!(panel.pointer_primary(false).unwrap());
+        assert_eq!(
+            panel.take_action(),
+            Some(LiveAction::ClockToggle(target.clone()))
+        );
         assert_eq!(panel.snapshot().unwrap().document_parse_count, 1);
         assert_eq!(panel.measurements().registry_scan_count, 1);
     }

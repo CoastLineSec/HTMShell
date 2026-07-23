@@ -3,7 +3,7 @@ use crate::battery::{
     BatteryFanoutMetrics, BatteryService, BatteryServiceSummary, BatterySnapshot,
 };
 use crate::buffer::{BufferData, BufferPoolStats, ShmBufferPool};
-use crate::clock::{ClockService, ClockServiceSummary, ClockSnapshot};
+use crate::clock::{ClockService, ClockServiceSummary, ClockUpdate};
 use crate::lifecycle::LayerLifecycle;
 use crate::manifest::{SurfaceKind as ManifestSurfaceKind, ValidatedManifest};
 use crate::output::{OutputCatalog, OutputEligibility, OutputKey};
@@ -161,6 +161,7 @@ pub struct SurfaceHostSummary {
     pub text_binding_count: u64,
     pub token_binding_count: u64,
     pub registered_action_count: u64,
+    pub clock_declaration_count: u64,
     pub registry_scan_count: u64,
     pub suppressed_binding_updates: u64,
     pub changed_token_updates: u64,
@@ -1210,6 +1211,7 @@ impl State {
             .filter(|surface| {
                 surface.runtime.as_ref().is_some_and(|runtime| {
                     runtime.text_binding_target_count(StateBindingKey::ClockTime) > 0
+                        || !runtime.clock_declarations().is_empty()
                 })
             })
             .count()
@@ -1218,15 +1220,41 @@ impl State {
     fn reconcile_clock_subscribers(&mut self) -> Result<(), ShellHostError> {
         let subscribers = self.clock_subscriber_count();
         let previous = self.clock.subscriber_count();
-        let initial = self
+        let legacy_consumers = self
+            .surfaces
+            .iter()
+            .filter(|surface| {
+                surface.runtime.as_ref().is_some_and(|runtime| {
+                    runtime.text_binding_target_count(StateBindingKey::ClockTime) > 0
+                })
+            })
+            .count();
+        let declarations = self
+            .surfaces
+            .iter()
+            .filter_map(|surface| surface.runtime.as_ref())
+            .flat_map(LiveDocument::clock_declarations)
+            .collect();
+        let update = self
             .clock
-            .set_subscriber_count(subscribers)
+            .reconcile(subscribers, legacy_consumers, declarations)
             .map_err(|error| ShellHostError::Clock(error.to_string()))?;
-        if subscribers > previous {
-            let snapshot = initial.or_else(|| self.clock.current_snapshot().cloned());
-            if let Some(snapshot) = snapshot {
-                self.fanout_clock_snapshot(&snapshot);
-            }
+        let update_had_legacy = update
+            .as_ref()
+            .is_some_and(|update| update.legacy.is_some());
+        if let Some(update) = update {
+            self.fanout_clock_update(&update);
+        }
+        if subscribers > previous
+            && legacy_consumers > 0
+            && !update_had_legacy
+            && let Some(snapshot) = self.clock.current_snapshot().cloned()
+        {
+            self.fanout_clock_update(&ClockUpdate {
+                legacy: Some(snapshot),
+                declarations: Vec::new(),
+                sequence: self.clock.summary().sequence,
+            });
         }
         Ok(())
     }
@@ -1237,7 +1265,7 @@ impl State {
             .handle_ready()
             .map_err(|error| ShellHostError::Clock(error.to_string()))?;
         if let Some(snapshot) = snapshot {
-            self.fanout_clock_snapshot(&snapshot);
+            self.fanout_clock_update(&snapshot);
         }
         self.maybe_stop_after_clock_updates();
         Ok(())
@@ -1354,50 +1382,98 @@ impl State {
         });
     }
 
-    fn fanout_clock_snapshot(&mut self, snapshot: &ClockSnapshot) {
+    fn fanout_clock_update(&mut self, update: &ClockUpdate) {
         let started = Instant::now();
-        let mut documents = 0usize;
+        let mut visited = std::collections::BTreeSet::new();
+        let mut changed_documents = std::collections::BTreeSet::new();
         let mut elements = 0usize;
         let mut panel_frames = 0usize;
         let mut closed_frames_suppressed = 0usize;
         let mut failures = 0usize;
-        for surface in &mut self.surfaces {
-            let Some(runtime) = surface.runtime.as_mut() else {
+        if let Some(snapshot) = &update.legacy {
+            for surface in &mut self.surfaces {
+                let Some(runtime) = surface.runtime.as_mut() else {
+                    continue;
+                };
+                if runtime.text_binding_target_count(StateBindingKey::ClockTime) == 0 {
+                    continue;
+                }
+                visited.insert(surface.owner);
+                let values = [(StateBindingKey::ClockTime, snapshot.display_text.clone())];
+                match runtime.apply_bound_text(&values) {
+                    Ok(binding) => {
+                        elements = elements.saturating_add(binding.changed_elements);
+                        if binding.changed_elements > 0 {
+                            changed_documents.insert(surface.owner);
+                        }
+                    }
+                    Err(error) => {
+                        failures = failures.saturating_add(1);
+                        eprintln!(
+                            "htmshell-live: clock binding update for surface {} was contained: {error}",
+                            surface.owner
+                        );
+                    }
+                }
+            }
+        }
+        for declaration in &update.declarations {
+            let Some(surface) = self.surfaces.iter_mut().find(|surface| {
+                surface.runtime.as_ref().is_some_and(|runtime| {
+                    runtime.validate_element_identity(&declaration.id).is_ok()
+                })
+            }) else {
+                failures = failures.saturating_add(1);
                 continue;
             };
-            if runtime.text_binding_target_count(StateBindingKey::ClockTime) == 0 {
-                continue;
-            }
-            documents = documents.saturating_add(1);
-            let values = [(StateBindingKey::ClockTime, snapshot.display_text.clone())];
-            match runtime.apply_bound_text(&values) {
-                Ok(update) => {
-                    elements = elements.saturating_add(update.changed_elements);
-                    if update.changed_elements > 0 {
-                        if surface.desired_mapped {
-                            surface
-                                .pending_binding_mutation_started
-                                .get_or_insert_with(Instant::now);
-                            surface.scheduler.mark_dirty();
-                            if surface.kind == SurfaceKind::Panel {
-                                panel_frames = panel_frames.saturating_add(1);
-                            }
-                        } else {
-                            closed_frames_suppressed = closed_frames_suppressed.saturating_add(1);
-                        }
+            visited.insert(surface.owner);
+            let runtime = surface.runtime.as_mut().expect("matched above");
+            match runtime.apply_clock_output(
+                &declaration.id,
+                &declaration.display_text,
+                &declaration.datetime,
+                declaration.enabled,
+            ) {
+                Ok(mutation) => {
+                    let changed = usize::from(mutation.changed_text)
+                        + usize::from(mutation.changed_datetime)
+                        + usize::from(mutation.changed_enabled_state);
+                    elements = elements.saturating_add(changed);
+                    if mutation.changed() {
+                        changed_documents.insert(surface.owner);
                     }
                 }
                 Err(error) => {
                     failures = failures.saturating_add(1);
                     eprintln!(
-                        "htmshell-live: clock binding update for surface {} was contained: {error}",
+                        "htmshell-live: clock declaration update for surface {} was contained: {error}",
                         surface.owner
                     );
                 }
             }
         }
+        for owner in changed_documents {
+            let Some(surface) = self
+                .surfaces
+                .iter_mut()
+                .find(|surface| surface.owner == owner)
+            else {
+                continue;
+            };
+            if surface.desired_mapped {
+                surface
+                    .pending_binding_mutation_started
+                    .get_or_insert_with(Instant::now);
+                surface.scheduler.mark_dirty();
+                if surface.kind == SurfaceKind::Panel {
+                    panel_frames = panel_frames.saturating_add(1);
+                }
+            } else {
+                closed_frames_suppressed = closed_frames_suppressed.saturating_add(1);
+            }
+        }
         self.clock.record_fanout(
-            documents,
+            visited.len(),
             elements,
             panel_frames,
             closed_frames_suppressed,
@@ -1706,6 +1782,8 @@ impl State {
         surface_state.summary.text_binding_count = runtime_measurements.text_binding_count;
         surface_state.summary.token_binding_count = runtime_measurements.token_binding_count;
         surface_state.summary.registered_action_count = runtime_measurements.action_count;
+        surface_state.summary.clock_declaration_count =
+            runtime_measurements.clock_declaration_count;
         surface_state.summary.registry_scan_count = runtime_measurements.registry_scan_count;
         surface_state.summary.suppressed_binding_updates =
             runtime_measurements.suppressed_binding_updates;
@@ -1793,6 +1871,16 @@ impl State {
     }
 
     fn handle_action(&mut self, owner: u64, action: LiveAction) -> Result<(), ShellHostError> {
+        if matches!(
+            action,
+            LiveAction::ClockEnable(_) | LiveAction::ClockDisable(_) | LiveAction::ClockToggle(_)
+        ) {
+            self.handle_clock_action(owner, action)?;
+            if matches!(self.options, SessionOptions::Manifest(_)) {
+                self.manifest_actions = self.manifest_actions.saturating_add(1);
+            }
+            return Ok(());
+        }
         if matches!(self.options, SessionOptions::Manifest(_)) {
             return self.handle_manifest_action(owner, action);
         }
@@ -1832,6 +1920,50 @@ impl State {
                     self.surfaces[index].scheduler.mark_dirty();
                 }
             }
+            LiveAction::ClockEnable(_)
+            | LiveAction::ClockDisable(_)
+            | LiveAction::ClockToggle(_) => unreachable!("handled above"),
+        }
+        Ok(())
+    }
+
+    fn handle_clock_action(
+        &mut self,
+        owner: u64,
+        action: LiveAction,
+    ) -> Result<(), ShellHostError> {
+        let (target, requested) = match action {
+            LiveAction::ClockEnable(target) => (target, Some(true)),
+            LiveAction::ClockDisable(target) => (target, Some(false)),
+            LiveAction::ClockToggle(target) => (target, None),
+            _ => {
+                return Err(ShellHostError::Wayland(
+                    "non-clock action entered clock dispatch".into(),
+                ));
+            }
+        };
+        let index = self
+            .surface_index_by_owner(owner)
+            .ok_or_else(|| ShellHostError::Wayland(format!("surface instance {owner} is stale")))?;
+        if !self.surfaces[index].desired_mapped {
+            return Err(ShellHostError::Wayland(
+                "unmapped surface cannot dispatch a clock action".into(),
+            ));
+        }
+        let runtime = self.surfaces[index]
+            .runtime
+            .as_mut()
+            .ok_or_else(|| ShellHostError::Wayland("clock action runtime is missing".into()))?;
+        let current = runtime.clock_enabled(&target)?;
+        let enabled = requested.unwrap_or(!current);
+        if !runtime.set_clock_enabled(&target, enabled)? {
+            return Ok(());
+        }
+        if let Err(error) = self.reconcile_clock_subscribers() {
+            if let Some(runtime) = self.surfaces[index].runtime.as_mut() {
+                let _ = runtime.set_clock_enabled(&target, current);
+            }
+            return Err(error);
         }
         Ok(())
     }
@@ -1852,7 +1984,7 @@ impl State {
             .ok_or_else(|| ShellHostError::Wayland(format!("surface instance {owner} is stale")))?;
         let instance = &self.output_instances[group_index];
         validate_manifest_action_source(
-            action,
+            &action,
             owner,
             instance.panel_owner,
             instance.overlay_owner,
@@ -1901,6 +2033,9 @@ impl State {
                     "single-overlay action is invalid in manifest mode".into(),
                 ));
             }
+            LiveAction::ClockEnable(_)
+            | LiveAction::ClockDisable(_)
+            | LiveAction::ClockToggle(_) => unreachable!("handled before manifest dispatch"),
         }
         self.manifest_actions = self.manifest_actions.saturating_add(1);
         Ok(())
@@ -2615,6 +2750,7 @@ impl State {
                             metrics.text_binding_count = measurements.text_binding_count;
                             metrics.token_binding_count = measurements.token_binding_count;
                             metrics.registered_action_count = measurements.action_count;
+                            metrics.clock_declaration_count = measurements.clock_declaration_count;
                             metrics.registry_scan_count = measurements.registry_scan_count;
                             metrics.suppressed_binding_updates =
                                 measurements.suppressed_binding_updates;
@@ -3026,7 +3162,7 @@ fn apply_surface_bindings(
 }
 
 fn validate_manifest_action_source(
-    action: LiveAction,
+    action: &LiveAction,
     owner: u64,
     panel_owner: u64,
     overlay_owner: u64,
@@ -3044,6 +3180,9 @@ fn validate_manifest_action_source(
         LiveAction::CloseOverlay | LiveAction::ActivateOverlay => Ok(()),
         LiveAction::SingleOverlayActivate => {
             Err("single-overlay action is invalid in manifest mode")
+        }
+        LiveAction::ClockEnable(_) | LiveAction::ClockDisable(_) | LiveAction::ClockToggle(_) => {
+            Ok(())
         }
     }
 }
@@ -3616,29 +3755,30 @@ mod tests {
     #[test]
     fn manifest_action_source_policy_rejects_wrong_stale_or_closed_sources() {
         assert!(
-            validate_manifest_action_source(LiveAction::ToggleOverlay, 10, 10, 11, false).is_ok()
+            validate_manifest_action_source(&LiveAction::ToggleOverlay, 10, 10, 11, false).is_ok()
         );
         assert!(
-            validate_manifest_action_source(LiveAction::ToggleOverlay, 11, 10, 11, true).is_err()
+            validate_manifest_action_source(&LiveAction::ToggleOverlay, 11, 10, 11, true).is_err()
         );
         assert!(
-            validate_manifest_action_source(LiveAction::CloseOverlay, 11, 10, 11, true).is_ok()
+            validate_manifest_action_source(&LiveAction::CloseOverlay, 11, 10, 11, true).is_ok()
         );
         assert!(
-            validate_manifest_action_source(LiveAction::ActivateOverlay, 11, 10, 11, true).is_ok()
+            validate_manifest_action_source(&LiveAction::ActivateOverlay, 11, 10, 11, true).is_ok()
         );
         assert!(
-            validate_manifest_action_source(LiveAction::CloseOverlay, 11, 10, 11, false).is_err()
+            validate_manifest_action_source(&LiveAction::CloseOverlay, 11, 10, 11, false).is_err()
         );
         assert!(
-            validate_manifest_action_source(LiveAction::ActivateOverlay, 11, 10, 11, false)
+            validate_manifest_action_source(&LiveAction::ActivateOverlay, 11, 10, 11, false)
                 .is_err()
         );
         assert!(
-            validate_manifest_action_source(LiveAction::ActivateOverlay, 12, 10, 11, true).is_err()
+            validate_manifest_action_source(&LiveAction::ActivateOverlay, 12, 10, 11, true)
+                .is_err()
         );
         assert!(
-            validate_manifest_action_source(LiveAction::SingleOverlayActivate, 10, 10, 11, true)
+            validate_manifest_action_source(&LiveAction::SingleOverlayActivate, 10, 10, 11, true)
                 .is_err()
         );
     }

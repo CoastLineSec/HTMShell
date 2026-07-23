@@ -76,7 +76,7 @@ The project has demonstrated:
 * A validated local surface manifest expanded into independent instances for each eligible output
 * Generation-safe output addition and removal through standard Wayland registry events
 * A small built-in registry for typed text, finite visual state, and actions on ordinary HTML
-* Event-driven native state, beginning with one shared local-time scheduler for ordinary state-text bindings
+* Event-driven clock and date presentation with validated formats, named time zones, and one shared scheduler
 * Event-driven aggregate battery state from UPower when the system service is available
 
 The portable host renders at the compositor's preferred fractional scale when

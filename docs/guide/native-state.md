@@ -4,7 +4,9 @@ Native sources publish typed values. Existing [`state-text`](../types/HTMShell.E
 
 ## Clock
 
-[`clock.time`](../types/HTMShell.Services.Clock/Clock.md) is process-scoped local time in fixed `HH:mm` form. One scheduler serves every bound document. It wakes for the next visible minute change and remains idle between deadlines.
+[`clock.time`](../types/HTMShell.Services.Clock/Clock.md) is process-scoped local time in fixed `HH:mm` form. For custom time and date output, use [`clock-text`](../types/HTMShell.Elements/clock-text.md). It supports validated formats, local time, UTC, and named IANA zones.
+
+One scheduler serves every clock declaration and fixed binding. It uses the earliest visible deadline and remains idle between deadlines. See [clocks and dates](clock.md).
 
 ## Battery
 
@@ -12,4 +14,4 @@ Native sources publish typed values. Existing [`state-text`](../types/HTMShell.E
 
 An absent battery and an unavailable UPower service are different states. HTMShell does not read battery hardware directly from sysfs.
 
-Clock and battery updates are event-driven. They do not use periodic state polling, per-output sources, or per-element timers.
+Clock and battery updates are event-driven. They do not use state polling, per-output sources, or per-element timers.

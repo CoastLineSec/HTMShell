@@ -15,6 +15,7 @@ Validated behavior declarations on ordinary HTML.
 - [`state-text`](HTMShell.Elements/state-text.md)
 - [`state-token`](HTMShell.Elements/state-token.md)
 - [`action-button`](HTMShell.Elements/action-button.md)
+- [`clock-text`](HTMShell.Elements/clock-text.md)
 
 ## `HTMShell.State`
 
@@ -30,10 +31,11 @@ Output, overlay, surface, and shell state.
 Typed actions accepted from built-in buttons.
 
 - [`Overlay`](HTMShell.Actions/Overlay.md)
+- [`Clock`](HTMShell.Actions/Clock.md)
 
 ## `HTMShell.Services.Clock`
 
-Process-scoped local time.
+Process-scoped clock and date presentation.
 
 - [`Clock`](HTMShell.Services.Clock/Clock.md)
 

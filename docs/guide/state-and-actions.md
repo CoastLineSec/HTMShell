@@ -1,6 +1,6 @@
 # State and actions
 
-HTMShell attaches typed behavior to ordinary HTML through three built-in declarations. Every declared element requires a unique, nonempty HTML `id`.
+HTMShell attaches typed behavior to ordinary HTML through four built-in declarations. Every declared element requires a unique, nonempty HTML `id`.
 
 ## Text state
 
@@ -45,6 +45,19 @@ Authors cannot set `data-htm-state` on a registered element.
 
 A press must start on the enabled button. Its release must resolve to the same live button. Descendant labels and images resolve to the owning button. Pointer leave, surface unmap, output removal, or pointer loss cancels the pending action. The HTML `disabled` attribute prevents dispatch.
 
+Clock control actions use an exact document-local target:
+
+```html
+<button id="pause"
+        data-htm-element="action-button"
+        data-htm-action="clock.disable"
+        data-htm-target="panel-clock">
+  Pause
+</button>
+```
+
+The target must be a [`clock-text`](../types/HTMShell.Elements/clock-text.md) element in the same document. Overlay actions do not accept `data-htm-target`.
+
 State has process, output, or surface scope. Process state is shared across outputs. Output state affects one output group. Surface state describes one document surface.
 
-Bindings and actions are fixed names. HTMShell does not evaluate expressions, call arbitrary commands, or run JavaScript. See the [`State`](../types/HTMShell.State/README.md) and [`Actions`](../types/HTMShell.Actions/README.md) references.
+Bindings and actions are fixed names. HTMShell does not evaluate expressions, call arbitrary commands, or run JavaScript. See the [`State`](../types/HTMShell.State/README.md), [`Actions`](../types/HTMShell.Actions/README.md), and [`clock-text`](../types/HTMShell.Elements/clock-text.md) references.

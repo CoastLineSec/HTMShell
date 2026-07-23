@@ -1,4 +1,7 @@
-use htm_runtime::{ShellAction, StateBindingKey, StateToken, built_in_registry_names};
+use htm_runtime::{
+    CLOCK_FORMAT_CONVERSIONS, CLOCK_FORMAT_FLAGS, CLOCK_PUBLIC_ATTRIBUTES, ClockFormat,
+    ShellAction, StateBindingKey, StateToken, built_in_registry_names,
+};
 use htm_shell_host::{SurfaceKind, ValidatedManifest};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -110,6 +113,10 @@ fn public_documentation_links_and_example_paths_resolve() {
         "examples/static-panel/assets/shell.svg",
         "examples/static-panel/assets/overlay.svg",
         "examples/clock-panel/shell.json",
+        "examples/formatted-clock/shell.json",
+        "examples/formatted-clock/panel.html",
+        "examples/formatted-clock/overlay.html",
+        "examples/formatted-clock/style.css",
         "examples/battery-panel/shell.json",
         "examples/battery-panel/assets/battery.svg",
     ] {
@@ -182,6 +189,27 @@ fn typed_public_names_are_covered_by_the_reference() {
             token.as_str()
         );
     }
+    for attribute in CLOCK_PUBLIC_ATTRIBUTES {
+        assert!(
+            documented_name(&reference, attribute),
+            "clock attribute is undocumented: {attribute}"
+        );
+    }
+    for conversion in CLOCK_FORMAT_CONVERSIONS {
+        assert!(
+            documented_name(&reference, conversion),
+            "clock format conversion is undocumented: {conversion}"
+        );
+        ClockFormat::compile(conversion).unwrap_or_else(|error| {
+            panic!("documented conversion {conversion} is invalid: {error}")
+        });
+    }
+    for flag in CLOCK_FORMAT_FLAGS {
+        assert!(
+            documented_name(&reference, &flag.to_string()),
+            "clock format flag is undocumented: {flag}"
+        );
+    }
 
     for (kind, name) in [
         (SurfaceKind::Panel, "panel"),
@@ -200,6 +228,7 @@ fn documented_manifests_validate_without_wayland() {
     for path in [
         "examples/static-panel/shell.json",
         "examples/clock-panel/shell.json",
+        "examples/formatted-clock/shell.json",
         "examples/battery-panel/shell.json",
     ] {
         let manifest = ValidatedManifest::load(root.join(path))
@@ -207,5 +236,56 @@ fn documented_manifests_validate_without_wayland() {
         assert_eq!(manifest.parse_count(), 1);
         assert_eq!(manifest.manifest().version, 1);
         assert_eq!(manifest.manifest().surfaces.len(), 2);
+    }
+}
+
+#[test]
+fn private_clock_parity_matrix_is_resolved_when_present() {
+    let path = workspace_root().join(".internal/research/system-clock-parity.md");
+    if !path.is_file() {
+        return;
+    }
+    let text = fs::read_to_string(&path).expect("private parity matrix is UTF-8");
+    for capability in [
+        "`date`",
+        "`hours`",
+        "`minutes`",
+        "`seconds`",
+        "`precision`",
+        "Hours precision",
+        "Minutes precision",
+        "Seconds precision",
+        "`enabled` default",
+        "`enabled: false`",
+        "Runtime enable",
+        "Multiple independent instances",
+        "Clock-change behavior",
+        "Formatted date and time",
+    ] {
+        assert!(
+            text.contains(capability),
+            "SystemClock parity row is missing: {capability}"
+        );
+    }
+    for unresolved in ["| PLANNED |", "UNRESOLVED", "TODO"] {
+        assert!(
+            !text.contains(unresolved),
+            "SystemClock parity matrix remains unresolved: {unresolved}"
+        );
+    }
+    for row in text
+        .lines()
+        .filter(|line| line.starts_with('|') && !line.starts_with("| ---"))
+    {
+        if row.contains("Quickshell capability") {
+            continue;
+        }
+        assert!(
+            row.ends_with("| EQUIVALENT |")
+                || row.ends_with("| IMPLEMENTED |")
+                || row.ends_with("| NOT APPLICABLE |")
+                || row.ends_with("| DEFERRED BY JAMES |"),
+            "invalid final parity classification: {row}"
+        );
     }
 }

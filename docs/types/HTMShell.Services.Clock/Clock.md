@@ -2,17 +2,11 @@
 
 **Module:** `HTMShell.Services.Clock` | **Kind:** Native state source | **Scope:** Process
 
-`Clock` publishes local civil time to `clock.time`.
+`Clock` supplies one wall-clock sample to fixed bindings and independent formatted declarations. It covers the author-facing time, date, precision, and enabled use cases of Quickshell `SystemClock` through semantic HTML rather than a QML object API.
 
-## State keys
+## Fixed binding
 
-### `clock.time`
-
-**Presentation:** Text
-
-The fixed format is zero-padded 24-hour `HH:mm`, such as `09:07` or `17:42`.
-
-## Usage
+`clock.time` remains a convenience text binding. It is local, always enabled while subscribed, formatted as zero-padded `HH:mm`, and updated at minute boundaries.
 
 ```html
 <span id="clock"
@@ -20,19 +14,44 @@ The fixed format is zero-padded 24-hour `HH:mm`, such as `09:07` or `17:42`.
       data-htm-bind="clock.time"></span>
 ```
 
-## Update behavior
+## Formatted declarations
 
-One scheduler serves every bound document. It samples the system wall clock, converts it through the system-local time zone, and publishes one shared value. If local time-zone discovery fails, it uses UTC.
+Use [`clock-text`](../HTMShell.Elements/clock-text.md) for independent formats, zones, and enabled state:
 
-The initial value is available when the first clock binding appears. Later updates align to the next visible minute change. Duplicate display values cause no document mutation.
+```html
+<time id="date"
+      data-htm-element="clock-text"
+      data-htm-format="%F %H:%M"
+      data-htm-time-zone="Europe/London"></time>
+```
 
-The scheduler is disarmed when no live document binds `clock.time`. It uses an event deadline instead of polling. There is no timer per output, surface, or element.
+Formats use this finite profile:
+
+| Group | Accepted conversions |
+| --- | --- |
+| Literal and names | `%%`, `%A`, `%a`, `%B`, `%b`, `%h`, `%P`, `%p` |
+| Date | `%C`, `%D`, `%d`, `%e`, `%F`, `%G`, `%g`, `%j`, `%m`, `%q`, `%U`, `%u`, `%V`, `%W`, `%w`, `%Y`, `%y` |
+| Time | `%H`, `%I`, `%k`, `%l`, `%M`, `%R`, `%S`, `%T` |
+| Zone | `%Q`, `%:Q`, `%Z`, `%z`, `%:z`, `%::z`, `%:::z` |
+
+Numeric fields accept padding flags `-`, `_`, and `0`, plus a minimum width from 1 through 20 where it affects output. Name fields accept case flags `^` and `#`. Other flag and conversion combinations are rejected.
+
+`%c`, `%r`, `%X`, `%x`, `%f`, `%.f`, `%N`, `%s`, `%n`, `%t`, and `%+` are unsupported. Locale composites, fractional seconds, timestamps, and control output are outside this API.
+
+## Scheduling and zones
+
+Cadence is inferred from visible fields: second, minute, hour, local day, zone transition, or static. The scheduler selects the earliest deadline across enabled consumers. Date boundaries use each declaration's zone. Offset and abbreviation output observes zone transitions.
+
+The zone is `local` by default. Exact `UTC` and validated named IANA zones are supported. Local-zone discovery failure falls back to UTC. Live host zone configuration watching is unavailable.
+
+One process timer serves every declaration and output. Each sequence samples once, converts each active zone once, and reuses each identical format-zone result. Disabled clocks freeze and contribute no deadline. Closed retained documents update without requesting a frame.
 
 ## Limitations
 
-Seconds, dates, custom formats, user-selected time zones, and live time-zone configuration watching are unavailable.
+Names and meridiem output use fixed English text. Locale selection, alarms, countdowns, relative time, runtime format or zone mutation, and general expressions are unavailable.
 
 ## See also
 
-- [`state-text`](../HTMShell.Elements/state-text.md)
-- [Native state guide](../../guide/native-state.md)
+- [Clocks and dates](../../guide/clock.md)
+- [`clock-text`](../HTMShell.Elements/clock-text.md)
+- [Clock actions](../HTMShell.Actions/Clock.md)

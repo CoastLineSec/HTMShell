@@ -1,5 +1,8 @@
 use crate::identity::{IdentityRegistry, author_slots};
-use crate::{ExperimentalDocumentIdentity, ExperimentalNodeIdentity, RuntimeError};
+use crate::{
+    ClockFormat, ClockTimeZone, ExperimentalDocumentIdentity, ExperimentalNodeIdentity,
+    MAX_CLOCK_DECLARATIONS_PER_DOCUMENT, RuntimeError,
+};
 use blitz_dom::{LocalName, local_name};
 use blitz_html::HtmlDocument;
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,6 +12,11 @@ use std::sync::OnceLock;
 const ELEMENT_ATTRIBUTE: &str = "data-htm-element";
 const BIND_ATTRIBUTE: &str = "data-htm-bind";
 const ACTION_ATTRIBUTE: &str = "data-htm-action";
+const TARGET_ATTRIBUTE: &str = "data-htm-target";
+const FORMAT_ATTRIBUTE: &str = "data-htm-format";
+const TIME_ZONE_ATTRIBUTE: &str = "data-htm-time-zone";
+const ENABLED_ATTRIBUTE: &str = "data-htm-enabled";
+pub(crate) const DATETIME_ATTRIBUTE: &str = "datetime";
 pub(crate) const STATE_ATTRIBUTE: &str = "data-htm-state";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -16,6 +24,7 @@ pub enum BuiltInElementKind {
     StateText,
     ActionButton,
     StateToken,
+    ClockText,
 }
 
 impl BuiltInElementKind {
@@ -24,6 +33,7 @@ impl BuiltInElementKind {
             Self::StateText => "state-text",
             Self::ActionButton => "action-button",
             Self::StateToken => "state-token",
+            Self::ClockText => "clock-text",
         }
     }
 
@@ -32,6 +42,7 @@ impl BuiltInElementKind {
             "state-text" => Some(Self::StateText),
             "action-button" => Some(Self::ActionButton),
             "state-token" => Some(Self::StateToken),
+            "clock-text" => Some(Self::ClockText),
             _ => None,
         }
     }
@@ -174,10 +185,12 @@ pub enum StateToken {
     Low,
     Critical,
     Action,
+    Enabled,
+    Disabled,
 }
 
 impl StateToken {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 19] = [
         Self::Open,
         Self::Closed,
         Self::Scale1,
@@ -195,6 +208,8 @@ impl StateToken {
         Self::Low,
         Self::Critical,
         Self::Action,
+        Self::Enabled,
+        Self::Disabled,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -216,6 +231,8 @@ impl StateToken {
             Self::Low => "low",
             Self::Critical => "critical",
             Self::Action => "action",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
         }
     }
 
@@ -257,13 +274,19 @@ pub enum ShellAction {
     OverlayToggle,
     OverlayClose,
     OverlayActivate,
+    ClockEnable,
+    ClockDisable,
+    ClockToggle,
 }
 
 impl ShellAction {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 6] = [
         Self::OverlayToggle,
         Self::OverlayClose,
         Self::OverlayActivate,
+        Self::ClockEnable,
+        Self::ClockDisable,
+        Self::ClockToggle,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -271,6 +294,9 @@ impl ShellAction {
             Self::OverlayToggle => "overlay.toggle",
             Self::OverlayClose => "overlay.close",
             Self::OverlayActivate => "overlay.activate",
+            Self::ClockEnable => "clock.enable",
+            Self::ClockDisable => "clock.disable",
+            Self::ClockToggle => "clock.toggle",
         }
     }
 }
@@ -283,6 +309,9 @@ impl std::str::FromStr for ShellAction {
             "overlay.toggle" => Ok(Self::OverlayToggle),
             "overlay.close" => Ok(Self::OverlayClose),
             "overlay.activate" => Ok(Self::OverlayActivate),
+            "clock.enable" => Ok(Self::ClockEnable),
+            "clock.disable" => Ok(Self::ClockDisable),
+            "clock.toggle" => Ok(Self::ClockToggle),
             _ => Err(()),
         }
     }
@@ -300,6 +329,10 @@ impl BuiltInSurfaceKind {
         matches!(
             (self, action),
             (Self::Panel, ShellAction::OverlayToggle)
+                | (
+                    Self::Panel | Self::Overlay,
+                    ShellAction::ClockEnable | ShellAction::ClockDisable | ShellAction::ClockToggle
+                )
                 | (
                     Self::Overlay,
                     ShellAction::OverlayClose | ShellAction::OverlayActivate
@@ -321,7 +354,17 @@ pub struct ElementDeclaration {
     pub binding: Option<StateBindingKey>,
     pub binding_kind: Option<StateValueKind>,
     pub action: Option<ShellAction>,
+    pub action_target: Option<ElementInstanceId>,
+    pub clock: Option<ClockDeclaration>,
     pub disabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClockDeclaration {
+    pub id: ElementInstanceId,
+    pub format: ClockFormat,
+    pub time_zone: ClockTimeZone,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -331,6 +374,7 @@ pub struct BuiltInElementSummary {
     pub text_bindings: usize,
     pub token_bindings: usize,
     pub actions: usize,
+    pub clock_declarations: usize,
     pub discovery_scans: u32,
 }
 
@@ -350,7 +394,7 @@ struct BuiltInElementDefinition {
     required_attribute: &'static str,
 }
 
-const DEFINITIONS: [BuiltInElementDefinition; 3] = [
+const DEFINITIONS: [BuiltInElementDefinition; 4] = [
     BuiltInElementDefinition {
         name: "state-text",
         allowed_tags: &["span", "p", "output"],
@@ -365,6 +409,11 @@ const DEFINITIONS: [BuiltInElementDefinition; 3] = [
         name: "state-token",
         allowed_tags: &["div", "span", "section"],
         required_attribute: BIND_ATTRIBUTE,
+    },
+    BuiltInElementDefinition {
+        name: "clock-text",
+        allowed_tags: &["time"],
+        required_attribute: FORMAT_ATTRIBUTE,
     },
 ];
 
@@ -383,6 +432,7 @@ pub(crate) struct ActionTarget {
     pub(crate) id: ElementInstanceId,
     pub(crate) action: ShellAction,
     pub(crate) node: ExperimentalNodeIdentity,
+    pub(crate) target: Option<ElementInstanceId>,
 }
 
 #[derive(Debug, Clone)]
@@ -409,6 +459,7 @@ impl BuiltInElementIndex {
         let mut text_bindings: BTreeMap<StateBindingKey, Vec<String>> = BTreeMap::new();
         let mut token_bindings: BTreeMap<StateBindingKey, Vec<String>> = BTreeMap::new();
         let mut actions = Vec::new();
+        let mut unresolved_action_targets = BTreeMap::new();
         let slots = author_slots(document);
         let mut id_counts: BTreeMap<String, usize> = BTreeMap::new();
         for slot in &slots {
@@ -480,7 +531,16 @@ impl BuiltInElementIndex {
                     ),
                 )
             })?;
-            let (binding, binding_kind, action) = match kind {
+            if kind == BuiltInElementKind::ClockText
+                && (element.has_attr(LocalName::from(DATETIME_ATTRIBUTE))
+                    || element.has_attr(LocalName::from(STATE_ATTRIBUTE)))
+            {
+                return Err(invalid_declaration(
+                    &context,
+                    "`datetime` and `data-htm-state` are runtime-owned",
+                ));
+            }
+            let (binding, binding_kind, action, clock) = match kind {
                 BuiltInElementKind::StateText => {
                     validate_state_text_children(document, slot, &context)?;
                     let binding = required.parse::<StateBindingKey>().map_err(|()| {
@@ -497,7 +557,7 @@ impl BuiltInElementIndex {
                             ),
                         ));
                     }
-                    (Some(binding), Some(StateValueKind::Text), None)
+                    (Some(binding), Some(StateValueKind::Text), None, None)
                 }
                 BuiltInElementKind::ActionButton => {
                     let action = required.parse::<ShellAction>().map_err(|()| {
@@ -512,7 +572,34 @@ impl BuiltInElementIndex {
                             ),
                         ));
                     }
-                    (None, None, Some(action))
+                    let clock_action = matches!(
+                        action,
+                        ShellAction::ClockEnable
+                            | ShellAction::ClockDisable
+                            | ShellAction::ClockToggle
+                    );
+                    match (
+                        clock_action,
+                        element.attr(LocalName::from(TARGET_ATTRIBUTE)),
+                    ) {
+                        (true, Some(target)) if !target.is_empty() => {
+                            unresolved_action_targets.insert(html_id.clone(), target.to_owned());
+                        }
+                        (true, _) => {
+                            return Err(invalid_declaration(
+                                &context,
+                                "clock action requires nonempty `data-htm-target`",
+                            ));
+                        }
+                        (false, Some(_)) => {
+                            return Err(invalid_declaration(
+                                &context,
+                                "`data-htm-target` is forbidden for overlay actions",
+                            ));
+                        }
+                        (false, None) => {}
+                    }
+                    (None, None, Some(action), None)
                 }
                 BuiltInElementKind::StateToken => {
                     let binding = required.parse::<StateBindingKey>().map_err(|()| {
@@ -529,7 +616,50 @@ impl BuiltInElementIndex {
                             ),
                         ));
                     }
-                    (Some(binding), Some(StateValueKind::Token), None)
+                    (Some(binding), Some(StateValueKind::Token), None, None)
+                }
+                BuiltInElementKind::ClockText => {
+                    validate_state_text_children(document, slot, &context)?;
+                    let format = ClockFormat::compile(required).map_err(|error| {
+                        invalid_declaration(
+                            &context,
+                            format!("invalid `{FORMAT_ATTRIBUTE}`: {error}"),
+                        )
+                    })?;
+                    let time_zone =
+                        ClockTimeZone::parse(element.attr(LocalName::from(TIME_ZONE_ATTRIBUTE)))
+                            .map_err(|error| {
+                                invalid_declaration(
+                                    &context,
+                                    format!("invalid `{TIME_ZONE_ATTRIBUTE}`: {error}"),
+                                )
+                            })?;
+                    let enabled = match element.attr(LocalName::from(ENABLED_ATTRIBUTE)) {
+                        None | Some("true") => true,
+                        Some("false") => false,
+                        Some(value) => {
+                            return Err(invalid_declaration(
+                                &context,
+                                format!(
+                                    "`{ENABLED_ATTRIBUTE}` must be `true` or `false`, not `{value}`"
+                                ),
+                            ));
+                        }
+                    };
+                    (
+                        None,
+                        None,
+                        None,
+                        Some(ClockDeclaration {
+                            id: ElementInstanceId {
+                                document_generation,
+                                html_id: html_id.clone(),
+                            },
+                            format,
+                            time_zone,
+                            enabled,
+                        }),
+                    )
                 }
             };
             let instance_id = ElementInstanceId {
@@ -542,6 +672,8 @@ impl BuiltInElementIndex {
                 binding,
                 binding_kind,
                 action,
+                action_target: None,
+                clock,
                 disabled: element.has_attr(local_name!("disabled")),
             };
             let indexed = IndexedElement {
@@ -578,6 +710,36 @@ impl BuiltInElementIndex {
             elements.insert(html_id, indexed);
         }
 
+        let clock_declarations = elements
+            .values()
+            .filter(|element| element.declaration.clock.is_some())
+            .count();
+        if clock_declarations > MAX_CLOCK_DECLARATIONS_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{source} contains {clock_declarations} clock declarations; the per-document limit is {MAX_CLOCK_DECLARATIONS_PER_DOCUMENT}"
+            )));
+        }
+        for (action_id, target_id) in unresolved_action_targets {
+            let target = elements.get(&target_id).ok_or_else(|| {
+                invalid_declaration(
+                    &declaration_context(source, Some(&action_id)),
+                    format!("clock target `#{target_id}` does not exist"),
+                )
+            })?;
+            if target.declaration.kind != BuiltInElementKind::ClockText {
+                return Err(invalid_declaration(
+                    &declaration_context(source, Some(&action_id)),
+                    format!("clock target `#{target_id}` is not `clock-text`"),
+                ));
+            }
+            let target_identity = target.declaration.id.clone();
+            elements
+                .get_mut(&action_id)
+                .expect("action was indexed above")
+                .declaration
+                .action_target = Some(target_identity);
+        }
+
         actions.sort_by_key(|id| {
             let element = &elements[id];
             (
@@ -599,6 +761,7 @@ impl BuiltInElementIndex {
             text_bindings: text_binding_count,
             token_bindings: token_binding_count,
             actions: actions.len(),
+            clock_declarations,
             discovery_scans: 1,
         };
         Ok(Self {
@@ -625,6 +788,53 @@ impl BuiltInElementIndex {
             .values()
             .map(|element| element.declaration.clone())
             .collect()
+    }
+
+    pub(crate) fn clock_declarations(&self) -> Vec<ClockDeclaration> {
+        self.elements
+            .values()
+            .filter_map(|element| element.declaration.clock.clone())
+            .collect()
+    }
+
+    pub(crate) fn clock_declaration(
+        &self,
+        identity: &ElementInstanceId,
+    ) -> Option<&ClockDeclaration> {
+        self.elements
+            .get(&identity.html_id)
+            .filter(|element| element.declaration.id == *identity)
+            .and_then(|element| element.declaration.clock.as_ref())
+    }
+
+    pub(crate) fn set_clock_enabled(
+        &mut self,
+        identity: &ElementInstanceId,
+        enabled: bool,
+    ) -> Result<bool, RuntimeError> {
+        let element = self.elements.get_mut(&identity.html_id).ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget(format!(
+                "clock target `#{}` disappeared",
+                identity.html_id
+            ))
+        })?;
+        if element.declaration.id != *identity {
+            return Err(RuntimeError::InvalidMutationTarget(format!(
+                "clock target `#{}` belongs to a stale document generation",
+                identity.html_id
+            )));
+        }
+        let clock = element.declaration.clock.as_mut().ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget(format!(
+                "target `#{}` is not `clock-text`",
+                identity.html_id
+            ))
+        })?;
+        if clock.enabled == enabled {
+            return Ok(false);
+        }
+        clock.enabled = enabled;
+        Ok(true)
     }
 
     pub(crate) fn element(&self, html_id: &str) -> Option<&ElementDeclaration> {
@@ -695,16 +905,40 @@ impl BuiltInElementIndex {
         if disabled {
             return Ok(None);
         }
+        if let Some(target) = &entry.declaration.action_target {
+            if target.document_generation != entry.declaration.id.document_generation {
+                return Err(RuntimeError::InvalidMutationTarget(format!(
+                    "clock target `#{}` belongs to a stale document generation",
+                    target.html_id
+                )));
+            }
+            let target_entry = self.elements.get(&target.html_id).ok_or_else(|| {
+                RuntimeError::InvalidMutationTarget(format!(
+                    "clock target `#{}` disappeared",
+                    target.html_id
+                ))
+            })?;
+            if target_entry.declaration.kind != BuiltInElementKind::ClockText
+                || target_entry.declaration.id != *target
+            {
+                return Err(RuntimeError::InvalidMutationTarget(format!(
+                    "clock target `#{}` is stale or has the wrong kind",
+                    target.html_id
+                )));
+            }
+            identities.resolve(document, target_entry.node)?;
+        }
         Ok(Some(ActionTarget {
             id: entry.declaration.id.clone(),
             action,
             node: entry.node,
+            target: entry.declaration.action_target.clone(),
         }))
     }
 }
 
 pub fn built_in_registry_names() -> &'static [&'static str] {
-    &["state-text", "action-button", "state-token"]
+    &["state-text", "action-button", "state-token", "clock-text"]
 }
 
 pub(crate) fn ensure_registry_valid() -> Result<(), RuntimeError> {
@@ -738,14 +972,23 @@ fn definition(kind: BuiltInElementKind) -> &'static BuiltInElementDefinition {
         BuiltInElementKind::StateText => &DEFINITIONS[0],
         BuiltInElementKind::ActionButton => &DEFINITIONS[1],
         BuiltInElementKind::StateToken => &DEFINITIONS[2],
+        BuiltInElementKind::ClockText => &DEFINITIONS[3],
     }
 }
 
 fn allowed_behavior_attributes(kind: BuiltInElementKind) -> &'static [&'static str] {
     match kind {
         BuiltInElementKind::StateText => &[ELEMENT_ATTRIBUTE, BIND_ATTRIBUTE],
-        BuiltInElementKind::ActionButton => &[ELEMENT_ATTRIBUTE, ACTION_ATTRIBUTE],
+        BuiltInElementKind::ActionButton => {
+            &[ELEMENT_ATTRIBUTE, ACTION_ATTRIBUTE, TARGET_ATTRIBUTE]
+        }
         BuiltInElementKind::StateToken => &[ELEMENT_ATTRIBUTE, BIND_ATTRIBUTE],
+        BuiltInElementKind::ClockText => &[
+            ELEMENT_ATTRIBUTE,
+            FORMAT_ATTRIBUTE,
+            TIME_ZONE_ATTRIBUTE,
+            ENABLED_ATTRIBUTE,
+        ],
     }
 }
 
@@ -821,7 +1064,7 @@ mod tests {
     fn registry_is_exact_deterministic_and_duplicate_safe() {
         assert_eq!(
             built_in_registry_names(),
-            &["state-text", "action-button", "state-token"]
+            &["state-text", "action-button", "state-token", "clock-text"]
         );
         assert!(validate_definitions(&DEFINITIONS).is_ok());
         let duplicate = [DEFINITIONS[0], DEFINITIONS[0]];
@@ -844,7 +1087,14 @@ mod tests {
         );
         assert_eq!(
             ShellAction::ALL.map(ShellAction::as_str),
-            ["overlay.toggle", "overlay.close", "overlay.activate",]
+            [
+                "overlay.toggle",
+                "overlay.close",
+                "overlay.activate",
+                "clock.enable",
+                "clock.disable",
+                "clock.toggle",
+            ]
         );
         for key in StateBindingKey::ALL {
             assert_eq!(key.as_str().parse::<StateBindingKey>(), Ok(key));
@@ -903,6 +1153,8 @@ mod tests {
                 "low",
                 "critical",
                 "action",
+                "enabled",
+                "disabled",
             ]
         );
         assert!(StateToken::Open.valid_for(StateBindingKey::OverlayStatus));
@@ -955,6 +1207,7 @@ mod tests {
                 text_bindings: 1,
                 token_bindings: 0,
                 actions: 1,
+                clock_declarations: 0,
                 discovery_scans: 1,
             }
         );
@@ -990,7 +1243,77 @@ mod tests {
             index.element("clock-a").unwrap().kind,
             BuiltInElementKind::StateText
         );
-        assert_eq!(built_in_registry_names().len(), 3);
+        assert_eq!(built_in_registry_names().len(), 4);
+    }
+
+    #[test]
+    fn clock_text_declarations_are_typed_once_and_targets_are_generation_safe() {
+        let index = discover(
+            r#"<time id="local" class="clock" aria-label="Local time"
+                    data-htm-element="clock-text" data-htm-format="%H:%M"></time>
+               <time id="tokyo" data-htm-element="clock-text"
+                    data-htm-format="%I:%M:%S %p" data-htm-time-zone="Asia/Tokyo"
+                    data-htm-enabled="false"></time>
+               <button id="enable" data-htm-element="action-button"
+                    data-htm-action="clock.enable" data-htm-target="tokyo">Enable</button>
+               <button id="disable" data-htm-element="action-button"
+                    data-htm-action="clock.disable" data-htm-target="tokyo">Disable</button>
+               <button id="toggle" data-htm-element="action-button"
+                    data-htm-action="clock.toggle" data-htm-target="tokyo">Toggle</button>"#,
+            BuiltInSurfaceKind::Panel,
+        )
+        .unwrap();
+        let declarations = index.clock_declarations();
+        assert_eq!(declarations.len(), 2);
+        assert_eq!(declarations[0].format.source(), "%H:%M");
+        assert_eq!(declarations[0].time_zone, ClockTimeZone::Local);
+        assert!(declarations[0].enabled);
+        assert_eq!(declarations[1].time_zone.declaration_value(), "Asia/Tokyo");
+        assert!(!declarations[1].enabled);
+        assert_eq!(index.summary().clock_declarations, 2);
+        assert_eq!(index.summary().discovery_scans, 1);
+        for id in ["enable", "disable", "toggle"] {
+            let action = index.element(id).unwrap();
+            assert_eq!(
+                action.action_target.as_ref().unwrap().document_generation,
+                ExperimentalDocumentIdentity { serial: 9 }
+            );
+            assert_eq!(action.action_target.as_ref().unwrap().html_id, "tokyo");
+        }
+    }
+
+    #[test]
+    fn invalid_clock_declarations_and_targets_are_rejected_atomically() {
+        for body in [
+            r#"<span id="clock" data-htm-element="clock-text" data-htm-format="%H"></span>"#,
+            r#"<time data-htm-element="clock-text" data-htm-format="%H"></time>"#,
+            r#"<time id="clock" data-htm-element="clock-text"></time>"#,
+            r#"<time id="clock" data-htm-element="clock-text" data-htm-format=""></time>"#,
+            r#"<time id="clock" data-htm-element="clock-text" data-htm-format="%s"></time>"#,
+            r#"<time id="clock" data-htm-element="clock-text" data-htm-format="%H" data-htm-enabled="TRUE"></time>"#,
+            r#"<time id="clock" data-htm-element="clock-text" data-htm-format="%H" data-htm-enabled=""></time>"#,
+            r#"<time id="clock" data-htm-element="clock-text" data-htm-format="%H" data-htm-time-zone="../UTC"></time>"#,
+            r#"<time id="clock" datetime="2026-01-01T00:00:00Z" data-htm-element="clock-text" data-htm-format="%H"></time>"#,
+            r#"<time id="clock" data-htm-state="enabled" data-htm-element="clock-text" data-htm-format="%H"></time>"#,
+            r#"<time id="clock" data-htm-element="clock-text" data-htm-format="%H" data-htm-bind="clock.time"></time>"#,
+            r#"<time id="clock" data-htm-element="clock-text" data-htm-format="%H" data-htm-action="clock.toggle"></time>"#,
+            r#"<time id="clock" data-htm-element="clock-text" data-htm-format="%H" data-htm-target="other"></time>"#,
+            r#"<button id="toggle" data-htm-element="action-button" data-htm-action="clock.toggle"></button>"#,
+            r#"<button id="toggle" data-htm-element="action-button" data-htm-action="clock.toggle" data-htm-target=""></button>"#,
+            r#"<button id="toggle" data-htm-element="action-button" data-htm-action="clock.toggle" data-htm-target="missing"></button>"#,
+            r#"<span id="target" data-htm-element="state-text" data-htm-bind="clock.time"></span><button id="toggle" data-htm-element="action-button" data-htm-action="clock.toggle" data-htm-target="target"></button>"#,
+            r#"<button id="toggle" data-htm-element="action-button" data-htm-action="overlay.toggle" data-htm-target="clock"></button><time id="clock" data-htm-element="clock-text" data-htm-format="%H"></time>"#,
+        ] {
+            assert!(discover(body, BuiltInSurfaceKind::Panel).is_err(), "{body}");
+        }
+        let excessive: String = (0..=MAX_CLOCK_DECLARATIONS_PER_DOCUMENT)
+            .map(|index| {
+                format!(
+                    r#"<time id="clock-{index}" data-htm-element="clock-text" data-htm-format="%H"></time>"#
+                )
+            })
+            .collect();
+        assert!(discover(&excessive, BuiltInSurfaceKind::Panel).is_err());
     }
 
     #[test]

@@ -24,6 +24,7 @@
 | `id` | Required, nonempty, and unique in the document |
 | `data-htm-element` | Must be `action-button` |
 | `data-htm-action` | Required approved action |
+| `data-htm-target` | Required for clock actions, forbidden for overlay actions |
 | `disabled` | Optional HTML boolean attribute |
 
 The action must be permitted from the document's surface kind. Other HTMShell behavior attributes are rejected.
@@ -38,7 +39,10 @@ Pointer leave, surface unmap, output removal, pointer capability loss, or stale 
 
 Actions cannot execute arbitrary methods, shell commands, files, or network requests.
 
+Clock actions resolve `data-htm-target` as an exact `id` in the same document. The target must be a live [`clock-text`](clock-text.md) declaration. Target identity is checked again at dispatch.
+
 ## See also
 
 - [Overlay actions](../HTMShell.Actions/Overlay.md)
+- [Clock actions](../HTMShell.Actions/Clock.md)
 - [State and actions guide](../../guide/state-and-actions.md)

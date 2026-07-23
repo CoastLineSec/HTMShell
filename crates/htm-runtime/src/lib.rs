@@ -5,6 +5,7 @@
 
 mod adapter;
 mod builtin;
+mod clock;
 mod error;
 mod identity;
 mod incremental;
@@ -17,9 +18,16 @@ mod stylesheet;
 
 pub use adapter::{run_package, run_package_with_options};
 pub use builtin::{
-    BindingUpdate, BuiltInElementKind, BuiltInElementSummary, ElementDeclaration,
+    BindingUpdate, BuiltInElementKind, BuiltInElementSummary, ClockDeclaration, ElementDeclaration,
     ElementInstanceId, ShellAction, StateBindingKey, StateBindingScope, StateToken, StateValueKind,
     built_in_registry_names,
+};
+pub use clock::{
+    CLOCK_FORMAT_CONVERSIONS, CLOCK_FORMAT_FLAGS, CLOCK_PUBLIC_ATTRIBUTES,
+    CLOCK_REJECTED_CONVERSIONS, ClockCadence, ClockDirective, ClockFormat, ClockFormatError,
+    ClockFormatFlag, ClockFormatPart, ClockTimeZone, MAX_CLOCK_DECLARATIONS_PER_DOCUMENT,
+    MAX_CLOCK_DECLARATIONS_PER_PROCESS, MAX_CLOCK_FORMAT_BYTES, MAX_CLOCK_FORMATS_PER_PROCESS,
+    MAX_CLOCK_OUTPUT_BYTES, MAX_CLOCK_ZONE_BYTES, MAX_CLOCK_ZONES_PER_PROCESS,
 };
 pub use error::RuntimeError;
 pub use incremental::{
@@ -29,9 +37,9 @@ pub use incremental::{
     SceneNodeSnapshot, SlotReuseEvidence, StylesheetReloadAttempt,
 };
 pub use live::{
-    LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind, LiveFrame, LiveFrameRect,
-    LiveInteractionState, LiveRenderRequest, LiveRuntimeMeasurements, LiveRuntimeSnapshot,
-    MAX_LIVE_SCALE_NUMERATOR,
+    ClockMutation, LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind, LiveFrame,
+    LiveFrameRect, LiveInteractionState, LiveRenderRequest, LiveRuntimeMeasurements,
+    LiveRuntimeSnapshot, MAX_LIVE_SCALE_NUMERATOR,
 };
 pub use model::{
     Artifact, DiagnosticNode, DiagnosticReport, ExperimentOptions, ExperimentRun,

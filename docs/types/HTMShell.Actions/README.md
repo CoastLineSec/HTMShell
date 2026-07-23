@@ -5,5 +5,6 @@ The `HTMShell.Actions` module lists typed actions accepted by [`action-button`](
 ## Action groups
 
 - [`Overlay`](Overlay.md): Open, close, and mutate an output-local overlay.
+- [`Clock`](Clock.md): Enable, disable, or toggle one document-local clock.
 
 Actions are validated against their source surface during document initialization and again at dispatch.

@@ -438,6 +438,49 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
         "clock_mutation_failures_contained={}",
         summary.clock.mutation_failures_contained
     );
+    println!("clock_declarations={}", summary.clock.declarations);
+    println!(
+        "clock_enabled_declarations={}",
+        summary.clock.enabled_declarations
+    );
+    println!(
+        "clock_maximum_declarations={}",
+        summary.clock.maximum_declarations
+    );
+    println!("clock_unique_formats={}", summary.clock.unique_formats);
+    println!("clock_unique_zones={}", summary.clock.unique_zones);
+    println!(
+        "clock_unique_zone_conversions={}",
+        summary.clock.unique_zone_conversions
+    );
+    println!(
+        "clock_unique_format_operations={}",
+        summary.clock.unique_format_operations
+    );
+    println!(
+        "clock_cached_render_key_reuse={}",
+        summary.clock.cached_render_key_reuse
+    );
+    println!(
+        "clock_format_compilation_us={}",
+        summary.clock.format_compilation_us
+    );
+    println!(
+        "clock_timezone_lookup_us={}",
+        summary.clock.timezone_lookup_us
+    );
+    println!(
+        "clock_deadline_calculation_us={}",
+        summary.clock.deadline_calculation_us
+    );
+    println!(
+        "clock_changed_declarations={}",
+        summary.clock.changed_declarations
+    );
+    println!(
+        "clock_suppressed_declarations={}",
+        summary.clock.suppressed_declarations
+    );
     println!("battery_transport={}", summary.battery.transport);
     println!(
         "battery_lifecycle_state={}",
@@ -741,12 +784,13 @@ fn print_built_in_metrics(prefix: &str, summary: &SurfaceHostSummary) {
         summary.declaration_discovery_us
     );
     println!(
-        "{prefix}_registered_elements={} bindings={} text_bindings={} token_bindings={} registered_actions={} registry_scans={}",
+        "{prefix}_registered_elements={} bindings={} text_bindings={} token_bindings={} registered_actions={} clock_declarations={} registry_scans={}",
         summary.registered_element_count,
         summary.binding_count,
         summary.text_binding_count,
         summary.token_binding_count,
         summary.registered_action_count,
+        summary.clock_declaration_count,
         summary.registry_scan_count
     );
     println!(

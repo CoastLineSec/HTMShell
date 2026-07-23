@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "formatted-clock-demo",
+  "surfaces": [
+    {
+      "id": "panel",
+      "kind": "panel",
+      "document": "panel.html",
+      "outputs": "all",
+      "edge": "top",
+      "thickness": 88,
+      "reserveSpace": true
+    },
+    {
+      "id": "overlay",
+      "kind": "overlay",
+      "document": "overlay.html",
+      "outputs": "all",
+      "initiallyOpen": false
+    }
+  ]
+}

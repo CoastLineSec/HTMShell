@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>HTMShell formatted clock example</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main id="panel-root" class="panel">
+      <section class="panel-region panel-start">
+        <strong>HTMShell</strong>
+        <span id="output-label" data-htm-element="state-text" data-htm-bind="output.label">Output</span>
+        <time id="local-date" data-htm-element="clock-text" data-htm-format="%A, %B %-d, %Y"></time>
+      </section>
+      <section class="panel-region panel-center">
+        <time id="local-time" class="primary-clock" data-role="local-clock" data-htm-element="clock-text" data-htm-format="%H:%M"></time>
+        <time id="local-seconds" data-htm-element="clock-text" data-htm-format="%I:%M:%S %p"></time>
+      </section>
+      <section class="panel-region panel-end">
+        <span class="zone-clock">
+          UTC
+          <time id="utc-time" data-htm-element="clock-text" data-htm-format="%H:%M UTC" data-htm-time-zone="UTC"></time>
+        </span>
+        <span class="zone-clock">
+          Tokyo
+          <time id="tokyo-time" data-htm-element="clock-text" data-htm-format="%H:%M %Z" data-htm-time-zone="Asia/Tokyo"></time>
+        </span>
+        <time id="paused-clock" data-htm-element="clock-text" data-htm-format="%H:%M:%S" data-htm-enabled="false"></time>
+        <button id="clock-enable" type="button" data-htm-element="action-button" data-htm-action="clock.enable" data-htm-target="paused-clock">Start</button>
+        <button id="clock-disable" type="button" data-htm-element="action-button" data-htm-action="clock.disable" data-htm-target="paused-clock">Pause</button>
+        <button id="clock-toggle" type="button" data-htm-element="action-button" data-htm-action="clock.toggle" data-htm-target="paused-clock">Toggle</button>
+        <button id="overlay-toggle" type="button" data-htm-element="action-button" data-htm-action="overlay.toggle">Overlay</button>
+      </section>
+    </main>
+  </body>
+</html>

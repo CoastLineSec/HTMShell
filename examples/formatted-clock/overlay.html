@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>HTMShell formatted clock overlay</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main id="overlay-root">
+      <section id="overlay-card" class="overlay-card">
+        <header>
+          <div>
+            <span id="overlay-output" data-htm-element="state-text" data-htm-bind="output.label">Output</span>
+            <h1>Clock action regression</h1>
+          </div>
+          <button id="overlay-close" type="button" data-htm-element="action-button" data-htm-action="overlay.close">Close</button>
+        </header>
+        <div class="overlay-state">
+          <span id="overlay-status" data-htm-element="state-text" data-htm-bind="overlay.status">Overlay</span>
+          <span id="overlay-count" data-htm-element="state-text" data-htm-bind="overlay.activation_count">Activations</span>
+          <span id="overlay-action-state" data-htm-element="state-text" data-htm-bind="shell.last_action">Last action</span>
+        </div>
+        <button id="overlay-action" type="button" data-htm-element="action-button" data-htm-action="overlay.activate">Activate</button>
+      </section>
+    </main>
+  </body>
+</html>
