@@ -28,6 +28,7 @@ kurbo = "=0.13.1"
 jiff = { version = "=0.2.28", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 memmap2 = "=0.9.11"
 png = "=0.18.1"
+pipewire = { version = "=0.10.0", default-features = false }
 rustix = { version = "=1.1.4", features = ["fs"] }
 selectors = "=0.39.0"
 serde = { version = "=1.0.228", features = ["derive"] }
@@ -43,3 +44,7 @@ wayland-scanner = { version = "=0.31.10" }
 
 [profile.release]
 strip = false
+
+[patch.crates-io]
+libspa-sys = { path = "third-party/libspa-sys" }
+pipewire-sys = { path = "third-party/pipewire-sys" }

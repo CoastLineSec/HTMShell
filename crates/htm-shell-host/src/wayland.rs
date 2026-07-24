@@ -4,6 +4,7 @@ use crate::clock::{ClockService, ClockServiceSummary, ClockUpdate};
 use crate::lifecycle::LayerLifecycle;
 use crate::manifest::{SurfaceKind as ManifestSurfaceKind, ValidatedManifest};
 use crate::output::{OutputCatalog, OutputEligibility, OutputKey};
+use crate::pipewire::{PipeWireSource, duration_to_timespec};
 use crate::power::{
     BatteryServiceSummary, PowerFanoutMetrics, PowerProfile, PowerService, PowerSnapshot,
 };
@@ -570,6 +571,7 @@ struct State {
     failure: Option<String>,
     clock: ClockService,
     battery: PowerService,
+    pipewire: PipeWireSource,
 }
 
 impl State {
@@ -578,6 +580,8 @@ impl State {
             SessionOptions::Multi(options) => options.automatic_overlay_cycles,
             SessionOptions::Single(_) | SessionOptions::Manifest(_) => 0,
         };
+        let mut pipewire = PipeWireSource::default();
+        pipewire.start();
         Self {
             options,
             started,
@@ -637,6 +641,7 @@ impl State {
             failure: None,
             clock: ClockService::default(),
             battery: PowerService::default(),
+            pipewire,
         }
     }
 
@@ -2635,6 +2640,7 @@ impl State {
     }
 
     fn begin_shutdown(&mut self) {
+        self.pipewire.shutdown();
         self.battery.shutdown();
         if let Err(error) = self.clock.shutdown() {
             self.fail(format!("clock shutdown failed: {error}"));
@@ -3019,6 +3025,7 @@ fn wait_for_event_sources(
     event_queue: &mut wayland_client::EventQueue<State>,
     state: &mut State,
 ) -> Result<(), ShellHostError> {
+    state.pipewire.reconnect_if_due(Instant::now());
     if state.battery.needs_immediate_dispatch() {
         state.handle_battery_immediate_dispatch();
         return Ok(());
@@ -3030,7 +3037,12 @@ fn wait_for_event_sources(
     let clock_fd = state.clock.poll_fd();
     let battery_watch = state.battery.bus_watch();
     let battery_deadline_fd = state.battery.deadline_fd();
-    let mut descriptors = Vec::with_capacity(4);
+    let pipewire_fd = state.pipewire.raw_poll_fd();
+    let pipewire_timeout = state
+        .pipewire
+        .retry_timeout(Instant::now())
+        .map(duration_to_timespec);
+    let mut descriptors = Vec::with_capacity(5);
     descriptors.push(PollFd::from_borrowed_fd(
         wayland_fd,
         PollFlags::IN | PollFlags::ERR | PollFlags::HUP,
@@ -3066,7 +3078,18 @@ fn wait_for_event_sources(
         ));
         index
     });
-    match poll(&mut descriptors, None) {
+    let pipewire_index = pipewire_fd.map(|raw_fd| {
+        // The process PipeWire source owns this descriptor until polling
+        // finishes and is not mutated while the borrowed descriptor is live.
+        let fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
+        let index = descriptors.len();
+        descriptors.push(PollFd::from_borrowed_fd(
+            fd,
+            PollFlags::IN | PollFlags::ERR | PollFlags::HUP,
+        ));
+        index
+    });
+    match poll(&mut descriptors, pipewire_timeout.as_ref()) {
         Ok(_) => {}
         Err(error) if error == rustix::io::Errno::INTR => {
             drop(descriptors);
@@ -3085,6 +3108,7 @@ fn wait_for_event_sources(
     let clock_events = clock_index.map(|index| descriptors[index].revents());
     let battery_bus_events = battery_bus_fd.map(|index| descriptors[index].revents());
     let battery_deadline_events = battery_deadline_index.map(|index| descriptors[index].revents());
+    let pipewire_events = pipewire_index.map(|index| descriptors[index].revents());
     drop(descriptors);
 
     let (wayland_ready, clock_ready) =
@@ -3128,6 +3152,14 @@ fn wait_for_event_sources(
             state.handle_battery_deadline_ready();
         }
     }
+    if let Some(events) = pipewire_events {
+        match pipewire_poll_ready(events) {
+            Ok(true) => state.pipewire.dispatch_ready(),
+            Ok(false) => {}
+            Err(error) => state.pipewire.handle_poll_error(error),
+        }
+    }
+    state.pipewire.reconnect_if_due(Instant::now());
     Ok(())
 }
 
@@ -3147,6 +3179,13 @@ fn classify_poll_readiness(
             events.intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP)
         }),
     ))
+}
+
+fn pipewire_poll_ready(events: PollFlags) -> Result<bool, String> {
+    if events.intersects(PollFlags::NVAL) {
+        return Err("PipeWire loop descriptor became invalid".into());
+    }
+    Ok(events.intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP))
 }
 
 fn update_input_region(
@@ -3832,6 +3871,15 @@ mod tests {
         );
         assert!(classify_poll_readiness(PollFlags::NVAL, None).is_err());
         assert!(classify_poll_readiness(PollFlags::empty(), Some(PollFlags::NVAL)).is_err());
+    }
+
+    #[test]
+    fn pipewire_readiness_is_independent_and_invalid_descriptors_are_contained() {
+        assert!(!pipewire_poll_ready(PollFlags::empty()).unwrap());
+        assert!(pipewire_poll_ready(PollFlags::IN).unwrap());
+        assert!(pipewire_poll_ready(PollFlags::ERR).unwrap());
+        assert!(pipewire_poll_ready(PollFlags::HUP).unwrap());
+        assert!(pipewire_poll_ready(PollFlags::NVAL).is_err());
     }
 
     #[test]

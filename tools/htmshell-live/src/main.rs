@@ -1,6 +1,7 @@
 use htm_shell_host::{
     LiveHostOptions, ManifestHostOptions, MultiSurfaceHostOptions, SurfaceHostSummary,
     ValidatedManifest, run_live_overlay, run_manifest_shell, run_multi_surface_shell,
+    run_pipewire_graph_diagnostic_json,
 };
 use std::error::Error;
 use std::path::PathBuf;
@@ -15,6 +16,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if first == "manifest" {
         return run_manifest(args.collect());
+    }
+    if first == "pipewire-graph" {
+        return run_pipewire_graph(args.collect());
     }
     let package = PathBuf::from(first);
     let mut exit_after_frames = None;
@@ -94,6 +98,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         "last_pixel_conversion_us={}",
         summary.last_pixel_conversion_us
     );
+    Ok(())
+}
+
+fn run_pipewire_graph(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
+    if !arguments.is_empty() {
+        return Err("pipewire-graph does not accept arguments".into());
+    }
+    println!("{}", run_pipewire_graph_diagnostic_json()?);
     Ok(())
 }
 

@@ -9,6 +9,7 @@ mod error;
 mod lifecycle;
 mod manifest;
 mod output;
+mod pipewire;
 mod pixel;
 mod power;
 mod scale;
@@ -25,6 +26,7 @@ pub use manifest::{
     SurfaceKind, SurfacePreset, SurfaceTemplate, ValidatedManifest,
 };
 pub use output::{OutputCatalog, OutputEligibility, OutputKey, OutputRecord};
+pub use pipewire::run_pipewire_graph_diagnostic_json;
 pub use pixel::{Argb8888Layout, convert_premultiplied_rgba_to_argb8888};
 pub use power::{
     BatteryAvailability, BatteryChargeState, BatteryServiceSummary, BatterySnapshot,

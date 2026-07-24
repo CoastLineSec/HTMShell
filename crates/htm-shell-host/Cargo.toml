@@ -10,6 +10,7 @@ dbus.workspace = true
 htm-runtime = { path = "../htm-runtime" }
 jiff.workspace = true
 memmap2.workspace = true
+pipewire.workspace = true
 rustix = { workspace = true, features = ["event", "time"] }
 serde.workspace = true
 serde_json.workspace = true
