@@ -4,8 +4,8 @@ use htm_runtime::{
     built_in_registry_names,
 };
 use htm_shell_host::{
-    PerformanceDegradationReason, PowerProfile, SurfaceKind, UPowerDeviceState, UPowerDeviceType,
-    ValidatedManifest,
+    PerformanceDegradationReason, PipeWireNodeDirection, PipeWireNodeType, PowerProfile,
+    SurfaceKind, UPowerDeviceState, UPowerDeviceType, ValidatedManifest,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -128,6 +128,10 @@ fn public_documentation_links_and_example_paths_resolve() {
         "examples/power/overlay.html",
         "examples/power/style.css",
         "examples/power/assets/power.svg",
+        "examples/audio-inspector/shell.json",
+        "examples/audio-inspector/panel.html",
+        "examples/audio-inspector/overlay.html",
+        "examples/audio-inspector/style.css",
     ] {
         assert!(
             root.join(path).is_file(),
@@ -224,6 +228,7 @@ fn typed_public_names_are_covered_by_the_reference() {
         "data-htm-local-id",
         "data-htm-format",
         "data-htm-enabled-bind",
+        "data-htm-property-key",
         "value",
     ] {
         assert!(
@@ -257,6 +262,20 @@ fn typed_public_names_are_covered_by_the_reference() {
             documented_name(&reference, degradation.token().as_str()),
             "degradation reason is undocumented: {}",
             degradation.token().as_str()
+        );
+    }
+    for node_type in PipeWireNodeType::ALL {
+        assert!(
+            documented_name(&reference, node_type.token().as_str()),
+            "PipeWire node type is undocumented: {}",
+            node_type.token().as_str()
+        );
+    }
+    for direction in PipeWireNodeDirection::ALL {
+        assert!(
+            documented_name(&reference, direction.token().as_str()),
+            "PipeWire direction is undocumented: {}",
+            direction.token().as_str()
         );
     }
     for attribute in CLOCK_PUBLIC_ATTRIBUTES {
@@ -301,6 +320,7 @@ fn documented_manifests_validate_without_wayland() {
         "examples/formatted-clock/shell.json",
         "examples/battery-panel/shell.json",
         "examples/power/shell.json",
+        "examples/audio-inspector/shell.json",
     ] {
         let manifest = ValidatedManifest::load(root.join(path))
             .unwrap_or_else(|error| panic!("documented manifest {path} is invalid: {error}"));

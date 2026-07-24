@@ -324,7 +324,7 @@ fn inspect_document_profile(document: &HtmlDocument) -> Vec<DiagnosticMessage> {
             messages.push(DiagnosticMessage {
                 level: "warning".into(),
                 code: "html.element_unsupported".into(),
-                message: format!("<{tag}> is outside the Gate A desktop profile and is inert."),
+                message: format!("<{tag}> is outside the supported desktop profile and is inert."),
                 node_id: Some(node.id),
             });
         }

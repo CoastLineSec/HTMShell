@@ -16,4 +16,8 @@ An absent battery and an unavailable UPower service are different states. The Po
 
 See the [power guide](power.md) and [`HTMShell.Services.UPower`](../types/HTMShell.Services.UPower/README.md).
 
-Clock and power updates are event-driven. They do not use state polling, per-output sources, or per-element timers.
+## PipeWire
+
+PipeWire provides a read-only process-scoped node collection and actual or configured default audio relationships. Documents request node details automatically through their bindings. See [PipeWire nodes](audio.md) and [`HTMShell.Services.PipeWire`](../types/HTMShell.Services.PipeWire/README.md).
+
+Clock, power, and PipeWire updates are event-driven. They do not use state polling or per-output sources.

@@ -1,7 +1,4 @@
-//! Experimental HTMShell adapter for the Gate A headless feasibility spike.
-//!
-//! Blitz types stay inside private modules. The exported values describe only this
-//! experiment and are not a proposed HTMShell runtime API.
+//! Native HTML and CSS runtime for HTMShell.
 
 mod adapter;
 mod builtin;
@@ -33,10 +30,14 @@ pub use clock::{
 };
 pub use collection::{
     FormattedValue, ItemBindingKey, MAX_CLONED_NODES_PER_DOCUMENT, MAX_CLONED_NODES_PER_REPEAT,
-    MAX_ITEMS_PER_REPEAT, MAX_POWER_PROFILE_HOLDS_PER_PROCESS,
+    MAX_ITEMS_PER_REPEAT, MAX_PIPEWIRE_BINDINGS_PER_ITEM, MAX_PIPEWIRE_NODES_PER_PROCESS,
+    MAX_PIPEWIRE_PROPERTY_KEY_BYTES, MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT,
+    MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS, MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM,
+    MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_POWER_PROFILE_HOLDS_PER_PROCESS,
     MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE, MAX_REPEAT_DECLARATIONS_PER_DOCUMENT,
-    MAX_REPEAT_TEMPLATE_DEPTH, MAX_UPOWER_DEVICES_PER_PROCESS, NumericValue, RepeatItemSnapshot,
-    RepeatSource, RepeatSourceSnapshot, StateValueFormat, ValueFormatError,
+    MAX_REPEAT_TEMPLATE_DEPTH, MAX_UPOWER_DEVICES_PER_PROCESS, NumericValue,
+    PipeWireDocumentDemand, RepeatItemSnapshot, RepeatSource, RepeatSourceSnapshot,
+    StateValueFormat, ValueFormatError,
 };
 pub use error::RuntimeError;
 pub use incremental::{

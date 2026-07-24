@@ -3,13 +3,15 @@ use super::model::{
     MAX_PROPERTY_KEY_BYTES, MAX_PROPERTY_VALUE_BYTES, MAX_STAGED_DELTAS, PipeWireDelta,
     PipeWireLinkState, PipeWireNodeState, PipeWireResourceCounters, RawLinkInfo, RawNodeInfo,
 };
+use super::public::PipeWireDemand;
 use pipewire::context::ContextRc;
 use pipewire::core::{CoreRc, PW_ID_CORE};
 use pipewire::link::{Link, LinkListener};
 use pipewire::main_loop::MainLoopRc;
 use pipewire::metadata::{Metadata, MetadataListener};
 use pipewire::node::{Node, NodeListener};
-use pipewire::registry::RegistryRc;
+use pipewire::properties::PropertiesBox;
+use pipewire::registry::{GlobalObject, RegistryRc};
 use pipewire::spa::utils::dict::DictRef;
 use pipewire::types::ObjectType;
 use std::cell::RefCell;
@@ -65,8 +67,26 @@ struct BoundMetadata {
     _proxy: Metadata,
 }
 
+#[derive(Clone)]
+struct KnownNode {
+    global: Rc<GlobalObject<PropertiesBox>>,
+    properties: BTreeMap<String, String>,
+}
+
+#[derive(Clone)]
+struct KnownLink {
+    global: Rc<GlobalObject<PropertiesBox>>,
+    source_node: Option<u32>,
+    target_node: Option<u32>,
+    source_port: Option<u32>,
+    target_port: Option<u32>,
+}
+
 #[derive(Default)]
 struct BoundObjects {
+    known_nodes: HashMap<u32, KnownNode>,
+    known_links: HashMap<u32, KnownLink>,
+    known_metadata: HashMap<u32, Rc<GlobalObject<PropertiesBox>>>,
     nodes: HashMap<u32, BoundNode>,
     links: HashMap<u32, BoundLink>,
     metadata: HashMap<u32, BoundMetadata>,
@@ -89,16 +109,14 @@ pub(crate) struct PipeWireTransport {
     _context: ContextRc,
     main_loop: MainLoopRc,
     staging: Rc<RefCell<CallbackStaging>>,
+    demand: Rc<RefCell<PipeWireDemand>>,
     resources: PipeWireResourceCounters,
 }
 
 impl PipeWireTransport {
-    pub(crate) fn connect(generation: u64) -> Result<Self, String> {
+    pub(crate) fn connect(generation: u64, demand: PipeWireDemand) -> Result<Self, String> {
         let main_loop =
             MainLoopRc::new(None).map_err(|error| format!("create PipeWire loop: {error}"))?;
-        // The default PipeWire client configuration loads module-rt, whose
-        // RTKit helper owns a thread. This read-only source dispatches no
-        // realtime data and is required to remain single-threaded.
         let context_properties = pipewire::properties::properties! {
             "module.rt" => "false"
         };
@@ -112,6 +130,7 @@ impl PipeWireTransport {
             .map_err(|error| format!("get PipeWire registry: {error}"))?;
         let staging = Rc::new(RefCell::new(CallbackStaging::default()));
         let objects = Rc::new(RefCell::new(BoundObjects::default()));
+        let demand = Rc::new(RefCell::new(demand));
 
         let core_staging = staging.clone();
         let core_listener = core
@@ -136,47 +155,58 @@ impl PipeWireTransport {
         let registry_for_global = registry.clone();
         let objects_for_global = objects.clone();
         let staging_for_global = staging.clone();
+        let demand_for_global = demand.clone();
         let registry_listener = registry
             .add_listener_local()
             .global(move |global| match &global.type_ {
-                ObjectType::Node => bind_node(
+                ObjectType::Node => register_node(
                     generation,
                     &registry_for_global,
                     global,
                     &objects_for_global,
                     &staging_for_global,
+                    &demand_for_global,
                 ),
-                ObjectType::Link => bind_link(
+                ObjectType::Link => register_link(
                     generation,
                     &registry_for_global,
                     global,
                     &objects_for_global,
                     &staging_for_global,
+                    &demand_for_global,
                 ),
-                ObjectType::Metadata => bind_metadata(
+                ObjectType::Metadata => register_metadata(
                     &registry_for_global,
                     global,
                     &objects_for_global,
                     &staging_for_global,
+                    &demand_for_global,
                 ),
                 _ => {}
             })
             .global_remove({
                 let objects = objects.clone();
                 let staging = staging.clone();
+                let demand = demand.clone();
                 move |raw_id| {
                     let mut objects = objects.borrow_mut();
-                    if objects.nodes.remove(&raw_id).is_some() {
+                    let node_known = objects.known_nodes.remove(&raw_id).is_some();
+                    objects.nodes.remove(&raw_id);
+                    if node_known && demand.borrow().nodes {
                         staging
                             .borrow_mut()
                             .push(PipeWireDelta::NodeRemoved(raw_id));
                     }
-                    if objects.links.remove(&raw_id).is_some() {
+                    let link_known = objects.known_links.remove(&raw_id).is_some();
+                    objects.links.remove(&raw_id);
+                    if link_known && demand.borrow().links {
                         staging
                             .borrow_mut()
                             .push(PipeWireDelta::LinkRemoved(raw_id));
                     }
-                    if objects.metadata.remove(&raw_id).is_some() {
+                    let metadata_known = objects.known_metadata.remove(&raw_id).is_some();
+                    objects.metadata.remove(&raw_id);
+                    if metadata_known && demand.borrow().defaults {
                         staging
                             .borrow_mut()
                             .push(PipeWireDelta::MetadataRemoved(raw_id));
@@ -194,6 +224,7 @@ impl PipeWireTransport {
             _context: context,
             main_loop,
             staging,
+            demand,
             resources: PipeWireResourceCounters::default(),
         })
     }
@@ -207,6 +238,122 @@ impl PipeWireTransport {
             .sync(sequence)
             .map(|sequence| sequence.seq())
             .map_err(|error| format!("request PipeWire synchronization: {error}"))
+    }
+
+    pub(crate) fn set_demand(&mut self, demand: PipeWireDemand) {
+        let previous = self.demand.replace(demand.clone());
+
+        if previous.nodes != demand.nodes {
+            let known = self
+                .objects
+                .borrow()
+                .known_nodes
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            if demand.nodes {
+                for node in known {
+                    self.staging.borrow_mut().push(PipeWireDelta::NodeAdded {
+                        raw_id: node.global.id,
+                        properties: node.properties,
+                    });
+                }
+            } else {
+                for node in known {
+                    self.staging
+                        .borrow_mut()
+                        .push(PipeWireDelta::NodeRemoved(node.global.id));
+                }
+            }
+        }
+
+        if previous.node_details != demand.node_details {
+            if demand.node_details {
+                let known = self
+                    .objects
+                    .borrow()
+                    .known_nodes
+                    .values()
+                    .map(|node| node.global.clone())
+                    .collect::<Vec<_>>();
+                for global in known {
+                    bind_node_proxy(&self._registry, &global, &self.objects, &self.staging);
+                }
+            } else {
+                let ids = self
+                    .objects
+                    .borrow()
+                    .nodes
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>();
+                self.objects.borrow_mut().nodes.clear();
+                for raw_id in ids {
+                    self.staging.borrow_mut().push(PipeWireDelta::NodeTracking {
+                        raw_id,
+                        tracked: false,
+                    });
+                }
+            }
+        }
+
+        if previous.links != demand.links {
+            let known = self
+                .objects
+                .borrow()
+                .known_links
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            if demand.links {
+                for link in known {
+                    self.staging.borrow_mut().push(PipeWireDelta::LinkAdded {
+                        raw_id: link.global.id,
+                        source_node: link.source_node,
+                        target_node: link.target_node,
+                        source_port: link.source_port,
+                        target_port: link.target_port,
+                    });
+                    bind_link_proxy(&self._registry, &link.global, &self.objects, &self.staging);
+                }
+            } else {
+                self.objects.borrow_mut().links.clear();
+                for link in known {
+                    self.staging
+                        .borrow_mut()
+                        .push(PipeWireDelta::LinkRemoved(link.global.id));
+                }
+            }
+        }
+
+        if previous.defaults != demand.defaults {
+            let known = self
+                .objects
+                .borrow()
+                .known_metadata
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            if demand.defaults {
+                for global in known {
+                    bind_metadata_proxy(&self._registry, &global, &self.objects, &self.staging);
+                }
+            } else {
+                let ids = self
+                    .objects
+                    .borrow()
+                    .metadata
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>();
+                self.objects.borrow_mut().metadata.clear();
+                for raw_id in ids {
+                    self.staging
+                        .borrow_mut()
+                        .push(PipeWireDelta::MetadataRemoved(raw_id));
+                }
+            }
+        }
     }
 
     pub(crate) fn dispatch_nonblocking(&mut self) -> Result<usize, String> {
@@ -247,18 +394,19 @@ impl PipeWireTransport {
     }
 }
 
-fn bind_node(
+fn register_node(
     _generation: u64,
     registry: &RegistryRc,
     global: &pipewire::registry::GlobalObject<&DictRef>,
     objects: &Rc<RefCell<BoundObjects>>,
     staging: &Rc<RefCell<CallbackStaging>>,
+    demand: &Rc<RefCell<PipeWireDemand>>,
 ) {
-    if objects.borrow().nodes.len() >= MAX_NODES {
+    if objects.borrow().known_nodes.len() >= MAX_NODES {
         staging
             .borrow_mut()
             .push(PipeWireDelta::SourceError(format!(
-                "node proxy count exceeds {MAX_NODES}"
+                "node count exceeds {MAX_NODES}"
             )));
         return;
     }
@@ -275,10 +423,43 @@ fn bind_node(
             global.id, properties.skipped
         )));
     }
-    staging.borrow_mut().push(PipeWireDelta::NodeAdded {
-        raw_id: global.id,
-        properties: properties.values,
-    });
+    let properties = properties.values;
+    let global = Rc::new(global.to_owned());
+    objects.borrow_mut().known_nodes.insert(
+        global.id,
+        KnownNode {
+            global: global.clone(),
+            properties: properties.clone(),
+        },
+    );
+    if demand.borrow().nodes {
+        staging.borrow_mut().push(PipeWireDelta::NodeAdded {
+            raw_id: global.id,
+            properties,
+        });
+    }
+    if demand.borrow().node_details {
+        bind_node_proxy(registry, &global, objects, staging);
+    }
+}
+
+fn bind_node_proxy(
+    registry: &RegistryRc,
+    global: &GlobalObject<PropertiesBox>,
+    objects: &Rc<RefCell<BoundObjects>>,
+    staging: &Rc<RefCell<CallbackStaging>>,
+) {
+    if objects.borrow().nodes.contains_key(&global.id) {
+        return;
+    }
+    if objects.borrow().nodes.len() >= MAX_NODES {
+        staging
+            .borrow_mut()
+            .push(PipeWireDelta::SourceError(format!(
+                "node proxy count exceeds {MAX_NODES}"
+            )));
+        return;
+    }
     let node = match registry.bind::<Node, _>(global) {
         Ok(node) => node,
         Err(error) => {
@@ -348,18 +529,19 @@ fn bind_node(
     );
 }
 
-fn bind_link(
+fn register_link(
     _generation: u64,
     registry: &RegistryRc,
     global: &pipewire::registry::GlobalObject<&DictRef>,
     objects: &Rc<RefCell<BoundObjects>>,
     staging: &Rc<RefCell<CallbackStaging>>,
+    demand: &Rc<RefCell<PipeWireDemand>>,
 ) {
-    if objects.borrow().links.len() >= MAX_LINKS {
+    if objects.borrow().known_links.len() >= MAX_LINKS {
         staging
             .borrow_mut()
             .push(PipeWireDelta::SourceError(format!(
-                "link proxy count exceeds {MAX_LINKS}"
+                "link count exceeds {MAX_LINKS}"
             )));
         return;
     }
@@ -376,13 +558,50 @@ fn bind_link(
             global.id, properties.skipped
         )));
     }
-    staging.borrow_mut().push(PipeWireDelta::LinkAdded {
-        raw_id: global.id,
-        source_node: parse_id(properties.values.get("link.output.node")),
-        target_node: parse_id(properties.values.get("link.input.node")),
-        source_port: parse_id(properties.values.get("link.output.port")),
-        target_port: parse_id(properties.values.get("link.input.port")),
-    });
+    let source_node = parse_id(properties.values.get("link.output.node"));
+    let target_node = parse_id(properties.values.get("link.input.node"));
+    let source_port = parse_id(properties.values.get("link.output.port"));
+    let target_port = parse_id(properties.values.get("link.input.port"));
+    let global = Rc::new(global.to_owned());
+    objects.borrow_mut().known_links.insert(
+        global.id,
+        KnownLink {
+            global: global.clone(),
+            source_node,
+            target_node,
+            source_port,
+            target_port,
+        },
+    );
+    if demand.borrow().links {
+        staging.borrow_mut().push(PipeWireDelta::LinkAdded {
+            raw_id: global.id,
+            source_node,
+            target_node,
+            source_port,
+            target_port,
+        });
+        bind_link_proxy(registry, &global, objects, staging);
+    }
+}
+
+fn bind_link_proxy(
+    registry: &RegistryRc,
+    global: &GlobalObject<PropertiesBox>,
+    objects: &Rc<RefCell<BoundObjects>>,
+    staging: &Rc<RefCell<CallbackStaging>>,
+) {
+    if objects.borrow().links.contains_key(&global.id) {
+        return;
+    }
+    if objects.borrow().links.len() >= MAX_LINKS {
+        staging
+            .borrow_mut()
+            .push(PipeWireDelta::SourceError(format!(
+                "link proxy count exceeds {MAX_LINKS}"
+            )));
+        return;
+    }
     let link = match registry.bind::<Link, _>(global) {
         Ok(link) => link,
         Err(error) => {
@@ -421,17 +640,37 @@ fn bind_link(
     );
 }
 
-fn bind_metadata(
+fn register_metadata(
     registry: &RegistryRc,
     global: &pipewire::registry::GlobalObject<&DictRef>,
     objects: &Rc<RefCell<BoundObjects>>,
     staging: &Rc<RefCell<CallbackStaging>>,
+    demand: &Rc<RefCell<PipeWireDemand>>,
 ) {
     let metadata_name = global
         .props
         .as_ref()
         .and_then(|properties| properties.get("metadata.name"));
     if metadata_name != Some("default") {
+        return;
+    }
+    let global = Rc::new(global.to_owned());
+    objects
+        .borrow_mut()
+        .known_metadata
+        .insert(global.id, global.clone());
+    if demand.borrow().defaults {
+        bind_metadata_proxy(registry, &global, objects, staging);
+    }
+}
+
+fn bind_metadata_proxy(
+    registry: &RegistryRc,
+    global: &GlobalObject<PropertiesBox>,
+    objects: &Rc<RefCell<BoundObjects>>,
+    staging: &Rc<RefCell<CallbackStaging>>,
+) {
+    if objects.borrow().metadata.contains_key(&global.id) {
         return;
     }
     let metadata = match registry.bind::<Metadata, _>(global) {
@@ -497,7 +736,11 @@ fn bounded_dictionary(dict: Option<&DictRef>) -> Result<BoundedDictionary, Strin
         return Ok(BoundedDictionary { values, skipped });
     };
     for (key, value) in dict.iter() {
-        if key.len() > MAX_PROPERTY_KEY_BYTES || value.len() > MAX_PROPERTY_VALUE_BYTES {
+        if key.len() > MAX_PROPERTY_KEY_BYTES
+            || value.len() > MAX_PROPERTY_VALUE_BYTES
+            || !key.chars().all(|character| !character.is_control())
+            || !value.chars().all(|character| !character.is_control())
+        {
             skipped = skipped.saturating_add(1);
             continue;
         }

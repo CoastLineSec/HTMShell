@@ -37,3 +37,4 @@ The element may contain initial text but cannot contain child elements. Bindings
 - [State reference](../HTMShell.State/README.md)
 - [Clock state](../HTMShell.Services.Clock/Clock.md)
 - [Battery state](../HTMShell.Services.UPower/Battery.md)
+- [PipeWire node properties](../HTMShell.Services.PipeWire/Properties.md)

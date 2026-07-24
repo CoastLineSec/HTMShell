@@ -1,10 +1,14 @@
 mod model;
+mod public;
 mod reconcile;
 mod transport;
 
 #[cfg(test)]
 use model::PipeWireAvailability;
-use model::{PipeWireDelta, PipeWireSnapshot};
+use model::PipeWireDelta;
+pub(crate) use model::PipeWireSnapshot;
+pub(crate) use public::PipeWireDemand;
+pub use public::{PipeWireNodeDirection, PipeWireNodeType};
 use reconcile::PipeWireReconciler;
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fd::BorrowedFd;
@@ -50,6 +54,7 @@ pub(crate) struct PipeWireSource {
     backoff_index: usize,
     reconnect_attempts: u64,
     last_publication: Instant,
+    demand: PipeWireDemand,
 }
 
 impl Default for PipeWireSource {
@@ -65,16 +70,39 @@ impl Default for PipeWireSource {
             backoff_index: 0,
             reconnect_attempts: 0,
             last_publication: Instant::now(),
+            demand: PipeWireDemand::default(),
         }
     }
 }
 
 impl PipeWireSource {
     pub(crate) fn start(&mut self) {
-        if self.lifecycle != PipeWireLifecycle::Dormant {
+        if self.lifecycle != PipeWireLifecycle::Dormant || self.demand.is_empty() {
             return;
         }
         self.attempt_connect(Instant::now(), false);
+    }
+
+    pub(crate) fn set_demand(&mut self, demand: PipeWireDemand) -> bool {
+        if self.demand == demand {
+            return false;
+        }
+        let was_empty = self.demand.is_empty();
+        self.demand = demand.clone();
+        if demand.is_empty() {
+            self.transport.take();
+            self.retry_deadline = None;
+            self.expected_sync = None;
+            self.synchronization = SynchronizationStage::First;
+            self.lifecycle = PipeWireLifecycle::Dormant;
+            let _ = self.reconciler.mark_unavailable();
+        } else if was_empty {
+            self.start();
+        } else if let Some(transport) = self.transport.as_mut() {
+            transport.set_demand(demand);
+            self.reconcile_callbacks(Instant::now());
+        }
+        true
     }
 
     pub(crate) fn lifecycle(&self) -> PipeWireLifecycle {
@@ -94,26 +122,32 @@ impl PipeWireSource {
             .map(|deadline| deadline.saturating_duration_since(now))
     }
 
-    pub(crate) fn reconnect_if_due(&mut self, now: Instant) {
+    pub(crate) fn reconnect_if_due(&mut self, now: Instant) -> bool {
+        let before = self.snapshot().sequence;
         if self.retry_deadline.is_some_and(|deadline| deadline <= now) {
             self.retry_deadline = None;
             self.attempt_connect(now, true);
         }
+        self.snapshot().sequence != before
     }
 
-    pub(crate) fn handle_poll_error(&mut self, message: impl Into<String>) {
+    pub(crate) fn handle_poll_error(&mut self, message: impl Into<String>) -> bool {
+        let before = self.snapshot().sequence;
         self.disconnect(Instant::now(), message.into());
+        self.snapshot().sequence != before
     }
 
-    pub(crate) fn dispatch_ready(&mut self) {
+    pub(crate) fn dispatch_ready(&mut self) -> bool {
+        let before = self.snapshot().sequence;
         let Some(transport) = self.transport.as_mut() else {
-            return;
+            return false;
         };
         if let Err(error) = transport.dispatch_nonblocking() {
             self.disconnect(Instant::now(), error);
-            return;
+            return self.snapshot().sequence != before;
         }
         self.reconcile_callbacks(Instant::now());
+        self.snapshot().sequence != before
     }
 
     pub(crate) fn reconcile_callbacks(&mut self, now: Instant) {
@@ -245,7 +279,8 @@ impl PipeWireSource {
             self.disconnect(now, "failed to begin PipeWire generation".into());
             return;
         }
-        let transport = match PipeWireTransport::connect(self.next_generation) {
+        let transport = match PipeWireTransport::connect(self.next_generation, self.demand.clone())
+        {
             Ok(transport) => transport,
             Err(error) => {
                 self.disconnect(now, error);
@@ -272,6 +307,12 @@ impl PipeWireSource {
         self.synchronization = SynchronizationStage::First;
         self.lifecycle = PipeWireLifecycle::Disconnected;
         let _ = self.reconciler.mark_unavailable();
+        if self.demand.is_empty() {
+            self.retry_deadline = None;
+            self.lifecycle = PipeWireLifecycle::Dormant;
+            self.last_publication = now;
+            return;
+        }
         let delay = RECONNECT_DELAYS[self.backoff_index.min(RECONNECT_DELAYS.len() - 1)];
         self.backoff_index = (self.backoff_index + 1).min(RECONNECT_DELAYS.len() - 1);
         self.retry_deadline = Some(now + delay);
@@ -283,7 +324,15 @@ impl PipeWireSource {
 pub(crate) fn run_pipewire_graph_diagnostic() -> Result<PipeWireSnapshot, String> {
     let started = Instant::now();
     let mut source = PipeWireSource::default();
-    source.start();
+    source.set_demand(PipeWireDemand {
+        documents: 1,
+        service: true,
+        nodes: true,
+        node_details: true,
+        defaults: true,
+        links: true,
+        property_keys: Default::default(),
+    });
     loop {
         let now = Instant::now();
         source.reconnect_if_due(now);
@@ -348,6 +397,14 @@ pub(crate) fn duration_to_timespec(duration: Duration) -> Timespec {
 mod tests {
     use super::*;
 
+    fn modeled_demand() -> PipeWireDemand {
+        PipeWireDemand {
+            documents: 1,
+            service: true,
+            ..PipeWireDemand::default()
+        }
+    }
+
     #[test]
     fn reconnect_schedule_is_bounded() {
         assert_eq!(
@@ -398,7 +455,10 @@ mod tests {
     #[test]
     fn repeated_failures_advance_to_a_bounded_backoff() {
         let base = Instant::now();
-        let mut source = PipeWireSource::default();
+        let mut source = PipeWireSource {
+            demand: modeled_demand(),
+            ..PipeWireSource::default()
+        };
         for (index, expected) in RECONNECT_DELAYS.into_iter().enumerate() {
             let now = base + Duration::from_secs(index as u64 * 60);
             source.disconnect(now, "modeled failure".into());
@@ -411,7 +471,10 @@ mod tests {
 
     #[test]
     fn poll_error_clears_stale_snapshot_before_retry() {
-        let mut source = PipeWireSource::default();
+        let mut source = PipeWireSource {
+            demand: modeled_demand(),
+            ..PipeWireSource::default()
+        };
         source.reconciler.begin_generation(1).unwrap();
         source
             .reconciler
@@ -427,6 +490,24 @@ mod tests {
         );
         assert!(source.snapshot().nodes.is_empty());
         assert_eq!(source.lifecycle(), PipeWireLifecycle::Reconnecting);
+    }
+
+    #[test]
+    fn zero_demand_releases_transport_and_reconnect_deadline() {
+        let mut source = PipeWireSource {
+            lifecycle: PipeWireLifecycle::Reconnecting,
+            retry_deadline: Some(Instant::now()),
+            demand: modeled_demand(),
+            ..PipeWireSource::default()
+        };
+        source.set_demand(PipeWireDemand::default());
+        assert_eq!(source.lifecycle(), PipeWireLifecycle::Dormant);
+        assert!(source.raw_poll_fd().is_none());
+        assert!(source.retry_deadline.is_none());
+        assert_eq!(
+            source.snapshot().availability,
+            PipeWireAvailability::Unavailable
+        );
     }
 
     #[test]

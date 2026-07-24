@@ -10,8 +10,8 @@ use crate::model::{DiagnosticMessage, LogicalRect, ViewportSpec};
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
 use crate::{
     ExperimentalDocumentIdentity, ExperimentalNodeIdentity, MAX_CLONED_NODES_PER_DOCUMENT,
-    MAX_CLONED_NODES_PER_REPEAT, MAX_ITEMS_PER_REPEAT, NumericValue, RepeatItemSnapshot,
-    RepeatSource, RepeatSourceSnapshot, RuntimeError,
+    MAX_CLONED_NODES_PER_REPEAT, MAX_ITEMS_PER_REPEAT, NumericValue, PipeWireDocumentDemand,
+    RepeatItemSnapshot, RepeatSource, RepeatSourceSnapshot, RuntimeError,
 };
 use blitz_dom::node::NodeData;
 use blitz_dom::{Document, DocumentConfig, LocalName, QualName, StyleThreading, local_name, ns};
@@ -859,6 +859,54 @@ impl LiveDocument {
             .count()
     }
 
+    pub fn pipewire_demand(&self) -> PipeWireDocumentDemand {
+        let mut demand = PipeWireDocumentDemand::default();
+        for key in StateBindingKey::ALL {
+            if !key.as_str().starts_with("pipewire.") || self.binding_target_count(key) == 0 {
+                continue;
+            }
+            demand.service = true;
+            if key == StateBindingKey::PipeWireNodeCount {
+                demand.nodes = true;
+            }
+            if key.as_str().starts_with("pipewire.default_")
+                || key.as_str().starts_with("pipewire.configured_")
+            {
+                demand.nodes = true;
+                demand.defaults = true;
+            }
+        }
+        for repeat in self
+            .repeats
+            .values()
+            .filter(|repeat| repeat.declaration.source == RepeatSource::PipeWireNodes)
+        {
+            demand.service = true;
+            demand.nodes = true;
+            for descendant in &repeat.declaration.descendants {
+                if matches!(
+                    descendant.binding,
+                    crate::ItemBindingKey::Ready
+                        | crate::ItemBindingKey::NodeState
+                        | crate::ItemBindingKey::Direction
+                        | crate::ItemBindingKey::Property
+                ) {
+                    demand.node_details = true;
+                }
+                if matches!(
+                    descendant.binding,
+                    crate::ItemBindingKey::DefaultRole | crate::ItemBindingKey::ConfiguredRole
+                ) {
+                    demand.defaults = true;
+                }
+                if let Some(property_key) = &descendant.property_key {
+                    demand.property_keys.insert(property_key.clone());
+                }
+            }
+        }
+        demand
+    }
+
     pub fn element_identity(&self, html_id: &str) -> Result<ElementInstanceId, RuntimeError> {
         self.builtins
             .element(html_id)
@@ -1702,19 +1750,40 @@ impl LiveDocument {
         for element in &live.elements {
             let element_changed = match element.declaration.kind {
                 BuiltInElementKind::StateText => {
-                    let value = item
-                        .text
-                        .get(&element.declaration.binding)
-                        .map(String::as_str)
-                        .unwrap_or("—");
+                    let value = if element.declaration.binding == crate::ItemBindingKey::Property {
+                        element
+                            .declaration
+                            .property_key
+                            .as_ref()
+                            .and_then(|key| item.properties.get(key))
+                            .map(String::as_str)
+                            .unwrap_or("—")
+                    } else {
+                        item.text
+                            .get(&element.declaration.binding)
+                            .map(String::as_str)
+                            .unwrap_or("—")
+                    };
                     self.apply_text_to_node(element.node, value)?
                 }
                 BuiltInElementKind::StateToken => {
-                    let token = item
-                        .tokens
-                        .get(&element.declaration.binding)
-                        .copied()
-                        .unwrap_or(StateToken::Unknown);
+                    let token = if element.declaration.binding == crate::ItemBindingKey::Property {
+                        if element
+                            .declaration
+                            .property_key
+                            .as_ref()
+                            .is_some_and(|key| item.properties.contains_key(key))
+                        {
+                            StateToken::Available
+                        } else {
+                            StateToken::Unavailable
+                        }
+                    } else {
+                        item.tokens
+                            .get(&element.declaration.binding)
+                            .copied()
+                            .unwrap_or(StateToken::Unknown)
+                    };
                     self.apply_attribute_to_node(
                         element.node,
                         STATE_ATTRIBUTE,
@@ -2229,6 +2298,10 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/power")
     }
 
+    fn audio_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/audio-inspector")
+    }
+
     fn element_attribute(live: &LiveDocument, html_id: &str, name: &str) -> Option<String> {
         let identity = live.builtins.indexed_node(html_id)?;
         let slot = live.identities.resolve(&live.document, identity).ok()?;
@@ -2302,6 +2375,7 @@ mod tests {
                 ),
                 (crate::ItemBindingKey::Energy, NumericValue::Decimal(42.0)),
             ]),
+            properties: BTreeMap::new(),
         }
     }
 
@@ -2378,6 +2452,82 @@ mod tests {
         );
         assert_eq!(overlay.measurements().registry_scan_count, scans);
         assert!(overlay.render().is_ok());
+    }
+
+    #[test]
+    fn pipewire_nodes_reconcile_with_exact_properties_and_stable_identity() {
+        let mut overlay = LiveDocument::load_surface_document(
+            audio_fixture(),
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            1100,
+            800,
+        )
+        .unwrap();
+        let demand = overlay.pipewire_demand();
+        assert!(demand.service);
+        assert!(demand.nodes);
+        assert!(demand.node_details);
+        assert!(demand.defaults);
+        assert_eq!(
+            demand.property_keys,
+            BTreeSet::from(["application.name".into(), "media.title".into()])
+        );
+        let parse_count = overlay.snapshot().unwrap().document_parse_count;
+        let scans = overlay.measurements().registry_scan_count;
+        let mut item = RepeatItemSnapshot {
+            key: "7:42".into(),
+            text: BTreeMap::from([
+                (crate::ItemBindingKey::Name, "node.name".into()),
+                (
+                    crate::ItemBindingKey::Description,
+                    "Node description".into(),
+                ),
+                (crate::ItemBindingKey::MediaClass, "Audio/Sink".into()),
+                (crate::ItemBindingKey::NodeType, "Audio sink".into()),
+                (crate::ItemBindingKey::NodeState, "Running".into()),
+                (crate::ItemBindingKey::Direction, "Sink".into()),
+            ]),
+            tokens: BTreeMap::from([
+                (crate::ItemBindingKey::NodeType, StateToken::AudioSink),
+                (crate::ItemBindingKey::NodeState, StateToken::Running),
+                (crate::ItemBindingKey::DefaultRole, StateToken::DefaultSink),
+                (
+                    crate::ItemBindingKey::ConfiguredRole,
+                    StateToken::ConfiguredSink,
+                ),
+                (crate::ItemBindingKey::IsAudio, StateToken::True),
+                (crate::ItemBindingKey::IsVideo, StateToken::False),
+                (crate::ItemBindingKey::IsStream, StateToken::False),
+            ]),
+            values: BTreeMap::from([(crate::ItemBindingKey::RawId, NumericValue::Integer(42))]),
+            properties: BTreeMap::from([("application.name".into(), "Player".into())]),
+        };
+        let first = RepeatSourceSnapshot {
+            source: RepeatSource::PipeWireNodes,
+            source_generation: 7,
+            items: vec![item.clone()],
+        };
+        assert_eq!(overlay.apply_repeat_source(&first).unwrap().insertions, 1);
+        let identity = overlay.repeats["node-card"].items["7:42"].root;
+
+        item.properties
+            .insert("application.name".into(), "Player updated".into());
+        item.properties
+            .insert("media.title".into(), "Current track".into());
+        let second = RepeatSourceSnapshot {
+            source: RepeatSource::PipeWireNodes,
+            source_generation: 7,
+            items: vec![item],
+        };
+        let update = overlay.apply_repeat_source(&second).unwrap();
+        assert!(update.property_updates > 0);
+        assert_eq!(overlay.repeats["node-card"].items["7:42"].root, identity);
+        assert_eq!(
+            overlay.snapshot().unwrap().document_parse_count,
+            parse_count
+        );
+        assert_eq!(overlay.measurements().registry_scan_count, scans);
     }
 
     #[test]

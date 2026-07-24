@@ -5,7 +5,14 @@ use std::fmt;
 pub const MAX_REPEAT_DECLARATIONS_PER_DOCUMENT: usize = 32;
 pub const MAX_UPOWER_DEVICES_PER_PROCESS: usize = 128;
 pub const MAX_POWER_PROFILE_HOLDS_PER_PROCESS: usize = 128;
-pub const MAX_ITEMS_PER_REPEAT: usize = 256;
+pub const MAX_PIPEWIRE_NODES_PER_PROCESS: usize = 4_096;
+pub const MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT: usize = 16;
+pub const MAX_PIPEWIRE_BINDINGS_PER_ITEM: usize = 64;
+pub const MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM: usize = 32;
+pub const MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT: usize = 64;
+pub const MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS: usize = 256;
+pub const MAX_PIPEWIRE_PROPERTY_KEY_BYTES: usize = 128;
+pub const MAX_ITEMS_PER_REPEAT: usize = MAX_PIPEWIRE_NODES_PER_PROCESS;
 pub const MAX_CLONED_NODES_PER_REPEAT: usize = 4_096;
 pub const MAX_CLONED_NODES_PER_DOCUMENT: usize = 16_384;
 pub const MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE: usize = 64;
@@ -15,15 +22,21 @@ pub const MAX_REPEAT_TEMPLATE_DEPTH: usize = 32;
 pub enum RepeatSource {
     UPowerDevices,
     PowerProfileHolds,
+    PipeWireNodes,
 }
 
 impl RepeatSource {
-    pub const ALL: [Self; 2] = [Self::UPowerDevices, Self::PowerProfileHolds];
+    pub const ALL: [Self; 3] = [
+        Self::UPowerDevices,
+        Self::PowerProfileHolds,
+        Self::PipeWireNodes,
+    ];
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::UPowerDevices => "upower.devices",
             Self::PowerProfileHolds => "power_profile.holds",
+            Self::PipeWireNodes => "pipewire.nodes",
         }
     }
 }
@@ -35,6 +48,7 @@ impl std::str::FromStr for RepeatSource {
         match value {
             "upower.devices" => Ok(Self::UPowerDevices),
             "power_profile.holds" => Ok(Self::PowerProfileHolds),
+            "pipewire.nodes" => Ok(Self::PipeWireNodes),
             _ => Err(()),
         }
     }
@@ -62,10 +76,26 @@ pub enum ItemBindingKey {
     Profile,
     ApplicationId,
     Reason,
+    Name,
+    Nickname,
+    Description,
+    MediaClass,
+    NodeType,
+    NodeState,
+    Direction,
+    RawId,
+    IsAudio,
+    IsVideo,
+    IsStream,
+    IsSink,
+    IsSource,
+    DefaultRole,
+    ConfiguredRole,
+    Property,
 }
 
 impl ItemBindingKey {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 36] = [
         Self::Ready,
         Self::Type,
         Self::PowerSupply,
@@ -86,6 +116,22 @@ impl ItemBindingKey {
         Self::Profile,
         Self::ApplicationId,
         Self::Reason,
+        Self::Name,
+        Self::Nickname,
+        Self::Description,
+        Self::MediaClass,
+        Self::NodeType,
+        Self::NodeState,
+        Self::Direction,
+        Self::RawId,
+        Self::IsAudio,
+        Self::IsVideo,
+        Self::IsStream,
+        Self::IsSink,
+        Self::IsSource,
+        Self::DefaultRole,
+        Self::ConfiguredRole,
+        Self::Property,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -110,13 +156,70 @@ impl ItemBindingKey {
             Self::Profile => "item.profile",
             Self::ApplicationId => "item.application_id",
             Self::Reason => "item.reason",
+            Self::Name => "item.name",
+            Self::Nickname => "item.nickname",
+            Self::Description => "item.description",
+            Self::MediaClass => "item.media_class",
+            Self::NodeType => "item.node_type",
+            Self::NodeState => "item.node_state",
+            Self::Direction => "item.direction",
+            Self::RawId => "item.raw_id",
+            Self::IsAudio => "item.is_audio",
+            Self::IsVideo => "item.is_video",
+            Self::IsStream => "item.is_stream",
+            Self::IsSink => "item.is_sink",
+            Self::IsSource => "item.is_source",
+            Self::DefaultRole => "item.default_role",
+            Self::ConfiguredRole => "item.configured_role",
+            Self::Property => "item.property",
         }
     }
 
-    pub const fn source(self) -> RepeatSource {
-        match self {
-            Self::Profile | Self::ApplicationId | Self::Reason => RepeatSource::PowerProfileHolds,
-            _ => RepeatSource::UPowerDevices,
+    pub const fn supports_source(self, source: RepeatSource) -> bool {
+        match source {
+            RepeatSource::UPowerDevices => matches!(
+                self,
+                Self::Ready
+                    | Self::Type
+                    | Self::PowerSupply
+                    | Self::Energy
+                    | Self::EnergyCapacity
+                    | Self::ChangeRate
+                    | Self::TimeToEmpty
+                    | Self::TimeToFull
+                    | Self::Percentage
+                    | Self::IsPresent
+                    | Self::State
+                    | Self::HealthPercentage
+                    | Self::HealthSupported
+                    | Self::IconName
+                    | Self::IsLaptopBattery
+                    | Self::NativePath
+                    | Self::Model
+            ),
+            RepeatSource::PowerProfileHolds => {
+                matches!(self, Self::Profile | Self::ApplicationId | Self::Reason)
+            }
+            RepeatSource::PipeWireNodes => matches!(
+                self,
+                Self::Ready
+                    | Self::Name
+                    | Self::Nickname
+                    | Self::Description
+                    | Self::MediaClass
+                    | Self::NodeType
+                    | Self::NodeState
+                    | Self::Direction
+                    | Self::RawId
+                    | Self::IsAudio
+                    | Self::IsVideo
+                    | Self::IsStream
+                    | Self::IsSink
+                    | Self::IsSource
+                    | Self::DefaultRole
+                    | Self::ConfiguredRole
+                    | Self::Property
+            ),
         }
     }
 
@@ -136,6 +239,21 @@ impl ItemBindingKey {
                 | Self::Profile
                 | Self::ApplicationId
                 | Self::Reason
+                | Self::Name
+                | Self::Nickname
+                | Self::Description
+                | Self::MediaClass
+                | Self::NodeType
+                | Self::NodeState
+                | Self::Direction
+                | Self::IsAudio
+                | Self::IsVideo
+                | Self::IsStream
+                | Self::IsSink
+                | Self::IsSource
+                | Self::DefaultRole
+                | Self::ConfiguredRole
+                | Self::Property
         )
     }
 
@@ -150,6 +268,17 @@ impl ItemBindingKey {
                 | Self::HealthSupported
                 | Self::IsLaptopBattery
                 | Self::Profile
+                | Self::NodeType
+                | Self::NodeState
+                | Self::Direction
+                | Self::IsAudio
+                | Self::IsVideo
+                | Self::IsStream
+                | Self::IsSink
+                | Self::IsSource
+                | Self::DefaultRole
+                | Self::ConfiguredRole
+                | Self::Property
         )
     }
 
@@ -163,6 +292,7 @@ impl ItemBindingKey {
                 | Self::TimeToFull
                 | Self::Percentage
                 | Self::HealthPercentage
+                | Self::RawId
         )
     }
 }
@@ -335,6 +465,7 @@ pub struct RepeatItemSnapshot {
     pub text: BTreeMap<ItemBindingKey, String>,
     pub tokens: BTreeMap<ItemBindingKey, StateToken>,
     pub values: BTreeMap<ItemBindingKey, NumericValue>,
+    pub properties: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -342,6 +473,34 @@ pub struct RepeatSourceSnapshot {
     pub source: RepeatSource,
     pub source_generation: u64,
     pub items: Vec<RepeatItemSnapshot>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PipeWireDocumentDemand {
+    pub service: bool,
+    pub nodes: bool,
+    pub node_details: bool,
+    pub defaults: bool,
+    pub property_keys: std::collections::BTreeSet<String>,
+}
+
+impl PipeWireDocumentDemand {
+    pub fn is_empty(&self) -> bool {
+        !self.service
+            && !self.nodes
+            && !self.node_details
+            && !self.defaults
+            && self.property_keys.is_empty()
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        self.service |= other.service;
+        self.nodes |= other.nodes;
+        self.node_details |= other.node_details;
+        self.defaults |= other.defaults;
+        self.property_keys
+            .extend(other.property_keys.iter().cloned());
+    }
 }
 
 #[cfg(test)]

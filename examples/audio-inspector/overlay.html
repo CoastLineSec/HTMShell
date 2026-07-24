@@ -1,0 +1,157 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="overlay-card" class="inspector">
+    <header class="inspector-header">
+      <div>
+        <p class="eyebrow">PipeWire graph</p>
+        <h1>Audio and media inspector</h1>
+      </div>
+      <button id="overlay-close"
+              data-htm-element="action-button"
+              data-htm-action="overlay.close">Close</button>
+    </header>
+
+    <section class="summary">
+      <div>
+        <span>State</span>
+        <span id="graph-state"
+              data-htm-element="state-token"
+              data-htm-bind="pipewire.availability">
+          <span id="graph-state-text"
+                data-htm-element="state-text"
+                data-htm-bind="pipewire.availability"></span>
+        </span>
+      </div>
+      <div>
+        <span>Nodes</span>
+        <data id="node-count"
+              data-htm-element="state-value"
+              data-htm-bind="pipewire.node_count"></data>
+      </div>
+      <div>
+        <span>Actual output</span>
+        <span id="actual-output"
+              data-htm-element="state-text"
+              data-htm-bind="pipewire.default_sink.description"></span>
+      </div>
+      <div>
+        <span>Configured output</span>
+        <span id="configured-output"
+              data-htm-element="state-text"
+              data-htm-bind="pipewire.configured_sink.description"></span>
+      </div>
+      <div>
+        <span>Actual input</span>
+        <span id="actual-input"
+              data-htm-element="state-text"
+              data-htm-bind="pipewire.default_source.description"></span>
+      </div>
+      <div>
+        <span>Configured input</span>
+        <span id="configured-input"
+              data-htm-element="state-text"
+              data-htm-bind="pipewire.configured_source.description"></span>
+      </div>
+    </section>
+
+    <section>
+      <h2>Discovered nodes</h2>
+      <div class="node-grid">
+        <template id="node-card"
+                  data-htm-element="repeat"
+                  data-htm-source="pipewire.nodes">
+          <div class="node"
+               data-htm-element="state-token"
+               data-htm-local-id="type"
+               data-htm-bind="item.node_type">
+            <div class="node-heading">
+              <div>
+                <span class="node-type"
+                      data-htm-element="state-text"
+                      data-htm-local-id="type-text"
+                      data-htm-bind="item.node_type"></span>
+                <h3><span data-htm-element="state-text"
+                          data-htm-local-id="description"
+                          data-htm-bind="item.description"></span></h3>
+              </div>
+              <data data-htm-element="state-value"
+                    data-htm-local-id="raw-id"
+                    data-htm-bind="item.raw_id"></data>
+            </div>
+            <dl>
+              <dt>Name</dt>
+              <dd><span data-htm-element="state-text"
+                        data-htm-local-id="name"
+                        data-htm-bind="item.name"></span></dd>
+              <dt>Media class</dt>
+              <dd><span data-htm-element="state-text"
+                        data-htm-local-id="media-class"
+                        data-htm-bind="item.media_class"></span></dd>
+              <dt>State</dt>
+              <dd><span data-htm-element="state-token"
+                        data-htm-local-id="state"
+                        data-htm-bind="item.node_state">
+                <span data-htm-element="state-text"
+                      data-htm-local-id="state-text"
+                      data-htm-bind="item.node_state"></span>
+              </span></dd>
+              <dt>Direction</dt>
+              <dd><span data-htm-element="state-text"
+                        data-htm-local-id="direction"
+                        data-htm-bind="item.direction"></span></dd>
+              <dt>Application</dt>
+              <dd><span data-htm-element="state-token"
+                        data-htm-local-id="application-state"
+                        data-htm-bind="item.property"
+                        data-htm-property-key="application.name">
+                <span data-htm-element="state-text"
+                      data-htm-local-id="application"
+                      data-htm-bind="item.property"
+                      data-htm-property-key="application.name"></span>
+              </span></dd>
+              <dt>Media title</dt>
+              <dd><span data-htm-element="state-text"
+                        data-htm-local-id="media-title"
+                        data-htm-bind="item.property"
+                        data-htm-property-key="media.title"></span></dd>
+            </dl>
+            <footer>
+              <span data-htm-element="state-token"
+                    data-htm-local-id="default-role"
+                    data-htm-bind="item.default_role"></span>
+              <span data-htm-element="state-token"
+                    data-htm-local-id="configured-role"
+                    data-htm-bind="item.configured_role"></span>
+              <span data-htm-element="state-token"
+                    data-htm-local-id="audio"
+                    data-htm-bind="item.is_audio"></span>
+              <span data-htm-element="state-token"
+                    data-htm-local-id="video"
+                    data-htm-bind="item.is_video"></span>
+              <span data-htm-element="state-token"
+                    data-htm-local-id="stream"
+                    data-htm-bind="item.is_stream"></span>
+            </footer>
+          </div>
+        </template>
+      </div>
+    </section>
+    <footer class="overlay-footer">
+      <button id="overlay-action"
+              data-htm-element="action-button"
+              data-htm-action="overlay.activate">Refresh local state</button>
+      <span id="overlay-status"
+            data-htm-element="state-text"
+            data-htm-bind="overlay.status"></span>
+      <span id="activation-count"
+            data-htm-element="state-text"
+            data-htm-bind="overlay.activation_count"></span>
+    </footer>
+  </main>
+</body>
+</html>

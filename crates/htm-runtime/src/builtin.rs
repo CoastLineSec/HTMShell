@@ -1,9 +1,11 @@
 use crate::identity::{IdentityRegistry, author_slots};
 use crate::{
     ClockFormat, ClockTimeZone, ExperimentalDocumentIdentity, ExperimentalNodeIdentity,
-    ItemBindingKey, MAX_CLOCK_DECLARATIONS_PER_DOCUMENT, MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE,
-    MAX_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_REPEAT_TEMPLATE_DEPTH, RepeatSource, RuntimeError,
-    StateValueFormat,
+    ItemBindingKey, MAX_CLOCK_DECLARATIONS_PER_DOCUMENT, MAX_PIPEWIRE_BINDINGS_PER_ITEM,
+    MAX_PIPEWIRE_PROPERTY_KEY_BYTES, MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT,
+    MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM, MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT,
+    MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE, MAX_REPEAT_DECLARATIONS_PER_DOCUMENT,
+    MAX_REPEAT_TEMPLATE_DEPTH, RepeatSource, RuntimeError, StateValueFormat,
 };
 use blitz_dom::node::NodeData;
 use blitz_dom::{LocalName, local_name};
@@ -20,6 +22,7 @@ const FORMAT_ATTRIBUTE: &str = "data-htm-format";
 const SOURCE_ATTRIBUTE: &str = "data-htm-source";
 const LOCAL_ID_ATTRIBUTE: &str = "data-htm-local-id";
 const ENABLED_BIND_ATTRIBUTE: &str = "data-htm-enabled-bind";
+pub const PROPERTY_KEY_ATTRIBUTE: &str = "data-htm-property-key";
 const TIME_ZONE_ATTRIBUTE: &str = "data-htm-time-zone";
 const ENABLED_ATTRIBUTE: &str = "data-htm-enabled";
 pub(crate) const DATETIME_ATTRIBUTE: &str = "datetime";
@@ -89,6 +92,33 @@ pub enum StateBindingKey {
     PowerProfilePerformanceAvailable,
     PowerProfileDegradation,
     PowerProfileHoldCount,
+    PipeWireAvailability,
+    PipeWireReady,
+    PipeWireNodeCount,
+    PipeWireDefaultSinkStatus,
+    PipeWireDefaultSinkName,
+    PipeWireDefaultSinkNickname,
+    PipeWireDefaultSinkDescription,
+    PipeWireDefaultSinkMediaClass,
+    PipeWireDefaultSinkRawId,
+    PipeWireDefaultSourceStatus,
+    PipeWireDefaultSourceName,
+    PipeWireDefaultSourceNickname,
+    PipeWireDefaultSourceDescription,
+    PipeWireDefaultSourceMediaClass,
+    PipeWireDefaultSourceRawId,
+    PipeWireConfiguredSinkStatus,
+    PipeWireConfiguredSinkName,
+    PipeWireConfiguredSinkNickname,
+    PipeWireConfiguredSinkDescription,
+    PipeWireConfiguredSinkMediaClass,
+    PipeWireConfiguredSinkRawId,
+    PipeWireConfiguredSourceStatus,
+    PipeWireConfiguredSourceName,
+    PipeWireConfiguredSourceNickname,
+    PipeWireConfiguredSourceDescription,
+    PipeWireConfiguredSourceMediaClass,
+    PipeWireConfiguredSourceRawId,
     OutputLabel,
     OutputScale,
     SurfaceTemplateId,
@@ -99,7 +129,7 @@ pub enum StateBindingKey {
 }
 
 impl StateBindingKey {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 61] = [
         Self::ClockTime,
         Self::UPowerAvailability,
         Self::UPowerOnBattery,
@@ -127,6 +157,33 @@ impl StateBindingKey {
         Self::PowerProfilePerformanceAvailable,
         Self::PowerProfileDegradation,
         Self::PowerProfileHoldCount,
+        Self::PipeWireAvailability,
+        Self::PipeWireReady,
+        Self::PipeWireNodeCount,
+        Self::PipeWireDefaultSinkStatus,
+        Self::PipeWireDefaultSinkName,
+        Self::PipeWireDefaultSinkNickname,
+        Self::PipeWireDefaultSinkDescription,
+        Self::PipeWireDefaultSinkMediaClass,
+        Self::PipeWireDefaultSinkRawId,
+        Self::PipeWireDefaultSourceStatus,
+        Self::PipeWireDefaultSourceName,
+        Self::PipeWireDefaultSourceNickname,
+        Self::PipeWireDefaultSourceDescription,
+        Self::PipeWireDefaultSourceMediaClass,
+        Self::PipeWireDefaultSourceRawId,
+        Self::PipeWireConfiguredSinkStatus,
+        Self::PipeWireConfiguredSinkName,
+        Self::PipeWireConfiguredSinkNickname,
+        Self::PipeWireConfiguredSinkDescription,
+        Self::PipeWireConfiguredSinkMediaClass,
+        Self::PipeWireConfiguredSinkRawId,
+        Self::PipeWireConfiguredSourceStatus,
+        Self::PipeWireConfiguredSourceName,
+        Self::PipeWireConfiguredSourceNickname,
+        Self::PipeWireConfiguredSourceDescription,
+        Self::PipeWireConfiguredSourceMediaClass,
+        Self::PipeWireConfiguredSourceRawId,
         Self::OutputLabel,
         Self::OutputScale,
         Self::SurfaceTemplateId,
@@ -165,6 +222,33 @@ impl StateBindingKey {
             Self::PowerProfilePerformanceAvailable => "power_profile.performance_available",
             Self::PowerProfileDegradation => "power_profile.degradation",
             Self::PowerProfileHoldCount => "power_profile.hold_count",
+            Self::PipeWireAvailability => "pipewire.availability",
+            Self::PipeWireReady => "pipewire.ready",
+            Self::PipeWireNodeCount => "pipewire.node_count",
+            Self::PipeWireDefaultSinkStatus => "pipewire.default_sink.status",
+            Self::PipeWireDefaultSinkName => "pipewire.default_sink.name",
+            Self::PipeWireDefaultSinkNickname => "pipewire.default_sink.nickname",
+            Self::PipeWireDefaultSinkDescription => "pipewire.default_sink.description",
+            Self::PipeWireDefaultSinkMediaClass => "pipewire.default_sink.media_class",
+            Self::PipeWireDefaultSinkRawId => "pipewire.default_sink.raw_id",
+            Self::PipeWireDefaultSourceStatus => "pipewire.default_source.status",
+            Self::PipeWireDefaultSourceName => "pipewire.default_source.name",
+            Self::PipeWireDefaultSourceNickname => "pipewire.default_source.nickname",
+            Self::PipeWireDefaultSourceDescription => "pipewire.default_source.description",
+            Self::PipeWireDefaultSourceMediaClass => "pipewire.default_source.media_class",
+            Self::PipeWireDefaultSourceRawId => "pipewire.default_source.raw_id",
+            Self::PipeWireConfiguredSinkStatus => "pipewire.configured_sink.status",
+            Self::PipeWireConfiguredSinkName => "pipewire.configured_sink.name",
+            Self::PipeWireConfiguredSinkNickname => "pipewire.configured_sink.nickname",
+            Self::PipeWireConfiguredSinkDescription => "pipewire.configured_sink.description",
+            Self::PipeWireConfiguredSinkMediaClass => "pipewire.configured_sink.media_class",
+            Self::PipeWireConfiguredSinkRawId => "pipewire.configured_sink.raw_id",
+            Self::PipeWireConfiguredSourceStatus => "pipewire.configured_source.status",
+            Self::PipeWireConfiguredSourceName => "pipewire.configured_source.name",
+            Self::PipeWireConfiguredSourceNickname => "pipewire.configured_source.nickname",
+            Self::PipeWireConfiguredSourceDescription => "pipewire.configured_source.description",
+            Self::PipeWireConfiguredSourceMediaClass => "pipewire.configured_source.media_class",
+            Self::PipeWireConfiguredSourceRawId => "pipewire.configured_source.raw_id",
             Self::OutputLabel => "output.label",
             Self::OutputScale => "output.scale",
             Self::SurfaceTemplateId => "surface.template_id",
@@ -203,7 +287,34 @@ impl StateBindingKey {
             | Self::PowerProfileCurrent
             | Self::PowerProfilePerformanceAvailable
             | Self::PowerProfileDegradation
-            | Self::PowerProfileHoldCount => StateBindingScope::Process,
+            | Self::PowerProfileHoldCount
+            | Self::PipeWireAvailability
+            | Self::PipeWireReady
+            | Self::PipeWireNodeCount
+            | Self::PipeWireDefaultSinkStatus
+            | Self::PipeWireDefaultSinkName
+            | Self::PipeWireDefaultSinkNickname
+            | Self::PipeWireDefaultSinkDescription
+            | Self::PipeWireDefaultSinkMediaClass
+            | Self::PipeWireDefaultSinkRawId
+            | Self::PipeWireDefaultSourceStatus
+            | Self::PipeWireDefaultSourceName
+            | Self::PipeWireDefaultSourceNickname
+            | Self::PipeWireDefaultSourceDescription
+            | Self::PipeWireDefaultSourceMediaClass
+            | Self::PipeWireDefaultSourceRawId
+            | Self::PipeWireConfiguredSinkStatus
+            | Self::PipeWireConfiguredSinkName
+            | Self::PipeWireConfiguredSinkNickname
+            | Self::PipeWireConfiguredSinkDescription
+            | Self::PipeWireConfiguredSinkMediaClass
+            | Self::PipeWireConfiguredSinkRawId
+            | Self::PipeWireConfiguredSourceStatus
+            | Self::PipeWireConfiguredSourceName
+            | Self::PipeWireConfiguredSourceNickname
+            | Self::PipeWireConfiguredSourceDescription
+            | Self::PipeWireConfiguredSourceMediaClass
+            | Self::PipeWireConfiguredSourceRawId => StateBindingScope::Process,
             Self::OutputLabel
             | Self::OutputScale
             | Self::OverlayStatus
@@ -235,6 +346,28 @@ impl StateBindingKey {
                     | Self::PowerProfileCurrent
                     | Self::PowerProfilePerformanceAvailable
                     | Self::PowerProfileDegradation
+                    | Self::PipeWireAvailability
+                    | Self::PipeWireReady
+                    | Self::PipeWireDefaultSinkStatus
+                    | Self::PipeWireDefaultSinkName
+                    | Self::PipeWireDefaultSinkNickname
+                    | Self::PipeWireDefaultSinkDescription
+                    | Self::PipeWireDefaultSinkMediaClass
+                    | Self::PipeWireDefaultSourceStatus
+                    | Self::PipeWireDefaultSourceName
+                    | Self::PipeWireDefaultSourceNickname
+                    | Self::PipeWireDefaultSourceDescription
+                    | Self::PipeWireDefaultSourceMediaClass
+                    | Self::PipeWireConfiguredSinkStatus
+                    | Self::PipeWireConfiguredSinkName
+                    | Self::PipeWireConfiguredSinkNickname
+                    | Self::PipeWireConfiguredSinkDescription
+                    | Self::PipeWireConfiguredSinkMediaClass
+                    | Self::PipeWireConfiguredSourceStatus
+                    | Self::PipeWireConfiguredSourceName
+                    | Self::PipeWireConfiguredSourceNickname
+                    | Self::PipeWireConfiguredSourceDescription
+                    | Self::PipeWireConfiguredSourceMediaClass
                     | Self::OutputLabel
                     | Self::OutputScale
                     | Self::SurfaceTemplateId
@@ -258,6 +391,12 @@ impl StateBindingKey {
                     | Self::PowerProfileCurrent
                     | Self::PowerProfilePerformanceAvailable
                     | Self::PowerProfileDegradation
+                    | Self::PipeWireAvailability
+                    | Self::PipeWireReady
+                    | Self::PipeWireDefaultSinkStatus
+                    | Self::PipeWireDefaultSourceStatus
+                    | Self::PipeWireConfiguredSinkStatus
+                    | Self::PipeWireConfiguredSourceStatus
                     | Self::SurfaceScaleProfile
                     | Self::OverlayStatus
             ),
@@ -272,17 +411,30 @@ impl StateBindingKey {
                     | Self::BatteryTimeToFull
                     | Self::BatteryHealthPercentage
                     | Self::PowerProfileHoldCount
+                    | Self::PipeWireNodeCount
+                    | Self::PipeWireDefaultSinkRawId
+                    | Self::PipeWireDefaultSourceRawId
+                    | Self::PipeWireConfiguredSinkRawId
+                    | Self::PipeWireConfiguredSourceRawId
             ),
             StateValueKind::Boolean => matches!(
                 self,
-                Self::PowerProfileAvailability | Self::PowerProfilePerformanceAvailable
+                Self::PowerProfileAvailability
+                    | Self::PowerProfilePerformanceAvailable
+                    | Self::PipeWireReady
             ),
         }
     }
 
     pub const fn allowed_value_formats(self) -> &'static [StateValueFormat] {
         match self {
-            Self::UPowerDeviceCount | Self::PowerProfileHoldCount => &[StateValueFormat::Raw],
+            Self::UPowerDeviceCount
+            | Self::PowerProfileHoldCount
+            | Self::PipeWireNodeCount
+            | Self::PipeWireDefaultSinkRawId
+            | Self::PipeWireDefaultSourceRawId
+            | Self::PipeWireConfiguredSinkRawId
+            | Self::PipeWireConfiguredSourceRawId => &[StateValueFormat::Raw],
             Self::BatteryPercentage | Self::BatteryHealthPercentage => {
                 &[StateValueFormat::Raw, StateValueFormat::Percent]
             }
@@ -344,6 +496,12 @@ impl StateBindingKey {
                 "unknown",
                 "unavailable",
             ],
+            Self::PipeWireAvailability => &["unavailable", "synchronizing", "ready"],
+            Self::PipeWireReady => &["true", "false"],
+            Self::PipeWireDefaultSinkStatus
+            | Self::PipeWireDefaultSourceStatus
+            | Self::PipeWireConfiguredSinkStatus
+            | Self::PipeWireConfiguredSourceStatus => &["unavailable", "unresolved", "available"],
             _ => &[],
         }
     }
@@ -423,6 +581,37 @@ impl std::str::FromStr for StateBindingKey {
             "power_profile.performance_available" => Ok(Self::PowerProfilePerformanceAvailable),
             "power_profile.degradation" => Ok(Self::PowerProfileDegradation),
             "power_profile.hold_count" => Ok(Self::PowerProfileHoldCount),
+            "pipewire.availability" => Ok(Self::PipeWireAvailability),
+            "pipewire.ready" => Ok(Self::PipeWireReady),
+            "pipewire.node_count" => Ok(Self::PipeWireNodeCount),
+            "pipewire.default_sink.status" => Ok(Self::PipeWireDefaultSinkStatus),
+            "pipewire.default_sink.name" => Ok(Self::PipeWireDefaultSinkName),
+            "pipewire.default_sink.nickname" => Ok(Self::PipeWireDefaultSinkNickname),
+            "pipewire.default_sink.description" => Ok(Self::PipeWireDefaultSinkDescription),
+            "pipewire.default_sink.media_class" => Ok(Self::PipeWireDefaultSinkMediaClass),
+            "pipewire.default_sink.raw_id" => Ok(Self::PipeWireDefaultSinkRawId),
+            "pipewire.default_source.status" => Ok(Self::PipeWireDefaultSourceStatus),
+            "pipewire.default_source.name" => Ok(Self::PipeWireDefaultSourceName),
+            "pipewire.default_source.nickname" => Ok(Self::PipeWireDefaultSourceNickname),
+            "pipewire.default_source.description" => Ok(Self::PipeWireDefaultSourceDescription),
+            "pipewire.default_source.media_class" => Ok(Self::PipeWireDefaultSourceMediaClass),
+            "pipewire.default_source.raw_id" => Ok(Self::PipeWireDefaultSourceRawId),
+            "pipewire.configured_sink.status" => Ok(Self::PipeWireConfiguredSinkStatus),
+            "pipewire.configured_sink.name" => Ok(Self::PipeWireConfiguredSinkName),
+            "pipewire.configured_sink.nickname" => Ok(Self::PipeWireConfiguredSinkNickname),
+            "pipewire.configured_sink.description" => Ok(Self::PipeWireConfiguredSinkDescription),
+            "pipewire.configured_sink.media_class" => Ok(Self::PipeWireConfiguredSinkMediaClass),
+            "pipewire.configured_sink.raw_id" => Ok(Self::PipeWireConfiguredSinkRawId),
+            "pipewire.configured_source.status" => Ok(Self::PipeWireConfiguredSourceStatus),
+            "pipewire.configured_source.name" => Ok(Self::PipeWireConfiguredSourceName),
+            "pipewire.configured_source.nickname" => Ok(Self::PipeWireConfiguredSourceNickname),
+            "pipewire.configured_source.description" => {
+                Ok(Self::PipeWireConfiguredSourceDescription)
+            }
+            "pipewire.configured_source.media_class" => {
+                Ok(Self::PipeWireConfiguredSourceMediaClass)
+            }
+            "pipewire.configured_source.raw_id" => Ok(Self::PipeWireConfiguredSourceRawId),
             "output.label" => Ok(Self::OutputLabel),
             "output.scale" => Ok(Self::OutputScale),
             "surface.template_id" => Ok(Self::SurfaceTemplateId),
@@ -509,10 +698,37 @@ pub enum StateToken {
     Performance,
     HighTemperature,
     LapDetected,
+    Synchronizing,
+    Ready,
+    Unresolved,
+    Untracked,
+    Audio,
+    Stream,
+    Source,
+    Sink,
+    AudioSink,
+    AudioSource,
+    AudioDuplex,
+    AudioOutputStream,
+    AudioInputStream,
+    VideoSource,
+    VideoSink,
+    Error,
+    Creating,
+    Suspended,
+    Idle,
+    Running,
+    Bidirectional,
+    DefaultSink,
+    DefaultSource,
+    DefaultSinkAndSource,
+    ConfiguredSink,
+    ConfiguredSource,
+    ConfiguredSinkAndSource,
 }
 
 impl StateToken {
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 84] = [
         Self::Open,
         Self::Closed,
         Self::Scale1,
@@ -570,6 +786,33 @@ impl StateToken {
         Self::Performance,
         Self::HighTemperature,
         Self::LapDetected,
+        Self::Synchronizing,
+        Self::Ready,
+        Self::Unresolved,
+        Self::Untracked,
+        Self::Audio,
+        Self::Stream,
+        Self::Source,
+        Self::Sink,
+        Self::AudioSink,
+        Self::AudioSource,
+        Self::AudioDuplex,
+        Self::AudioOutputStream,
+        Self::AudioInputStream,
+        Self::VideoSource,
+        Self::VideoSink,
+        Self::Error,
+        Self::Creating,
+        Self::Suspended,
+        Self::Idle,
+        Self::Running,
+        Self::Bidirectional,
+        Self::DefaultSink,
+        Self::DefaultSource,
+        Self::DefaultSinkAndSource,
+        Self::ConfiguredSink,
+        Self::ConfiguredSource,
+        Self::ConfiguredSinkAndSource,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -631,6 +874,33 @@ impl StateToken {
             Self::Performance => "performance",
             Self::HighTemperature => "high-temperature",
             Self::LapDetected => "lap-detected",
+            Self::Synchronizing => "synchronizing",
+            Self::Ready => "ready",
+            Self::Unresolved => "unresolved",
+            Self::Untracked => "untracked",
+            Self::Audio => "audio",
+            Self::Stream => "stream",
+            Self::Source => "source",
+            Self::Sink => "sink",
+            Self::AudioSink => "audio-sink",
+            Self::AudioSource => "audio-source",
+            Self::AudioDuplex => "audio-duplex",
+            Self::AudioOutputStream => "audio-output-stream",
+            Self::AudioInputStream => "audio-input-stream",
+            Self::VideoSource => "video-source",
+            Self::VideoSink => "video-sink",
+            Self::Error => "error",
+            Self::Creating => "creating",
+            Self::Suspended => "suspended",
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::Bidirectional => "bidirectional",
+            Self::DefaultSink => "default-sink",
+            Self::DefaultSource => "default-source",
+            Self::DefaultSinkAndSource => "default-sink-and-source",
+            Self::ConfiguredSink => "configured-sink",
+            Self::ConfiguredSource => "configured-source",
+            Self::ConfiguredSinkAndSource => "configured-sink-and-source",
         }
     }
 
@@ -763,6 +1033,7 @@ pub struct RepeatedElementDeclaration {
     pub local_id: String,
     pub kind: BuiltInElementKind,
     pub binding: ItemBindingKey,
+    pub property_key: Option<String>,
     pub value_format: Option<StateValueFormat>,
     pub prototype_order: usize,
 }
@@ -1280,6 +1551,28 @@ impl BuiltInElementIndex {
                 "{source} contains {repeat_declarations} repeat declarations; the per-document limit is {MAX_REPEAT_DECLARATIONS_PER_DOCUMENT}"
             )));
         }
+        let pipewire_repeats = elements
+            .values()
+            .filter_map(|element| element.declaration.repeat.as_ref())
+            .filter(|repeat| repeat.source == RepeatSource::PipeWireNodes)
+            .collect::<Vec<_>>();
+        if pipewire_repeats.len() > MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{source} contains {} `pipewire.nodes` repeat declarations; the per-document limit is {MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT}",
+                pipewire_repeats.len()
+            )));
+        }
+        let property_keys = pipewire_repeats
+            .iter()
+            .flat_map(|repeat| repeat.descendants.iter())
+            .filter_map(|descendant| descendant.property_key.as_ref())
+            .collect::<BTreeSet<_>>();
+        if property_keys.len() > MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{source} requests {} unique PipeWire property keys; the per-document limit is {MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT}",
+                property_keys.len()
+            )));
+        }
         for (action_id, target_id) in unresolved_action_targets {
             let target = elements.get(&target_id).ok_or_else(|| {
                 invalid_declaration(
@@ -1727,6 +2020,7 @@ fn analyze_repeat(
                         let name = attribute.name.local.as_ref();
                         if name.starts_with("data-htm-")
                             && name != LOCAL_ID_ATTRIBUTE
+                            && name != PROPERTY_KEY_ATTRIBUTE
                             && !allowed_behavior_attributes(kind).contains(&name)
                         {
                             return Err(invalid_declaration(
@@ -1762,7 +2056,7 @@ fn analyze_repeat(
                             format!("unsupported item binding `{binding_value}`"),
                         )
                     })?;
-                    if binding.source() != source {
+                    if !binding.supports_source(source) {
                         return Err(invalid_declaration(
                             context,
                             format!(
@@ -1770,6 +2064,49 @@ fn analyze_repeat(
                             ),
                         ));
                     }
+                    let property_key = match (
+                        binding,
+                        element.attr(LocalName::from(PROPERTY_KEY_ATTRIBUTE)),
+                    ) {
+                        (ItemBindingKey::Property, Some("")) => {
+                            return Err(invalid_declaration(
+                                context,
+                                "`data-htm-property-key` must not be empty",
+                            ));
+                        }
+                        (ItemBindingKey::Property, Some(key))
+                            if key.len() > MAX_PIPEWIRE_PROPERTY_KEY_BYTES =>
+                        {
+                            return Err(invalid_declaration(
+                                context,
+                                format!(
+                                    "`data-htm-property-key` exceeds {MAX_PIPEWIRE_PROPERTY_KEY_BYTES} bytes"
+                                ),
+                            ));
+                        }
+                        (ItemBindingKey::Property, Some(key))
+                            if !valid_pipewire_property_key(key) =>
+                        {
+                            return Err(invalid_declaration(
+                                context,
+                                format!("invalid `data-htm-property-key` `{key}`"),
+                            ));
+                        }
+                        (ItemBindingKey::Property, Some(key)) => Some(key.to_owned()),
+                        (ItemBindingKey::Property, None) => {
+                            return Err(invalid_declaration(
+                                context,
+                                "`item.property` requires `data-htm-property-key`",
+                            ));
+                        }
+                        (_, Some(_)) => {
+                            return Err(invalid_declaration(
+                                context,
+                                "`data-htm-property-key` is only valid with `item.property`",
+                            ));
+                        }
+                        (_, None) => None,
+                    };
                     let value_format = match kind {
                         BuiltInElementKind::StateText if binding.supports_text() => {
                             validate_state_text_children(document, slot, context)?;
@@ -1812,9 +2149,17 @@ fn analyze_repeat(
                         local_id: local_id.to_owned(),
                         kind,
                         binding,
+                        property_key,
                         value_format,
                         prototype_order: order,
                     });
+                    if source == RepeatSource::PipeWireNodes
+                        && descendants.len() > MAX_PIPEWIRE_BINDINGS_PER_ITEM
+                    {
+                        return Err(RuntimeError::LimitExceeded(format!(
+                            "{context}: `pipewire.nodes` template has more than {MAX_PIPEWIRE_BINDINGS_PER_ITEM} registered bindings"
+                        )));
+                    }
                     if descendants.len() > MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE {
                         return Err(RuntimeError::LimitExceeded(format!(
                             "{context}: repeat template has more than {MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE} registered descendants"
@@ -1831,6 +2176,15 @@ fn analyze_repeat(
                 .map(|child| (child, depth.saturating_add(1))),
         );
     }
+    let property_lookups = descendants
+        .iter()
+        .filter(|descendant| descendant.property_key.is_some())
+        .count();
+    if property_lookups > MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM {
+        return Err(RuntimeError::LimitExceeded(format!(
+            "{context}: repeat template has {property_lookups} PipeWire property lookups; the limit is {MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM}"
+        )));
+    }
     Ok(RepeatDeclaration {
         id: ElementInstanceId {
             document_generation,
@@ -1842,6 +2196,16 @@ fn analyze_repeat(
         descendants,
         prototype_nodes: prototype_order,
     })
+}
+
+fn valid_pipewire_property_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= MAX_PIPEWIRE_PROPERTY_KEY_BYTES
+        && key.chars().all(|character| {
+            !character.is_control()
+                && !character.is_whitespace()
+                && !matches!(character, '*' | '?' | '[' | ']' | '{' | '}' | '$')
+        })
 }
 
 fn item_value_formats(binding: ItemBindingKey) -> &'static [StateValueFormat] {
@@ -1856,6 +2220,7 @@ fn item_value_formats(binding: ItemBindingKey) -> &'static [StateValueFormat] {
         ItemBindingKey::Percentage | ItemBindingKey::HealthPercentage => {
             &[StateValueFormat::Raw, StateValueFormat::Percent]
         }
+        ItemBindingKey::RawId => &[StateValueFormat::Raw],
         _ => &[],
     }
 }
@@ -1973,7 +2338,7 @@ mod tests {
         assert!(validate_definitions(&DEFINITIONS).is_ok());
         let duplicate = [DEFINITIONS[0], DEFINITIONS[0]];
         assert!(validate_definitions(&duplicate).is_err());
-        assert_eq!(StateBindingKey::ALL.len(), 34);
+        assert_eq!(StateBindingKey::ALL.len(), 61);
         assert!(StateBindingKey::ALL.contains(&StateBindingKey::UPowerOnBattery));
         assert!(StateBindingKey::ALL.contains(&StateBindingKey::PowerProfileCurrent));
         assert_eq!(ShellAction::ALL.len(), 9);
@@ -2015,7 +2380,7 @@ mod tests {
         assert!(StateBindingKey::SurfaceScaleProfile.supports(StateValueKind::Token));
         assert!(!StateBindingKey::SurfaceScaleProfile.supports(StateValueKind::Text));
         assert!(!StateBindingKey::ClockTime.supports(StateValueKind::Token));
-        assert_eq!(StateToken::ALL.len(), 57);
+        assert_eq!(StateToken::ALL.len(), 84);
         assert!(StateToken::ALL.contains(&StateToken::BluetoothGeneric));
         assert!(StateToken::ALL.contains(&StateToken::HighTemperature));
         assert!(StateToken::Open.valid_for(StateBindingKey::OverlayStatus));
@@ -2149,6 +2514,105 @@ mod tests {
         ] {
             assert!(discover(invalid, BuiltInSurfaceKind::Overlay).is_err());
         }
+    }
+
+    #[test]
+    fn pipewire_repeat_and_exact_property_lookup_are_narrowly_validated() {
+        let index = discover(
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes">
+                 <div>
+                   <span data-htm-element="state-text" data-htm-local-id="name" data-htm-bind="item.name"></span>
+                   <span data-htm-element="state-token" data-htm-local-id="type" data-htm-bind="item.node_type"></span>
+                   <data data-htm-element="state-value" data-htm-local-id="raw" data-htm-bind="item.raw_id"></data>
+                   <span data-htm-element="state-text" data-htm-local-id="application"
+                         data-htm-bind="item.property"
+                         data-htm-property-key="application.name"></span>
+                 </div>
+               </template>"#,
+            BuiltInSurfaceKind::Overlay,
+        )
+        .unwrap();
+        let repeat = &index.repeat_declarations()[0];
+        assert_eq!(repeat.source, RepeatSource::PipeWireNodes);
+        assert_eq!(
+            repeat
+                .descendants
+                .iter()
+                .find(|element| element.binding == ItemBindingKey::Property)
+                .and_then(|element| element.property_key.as_deref()),
+            Some("application.name")
+        );
+
+        for invalid in [
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><span data-htm-element="state-text" data-htm-local-id="property" data-htm-bind="item.property"></span></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><span data-htm-element="state-text" data-htm-local-id="property" data-htm-bind="item.property" data-htm-property-key=""></span></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><span data-htm-element="state-text" data-htm-local-id="property" data-htm-bind="item.property" data-htm-property-key="application.*"></span></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><span data-htm-element="state-text" data-htm-local-id="property" data-htm-bind="item.property" data-htm-property-key="${dynamic}"></span></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><span data-htm-element="state-text" data-htm-local-id="name" data-htm-bind="item.name" data-htm-property-key="node.name"></span></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><span data-htm-element="state-text" data-htm-local-id="model" data-htm-bind="item.model"></span></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><button data-htm-element="action-button" data-htm-local-id="action" data-htm-action="overlay.close"></button></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><time data-htm-element="clock-text" data-htm-local-id="clock" data-htm-format="%H"></time></div></template>"#,
+        ] {
+            assert!(
+                discover(invalid, BuiltInSurfaceKind::Overlay).is_err(),
+                "{invalid}"
+            );
+        }
+
+        let long_key = "k".repeat(MAX_PIPEWIRE_PROPERTY_KEY_BYTES + 1);
+        let overlong = format!(
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><span data-htm-element="state-text" data-htm-local-id="property" data-htm-bind="item.property" data-htm-property-key="{long_key}"></span></div></template>"#
+        );
+        assert!(discover(&overlong, BuiltInSurfaceKind::Overlay).is_err());
+
+        let bindings = (0..=MAX_PIPEWIRE_BINDINGS_PER_ITEM)
+            .map(|index| {
+                format!(
+                    r#"<span data-htm-element="state-text" data-htm-local-id="name-{index}" data-htm-bind="item.name"></span>"#
+                )
+            })
+            .collect::<String>();
+        let excessive_bindings = format!(
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div>{bindings}</div></template>"#
+        );
+        assert!(discover(&excessive_bindings, BuiltInSurfaceKind::Overlay).is_err());
+
+        let property_lookups = (0..=MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM)
+            .map(|index| {
+                format!(
+                    r#"<span data-htm-element="state-text" data-htm-local-id="property-{index}" data-htm-bind="item.property" data-htm-property-key="property.{index}"></span>"#
+                )
+            })
+            .collect::<String>();
+        let excessive_lookups = format!(
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div>{property_lookups}</div></template>"#
+        );
+        assert!(discover(&excessive_lookups, BuiltInSurfaceKind::Overlay).is_err());
+
+        let unique_keys = (0..3)
+            .map(|repeat| {
+                let descendants = (0..22)
+                    .map(|index| {
+                        format!(
+                            r#"<span data-htm-element="state-text" data-htm-local-id="property-{index}" data-htm-bind="item.property" data-htm-property-key="property.{repeat}.{index}"></span>"#
+                        )
+                    })
+                    .collect::<String>();
+                format!(
+                    r#"<template id="nodes-{repeat}" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div>{descendants}</div></template>"#
+                )
+            })
+            .collect::<String>();
+        assert!(discover(&unique_keys, BuiltInSurfaceKind::Overlay).is_err());
+
+        let repeats = (0..=MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT)
+            .map(|index| {
+                format!(
+                    r#"<template id="nodes-{index}" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div></div></template>"#
+                )
+            })
+            .collect::<String>();
+        assert!(discover(&repeats, BuiltInSurfaceKind::Overlay).is_err());
     }
 
     #[test]

@@ -6,6 +6,7 @@ use super::model::{
     PipeWireNodeState, PipeWireResourceCounters, PipeWireSnapshot, RawLinkInfo, RawNodeInfo,
     bounded_text,
 };
+use super::public::PipeWireNodeType;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,7 +19,8 @@ const METADATA_CORE_SUBJECT: u32 = 0;
 #[derive(Debug, Clone)]
 struct NodeRecord {
     raw_id: u32,
-    properties: BTreeMap<String, String>,
+    registry_properties: BTreeMap<String, String>,
+    detail_properties: Option<BTreeMap<String, String>>,
     state: PipeWireNodeState,
     raw_state: i32,
     state_error: Option<String>,
@@ -144,18 +146,35 @@ impl PipeWireReconciler {
                             "node count exceeds {MAX_NODES}"
                         )));
                     }
-                    self.nodes.entry(raw_id).or_insert(NodeRecord {
-                        raw_id,
-                        properties,
-                        state: PipeWireNodeState::Unknown,
-                        raw_state: i32::MIN,
-                        state_error: None,
-                        input_ports: 0,
-                        output_ports: 0,
-                        ready: false,
-                    });
+                    self.nodes
+                        .entry(raw_id)
+                        .and_modify(|node| node.registry_properties.clone_from(&properties))
+                        .or_insert(NodeRecord {
+                            raw_id,
+                            registry_properties: properties,
+                            detail_properties: None,
+                            state: PipeWireNodeState::Unknown,
+                            raw_state: i32::MIN,
+                            state_error: None,
+                            input_ports: 0,
+                            output_ports: 0,
+                            ready: false,
+                        });
                 }
                 PipeWireDelta::NodeInfo(info) => self.apply_node_info(info)?,
+                PipeWireDelta::NodeTracking { raw_id, tracked } => {
+                    if let Some(node) = self.nodes.get_mut(&raw_id)
+                        && !tracked
+                    {
+                        node.detail_properties = None;
+                        node.state = PipeWireNodeState::Unknown;
+                        node.raw_state = i32::MIN;
+                        node.state_error = None;
+                        node.input_ports = 0;
+                        node.output_ports = 0;
+                        node.ready = false;
+                    }
+                }
                 PipeWireDelta::NodeRemoved(raw_id) => {
                     self.nodes.remove(&raw_id);
                     self.links.retain(|_, link| {
@@ -220,7 +239,7 @@ impl PipeWireReconciler {
             return Ok(());
         };
         if let Some(properties) = info.properties {
-            node.properties = properties;
+            node.detail_properties = Some(properties);
         }
         node.state = info.state;
         node.raw_state = info.raw_state;
@@ -333,6 +352,7 @@ impl PipeWireReconciler {
         });
         let link_groups = self.build_link_groups(&node_ids)?;
         let defaults = PipeWireDefaultsSnapshot {
+            metadata_available: self.active_metadata.is_some(),
             actual_sink: self.default_target(DEFAULT_AUDIO_SINK),
             actual_source: self.default_target(DEFAULT_AUDIO_SOURCE),
             configured_sink: self.default_target(DEFAULT_CONFIGURED_AUDIO_SINK),
@@ -359,13 +379,17 @@ impl PipeWireReconciler {
     }
 
     fn node_snapshot(&self, node: &NodeRecord) -> Result<PipeWireNodeSnapshot, PipeWireModelError> {
-        let name = property_text(&node.properties, "node.name", "node name")?;
-        let nickname = property_text(&node.properties, "node.nick", "node nickname")?;
-        let description = property_text(&node.properties, "node.description", "node description")?;
-        let media_class = property_text(&node.properties, "media.class", "media class")?;
+        let properties = node
+            .detail_properties
+            .as_ref()
+            .unwrap_or(&node.registry_properties);
+        let name = property_text(properties, "node.name", "node name")?;
+        let nickname = property_text(properties, "node.nick", "node nickname")?;
+        let description = property_text(properties, "node.description", "node description")?;
+        let media_class = property_text(properties, "media.class", "media class")?;
         let classification = PipeWireNodeClassification::from_properties(
             media_class.as_deref(),
-            &node.properties,
+            properties,
             node.input_ports,
             node.output_ports,
         );
@@ -385,7 +409,7 @@ impl PipeWireReconciler {
             state_error: node.state_error.clone(),
             input_ports: node.input_ports,
             output_ports: node.output_ports,
-            properties: node.properties.clone(),
+            properties: properties.clone(),
             audio_capable: classification.audio,
             ready: node.ready,
         })
@@ -496,7 +520,13 @@ impl PipeWireReconciler {
             node: value.name.as_ref().and_then(|name| {
                 self.nodes
                     .values()
-                    .find(|node| node.properties.get("node.name") == Some(name))
+                    .find(|node| {
+                        node.detail_properties
+                            .as_ref()
+                            .unwrap_or(&node.registry_properties)
+                            .get("node.name")
+                            == Some(name)
+                    })
                     .map(|node| PipeWireNodeId {
                         connection_generation: self.generation,
                         global_id: node.raw_id,
@@ -506,17 +536,11 @@ impl PipeWireReconciler {
     }
 }
 
-fn node_sort_key(node: &PipeWireNodeSnapshot) -> (u8, &str, &str) {
-    let kind = if node.classification.audio {
-        0
-    } else if node.classification.video {
-        1
-    } else {
-        2
-    };
+fn node_sort_key(node: &PipeWireNodeSnapshot) -> (PipeWireNodeType, &str, &str, &str) {
     (
-        kind,
+        PipeWireNodeType::from_node(node),
         node.media_class.as_deref().unwrap_or(""),
+        node.description.as_deref().unwrap_or(""),
         node.name.as_deref().unwrap_or(""),
     )
 }

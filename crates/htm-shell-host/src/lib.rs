@@ -1,4 +1,4 @@
-//! Experimental compositor-neutral layer-shell presentation for HTMShell.
+//! Layer-shell presentation for HTMShell.
 //!
 //! This crate is intentionally narrow. It presents one parse-once HTMShell
 //! document through standard Wayland objects and wlr layer shell.
@@ -26,7 +26,7 @@ pub use manifest::{
     SurfaceKind, SurfacePreset, SurfaceTemplate, ValidatedManifest,
 };
 pub use output::{OutputCatalog, OutputEligibility, OutputKey, OutputRecord};
-pub use pipewire::run_pipewire_graph_diagnostic_json;
+pub use pipewire::{PipeWireNodeDirection, PipeWireNodeType, run_pipewire_graph_diagnostic_json};
 pub use pixel::{Argb8888Layout, convert_premultiplied_rgba_to_argb8888};
 pub use power::{
     BatteryAvailability, BatteryChargeState, BatteryServiceSummary, BatterySnapshot,

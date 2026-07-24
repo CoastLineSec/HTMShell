@@ -822,15 +822,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
-name = "htm-compositor-client"
-version = "0.0.0"
-dependencies = [
- "wayland-backend",
- "wayland-client",
- "wayland-scanner",
-]
-
-[[package]]
 name = "htm-headless"
 version = "0.0.0"
 dependencies = [
@@ -859,17 +850,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "htm-shell-conformance"
-version = "0.0.0"
-dependencies = [
- "htm-compositor-client",
- "rustix",
- "serde",
- "serde_json",
- "wayland-client",
-]
-
-[[package]]
 name = "htm-shell-host"
 version = "0.0.0"
 dependencies = [
@@ -884,16 +864,6 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
-]
-
-[[package]]
-name = "htm-shell-probe"
-version = "0.0.0"
-dependencies = [
- "htm-compositor-client",
- "rustix",
- "wayland-client",
- "wayland-protocols",
 ]
 
 [[package]]
@@ -1892,12 +1862,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "scoped-tls"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
-
-[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2724,7 +2688,6 @@ dependencies = [
  "cc",
  "downcast-rs",
  "rustix",
- "scoped-tls",
  "smallvec",
  "wayland-sys",
 ]
@@ -2783,8 +2746,6 @@ version = "0.31.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8eab23fefc9e41f8e841df4a9c707e8a8c4ed26e944ef69297184de2785e3be"
 dependencies = [
- "dlib",
- "log",
  "pkg-config",
 ]
 

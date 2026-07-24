@@ -172,6 +172,7 @@ pub struct PipeWireDefaultTarget {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PipeWireDefaultsSnapshot {
+    pub metadata_available: bool,
     pub actual_sink: PipeWireDefaultTarget,
     pub actual_source: PipeWireDefaultTarget,
     pub configured_sink: PipeWireDefaultTarget,
@@ -277,6 +278,10 @@ pub(crate) enum PipeWireDelta {
         properties: BTreeMap<String, String>,
     },
     NodeInfo(RawNodeInfo),
+    NodeTracking {
+        raw_id: u32,
+        tracked: bool,
+    },
     NodeRemoved(u32),
     LinkAdded {
         raw_id: u32,

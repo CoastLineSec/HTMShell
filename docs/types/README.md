@@ -50,3 +50,14 @@ Process-scoped UPower devices and power-profile state.
 - [`Battery`](HTMShell.Services.UPower/Battery.md)
 - [`UPowerDevice`](HTMShell.Services.UPower/UPowerDevice.md)
 - [`PowerProfiles`](HTMShell.Services.UPower/PowerProfiles.md)
+
+## `HTMShell.Services.PipeWire`
+
+Process-scoped read-only PipeWire node state.
+
+- [`PipeWire`](HTMShell.Services.PipeWire/PipeWire.md)
+- [`Node`](HTMShell.Services.PipeWire/Node.md)
+- [`NodeType`](HTMShell.Services.PipeWire/NodeType.md)
+- [`NodeState`](HTMShell.Services.PipeWire/NodeState.md)
+- [`Defaults`](HTMShell.Services.PipeWire/Defaults.md)
+- [`Properties`](HTMShell.Services.PipeWire/Properties.md)

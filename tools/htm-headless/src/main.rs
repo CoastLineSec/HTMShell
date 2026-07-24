@@ -22,7 +22,7 @@ fn main() {
             eprintln!("htm-headless: expected exactly one package directory");
             std::process::exit(2);
         }
-        run_gate_a(PathBuf::from(first));
+        run_headless(PathBuf::from(first));
     }
 }
 
@@ -31,12 +31,12 @@ fn usage() {
     eprintln!("       htm-headless mutate <shell-package-directory>");
 }
 
-fn run_gate_a(package: PathBuf) {
+fn run_headless(package: PathBuf) {
     match run_package(&package) {
         Ok(run) => {
             let measurements = &run.measurements;
             println!(
-                "HTMShell Gate A succeeded: {} phase(s), 1440x900 logical, scale 1.0, SDR/sRGB",
+                "HTMShell headless run succeeded: {} phase(s), 1440x900 logical, scale 1.0, SDR/sRGB",
                 run.artifacts.len()
             );
             println!(
@@ -78,7 +78,7 @@ fn run_mutation(package: PathBuf) {
     match run_incremental_experiment(&package) {
         Ok(run) => {
             println!(
-                "HTMShell Gate A.1 completed: parsed={} document-retained={} phases={} total={:.2}ms",
+                "HTMShell headless mutation run completed: parsed={} document-retained={} phases={} total={:.2}ms",
                 run.document_parse_count,
                 run.document_identity_preserved,
                 run.artifacts.len(),

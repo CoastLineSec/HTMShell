@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="panel-root" class="panel">
+    <strong>PipeWire</strong>
+    <span id="availability"
+          data-htm-element="state-token"
+          data-htm-bind="pipewire.availability">
+      <span id="availability-text"
+            data-htm-element="state-text"
+            data-htm-bind="pipewire.availability"></span>
+    </span>
+    <span class="default-label">Output:</span>
+    <span id="default-output"
+          data-htm-element="state-text"
+          data-htm-bind="pipewire.default_sink.description"></span>
+    <button id="overlay-toggle"
+            data-htm-element="action-button"
+            data-htm-action="overlay.toggle">Inspect graph</button>
+  </main>
+</body>
+</html>

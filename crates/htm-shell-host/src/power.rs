@@ -904,6 +904,7 @@ fn device_repeat_item(device: &UPowerDeviceSnapshot) -> RepeatItemSnapshot {
         text,
         tokens,
         values,
+        properties: BTreeMap::new(),
     }
 }
 
@@ -917,6 +918,7 @@ fn hold_repeat_item(hold: &PowerProfileHold) -> RepeatItemSnapshot {
         ]),
         tokens: BTreeMap::from([(ItemBindingKey::Profile, hold.profile.token())]),
         values: BTreeMap::new(),
+        properties: BTreeMap::new(),
     }
 }
 
@@ -3352,7 +3354,7 @@ mod tests {
         let item = &repeat.items[1];
         for key in ItemBindingKey::ALL
             .into_iter()
-            .filter(|key| key.source() == RepeatSource::UPowerDevices)
+            .filter(|key| key.supports_source(RepeatSource::UPowerDevices))
         {
             assert!(
                 item.text.contains_key(&key)

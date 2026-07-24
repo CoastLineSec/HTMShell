@@ -4,15 +4,15 @@ use crate::clock::{ClockService, ClockServiceSummary, ClockUpdate};
 use crate::lifecycle::LayerLifecycle;
 use crate::manifest::{SurfaceKind as ManifestSurfaceKind, ValidatedManifest};
 use crate::output::{OutputCatalog, OutputEligibility, OutputKey};
-use crate::pipewire::{PipeWireSource, duration_to_timespec};
+use crate::pipewire::{PipeWireDemand, PipeWireSnapshot, PipeWireSource, duration_to_timespec};
 use crate::power::{
     BatteryServiceSummary, PowerFanoutMetrics, PowerProfile, PowerService, PowerSnapshot,
 };
 use crate::scale::{PresentationProfile, SurfaceScaleState};
 use crate::scheduler::{FrameScheduler, ScheduleDecision};
 use htm_runtime::{
-    LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind, LiveFrame, RepeatSource,
-    StateBindingKey, StateToken,
+    LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind, LiveFrame,
+    MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS, RepeatSource, StateBindingKey, StateToken,
 };
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::fd::BorrowedFd;
@@ -580,8 +580,6 @@ impl State {
             SessionOptions::Multi(options) => options.automatic_overlay_cycles,
             SessionOptions::Single(_) | SessionOptions::Manifest(_) => 0,
         };
-        let mut pipewire = PipeWireSource::default();
-        pipewire.start();
         Self {
             options,
             started,
@@ -641,7 +639,7 @@ impl State {
             failure: None,
             clock: ClockService::default(),
             battery: PowerService::default(),
-            pipewire,
+            pipewire: PipeWireSource::default(),
         }
     }
 
@@ -1180,6 +1178,10 @@ impl State {
             return Err(error);
         }
         self.reconcile_battery_subscribers();
+        if let Err(error) = self.reconcile_pipewire_demand() {
+            self.destroy_output_instance(key);
+            return Err(error);
+        }
         self.maybe_stop_after_output_events();
         Ok(())
     }
@@ -1219,6 +1221,9 @@ impl State {
             self.fail(format!("clock subscription teardown failed: {error}"));
         }
         self.reconcile_battery_subscribers();
+        if let Err(error) = self.reconcile_pipewire_demand() {
+            self.fail(format!("PipeWire demand teardown failed: {error}"));
+        }
     }
 
     fn clock_subscriber_count(&self) -> usize {
@@ -1328,6 +1333,84 @@ impl State {
         if upower > previous_upower || profiles > previous_profiles {
             let snapshot = snapshot.unwrap_or_else(|| self.battery.current_snapshot().clone());
             self.fanout_battery_snapshot(&snapshot);
+        }
+    }
+
+    fn aggregate_pipewire_demand(&self) -> Result<PipeWireDemand, ShellHostError> {
+        let mut demand = PipeWireDemand::default();
+        for runtime in self
+            .surfaces
+            .iter()
+            .filter_map(|surface| surface.runtime.as_ref())
+        {
+            demand.add_document(&runtime.pipewire_demand());
+        }
+        if demand.property_keys.len() > MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS {
+            return Err(ShellHostError::Wayland(format!(
+                "PipeWire property-key demand exceeds {MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS} unique keys"
+            )));
+        }
+        Ok(demand)
+    }
+
+    fn reconcile_pipewire_demand(&mut self) -> Result<(), ShellHostError> {
+        let demand = self.aggregate_pipewire_demand()?;
+        let demand_changed = self.pipewire.set_demand(demand.clone());
+        if demand_changed || !demand.is_empty() {
+            let snapshot = self.pipewire.snapshot().clone();
+            self.fanout_pipewire_snapshot(&snapshot, &demand);
+        }
+        Ok(())
+    }
+
+    fn fanout_current_pipewire_snapshot(&mut self) {
+        let Ok(demand) = self.aggregate_pipewire_demand() else {
+            return;
+        };
+        let snapshot = self.pipewire.snapshot().clone();
+        self.fanout_pipewire_snapshot(&snapshot, &demand);
+    }
+
+    fn fanout_pipewire_snapshot(&mut self, snapshot: &PipeWireSnapshot, demand: &PipeWireDemand) {
+        let projections = snapshot.public_projections(demand);
+        for surface in &mut self.surfaces {
+            let Some(runtime) = surface.runtime.as_mut() else {
+                continue;
+            };
+            if runtime.pipewire_demand().is_empty() {
+                continue;
+            }
+            let result = (|| {
+                let state = runtime.apply_bound_state(&projections.text, &projections.tokens)?;
+                let values = runtime.apply_bound_values(&projections.values)?;
+                let booleans = runtime.apply_bound_booleans(&projections.booleans)?;
+                let mut changed = state
+                    .changed_elements
+                    .saturating_add(values.changed_elements)
+                    .saturating_add(booleans.changed_elements);
+                for repeat in &projections.repeats {
+                    let mutation = runtime.apply_repeat_source(repeat)?;
+                    changed = changed
+                        .saturating_add(mutation.insertions)
+                        .saturating_add(mutation.removals)
+                        .saturating_add(mutation.moves)
+                        .saturating_add(mutation.property_updates);
+                }
+                Ok::<usize, htm_runtime::RuntimeError>(changed)
+            })();
+            match result {
+                Ok(changed) if changed > 0 && surface.desired_mapped => {
+                    surface
+                        .pending_binding_mutation_started
+                        .get_or_insert_with(Instant::now);
+                    surface.scheduler.mark_dirty();
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!(
+                    "htmshell-live: PipeWire update for surface {} was contained: {error}",
+                    surface.owner
+                ),
+            }
         }
     }
 
@@ -2980,6 +3063,7 @@ fn run_session(options: SessionOptions) -> Result<State, ShellHostError> {
             > 0
         {}
         state.maybe_render_all(&qh)?;
+        state.reconcile_pipewire_demand()?;
         connection.flush().map_err(ShellHostError::wayland)?;
         state.maybe_reopen_automatic_overlay();
         state.maybe_render_all(&qh)?;
@@ -3025,7 +3109,9 @@ fn wait_for_event_sources(
     event_queue: &mut wayland_client::EventQueue<State>,
     state: &mut State,
 ) -> Result<(), ShellHostError> {
-    state.pipewire.reconnect_if_due(Instant::now());
+    if state.pipewire.reconnect_if_due(Instant::now()) {
+        state.fanout_current_pipewire_snapshot();
+    }
     if state.battery.needs_immediate_dispatch() {
         state.handle_battery_immediate_dispatch();
         return Ok(());
@@ -3153,13 +3239,18 @@ fn wait_for_event_sources(
         }
     }
     if let Some(events) = pipewire_events {
-        match pipewire_poll_ready(events) {
+        let changed = match pipewire_poll_ready(events) {
             Ok(true) => state.pipewire.dispatch_ready(),
-            Ok(false) => {}
+            Ok(false) => false,
             Err(error) => state.pipewire.handle_poll_error(error),
+        };
+        if changed {
+            state.fanout_current_pipewire_snapshot();
         }
     }
-    state.pipewire.reconnect_if_due(Instant::now());
+    if state.pipewire.reconnect_if_due(Instant::now()) {
+        state.fanout_current_pipewire_snapshot();
+    }
     Ok(())
 }
 

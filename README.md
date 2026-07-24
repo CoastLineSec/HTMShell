@@ -8,7 +8,7 @@ The goal is to make it possible to build panels, launchers, widgets, overlays, n
 
 ## Vision
 
-HTML and CSS provide a mature and flexible language for designing interfaces. HTMShell applies that authoring model to the desktop while keeping rendering, input, and compositor integration native.
+HTML and CSS provide a mature and flexible language for designing interfaces. HTMShell applies that authoring model to the desktop while keeping rendering, input, and Wayland presentation native.
 
 ```text
 HTML and CSS
@@ -17,91 +17,21 @@ HTML and CSS
 HTMShell runtime
       │
       ▼
-Portable Wayland shell presentation
+Wayland layer-shell presentation
       │
       ▼
-Supporting Wayland compositor
-
-Optional later:
-enhanced HTMShell compositor integration
+Wayland compositor
 ```
-
-HTMShell is not intended to render websites or recreate a full browser platform. It uses a focused desktop-oriented HTML and CSS profile designed specifically for shell interfaces.
 
 ## Design goals
 
 * Real HTML and CSS authoring
 * Native rendering without an embedded browser
-* Compositor-neutral presentation through advertised Wayland protocols
+* Layer-shell panels and overlays
 * Standard Wayland surface and input lifecycles
-* Semantic shell roles instead of compositor-specific render stages
 * Incremental document updates
-* Strong separation between the shell runtime and compositor
-* Support for advanced compositor-native materials and effects
-* Portable support across compatible Wayland compositors
 * Extensible theming and component development
-
-## Compositor integration
-
-Layer shell is HTMShell's portable baseline presentation path. The runtime
-discovers standard and existing extension protocols through the Wayland
-registry; it does not identify the compositor or select a compositor-specific
-implementation.
-
-The experimental HTMShell compositor contract remains available as an optional
-path for future integration that existing protocols cannot express. It is not
-required for basic shell presentation. Hyprland is the first validation
-environment, but neither the runtime nor the portable layer-shell path contains
-Hyprland-specific behavior.
-
-## Current status
-
-HTMShell is in early experimental development.
-
-The project has demonstrated:
-
-* Headless parsing and rendering of local HTML and CSS
-* Block, flexbox, and grid layouts
-* Native text shaping
-* Local images and SVG
-* Host-driven document mutation
-* Dynamic node insertion and removal
-* Stylesheet replacement without rebuilding the document
-* Deterministic scene diagnostics
-* A compositor-neutral Wayland shell-surface protocol prototype
-* Standard Wayland buffer and frame lifecycles
-* Semantic compositor-controlled shell placement
-* An experimental live layer-shell presentation path using shared-memory buffers
-* One portable host process managing independent panel and overlay layer surfaces
-* A validated local surface manifest expanded into independent instances for each eligible output
-* Generation-safe output addition and removal through standard Wayland registry events
-* A small built-in registry for typed text, finite visual state, and actions on ordinary HTML
-* Event-driven clock and date presentation with validated formats, named time zones, and one shared scheduler
-* Event-driven aggregate and per-device UPower state plus optional Power Profiles control
-
-The portable host renders at the compositor's preferred fractional scale when
-fractional-scale and viewporter are available, with scale 1 as the fallback.
-Native state is supplied through typed bindings without adding JavaScript or
-per-element timers. Finite state can be projected into a runtime-owned HTML
-attribute for ordinary CSS selectors; arbitrary attribute, class, and style
-binding are not supported. Presentation remains experimental CPU-rendered
-`wl_shm`; HTMShell is not yet a usable desktop shell, and no stable release is
-available.
-
-## Non-goals
-
-HTMShell is not:
-
-* A web browser
-* A WebView wrapper
-* An Electron application
-* A GTK or Qt shell
-* A QML or QuickShell replacement layer
-* A mechanism for rendering arbitrary websites on the desktop
-* A compositor-specific shell tied permanently to one window manager
 
 ## Project status
 
-The APIs, protocol, runtime architecture, and supported CSS profile are still experimental and may change substantially as development continues.
-
-Contributions and compositor integration discussions will become more practical once the core contract and runtime boundaries are stable.
+The authoring API, runtime, and supported CSS profile are experimental and may change as development continues.
