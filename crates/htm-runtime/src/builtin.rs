@@ -1,13 +1,16 @@
 use crate::identity::{IdentityRegistry, author_slots};
 use crate::{
     ClockFormat, ClockTimeZone, ExperimentalDocumentIdentity, ExperimentalNodeIdentity,
-    ItemBindingKey, MAX_CLOCK_DECLARATIONS_PER_DOCUMENT, MAX_PIPEWIRE_BINDINGS_PER_ITEM,
-    MAX_PIPEWIRE_PROPERTY_KEY_BYTES, MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT,
-    MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM, MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT,
-    MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE, MAX_REPEAT_DECLARATIONS_PER_DOCUMENT,
-    MAX_REPEAT_TEMPLATE_DEPTH, RepeatSource, RuntimeError, StateValueFormat,
+    ItemBindingKey, MAX_CLOCK_DECLARATIONS_PER_DOCUMENT, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT,
+    MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM, MAX_PIPEWIRE_BINDINGS_PER_ITEM,
+    MAX_PIPEWIRE_PERCEPTUAL_VOLUME, MAX_PIPEWIRE_PROPERTY_KEY_BYTES,
+    MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT, MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM,
+    MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_RANGE_CONTROLS_PER_DOCUMENT,
+    MAX_RANGE_CONTROLS_PER_ITEM, MAX_RANGE_NUMBER_BYTES, MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE,
+    MAX_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_REPEAT_TEMPLATE_DEPTH, RepeatSource, RuntimeError,
+    StateValueFormat,
 };
-use blitz_dom::node::NodeData;
+use blitz_dom::node::{ElementData, NodeData};
 use blitz_dom::{LocalName, local_name};
 use blitz_html::HtmlDocument;
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,6 +39,7 @@ pub enum BuiltInElementKind {
     ClockText,
     StateValue,
     Repeat,
+    RangeControl,
 }
 
 impl BuiltInElementKind {
@@ -47,6 +51,7 @@ impl BuiltInElementKind {
             Self::ClockText => "clock-text",
             Self::StateValue => "state-value",
             Self::Repeat => "repeat",
+            Self::RangeControl => "range-control",
         }
     }
 
@@ -58,6 +63,7 @@ impl BuiltInElementKind {
             "clock-text" => Some(Self::ClockText),
             "state-value" => Some(Self::StateValue),
             "repeat" => Some(Self::Repeat),
+            "range-control" => Some(Self::RangeControl),
             _ => None,
         }
     }
@@ -119,6 +125,26 @@ pub enum StateBindingKey {
     PipeWireConfiguredSourceDescription,
     PipeWireConfiguredSourceMediaClass,
     PipeWireConfiguredSourceRawId,
+    PipeWireDefaultSinkAudioStatus,
+    PipeWireDefaultSinkVolume,
+    PipeWireDefaultSinkMuteState,
+    PipeWireDefaultSinkCanSetVolume,
+    PipeWireDefaultSinkCanSetMute,
+    PipeWireDefaultSourceAudioStatus,
+    PipeWireDefaultSourceVolume,
+    PipeWireDefaultSourceMuteState,
+    PipeWireDefaultSourceCanSetVolume,
+    PipeWireDefaultSourceCanSetMute,
+    PipeWireConfiguredSinkAudioStatus,
+    PipeWireConfiguredSinkVolume,
+    PipeWireConfiguredSinkMuteState,
+    PipeWireConfiguredSinkCanSetVolume,
+    PipeWireConfiguredSinkCanSetMute,
+    PipeWireConfiguredSourceAudioStatus,
+    PipeWireConfiguredSourceVolume,
+    PipeWireConfiguredSourceMuteState,
+    PipeWireConfiguredSourceCanSetVolume,
+    PipeWireConfiguredSourceCanSetMute,
     OutputLabel,
     OutputScale,
     SurfaceTemplateId,
@@ -129,7 +155,7 @@ pub enum StateBindingKey {
 }
 
 impl StateBindingKey {
-    pub const ALL: [Self; 61] = [
+    pub const ALL: [Self; 81] = [
         Self::ClockTime,
         Self::UPowerAvailability,
         Self::UPowerOnBattery,
@@ -184,6 +210,26 @@ impl StateBindingKey {
         Self::PipeWireConfiguredSourceDescription,
         Self::PipeWireConfiguredSourceMediaClass,
         Self::PipeWireConfiguredSourceRawId,
+        Self::PipeWireDefaultSinkAudioStatus,
+        Self::PipeWireDefaultSinkVolume,
+        Self::PipeWireDefaultSinkMuteState,
+        Self::PipeWireDefaultSinkCanSetVolume,
+        Self::PipeWireDefaultSinkCanSetMute,
+        Self::PipeWireDefaultSourceAudioStatus,
+        Self::PipeWireDefaultSourceVolume,
+        Self::PipeWireDefaultSourceMuteState,
+        Self::PipeWireDefaultSourceCanSetVolume,
+        Self::PipeWireDefaultSourceCanSetMute,
+        Self::PipeWireConfiguredSinkAudioStatus,
+        Self::PipeWireConfiguredSinkVolume,
+        Self::PipeWireConfiguredSinkMuteState,
+        Self::PipeWireConfiguredSinkCanSetVolume,
+        Self::PipeWireConfiguredSinkCanSetMute,
+        Self::PipeWireConfiguredSourceAudioStatus,
+        Self::PipeWireConfiguredSourceVolume,
+        Self::PipeWireConfiguredSourceMuteState,
+        Self::PipeWireConfiguredSourceCanSetVolume,
+        Self::PipeWireConfiguredSourceCanSetMute,
         Self::OutputLabel,
         Self::OutputScale,
         Self::SurfaceTemplateId,
@@ -249,6 +295,28 @@ impl StateBindingKey {
             Self::PipeWireConfiguredSourceDescription => "pipewire.configured_source.description",
             Self::PipeWireConfiguredSourceMediaClass => "pipewire.configured_source.media_class",
             Self::PipeWireConfiguredSourceRawId => "pipewire.configured_source.raw_id",
+            Self::PipeWireDefaultSinkAudioStatus => "pipewire.default_sink.audio_status",
+            Self::PipeWireDefaultSinkVolume => "pipewire.default_sink.volume",
+            Self::PipeWireDefaultSinkMuteState => "pipewire.default_sink.mute_state",
+            Self::PipeWireDefaultSinkCanSetVolume => "pipewire.default_sink.can_set_volume",
+            Self::PipeWireDefaultSinkCanSetMute => "pipewire.default_sink.can_set_mute",
+            Self::PipeWireDefaultSourceAudioStatus => "pipewire.default_source.audio_status",
+            Self::PipeWireDefaultSourceVolume => "pipewire.default_source.volume",
+            Self::PipeWireDefaultSourceMuteState => "pipewire.default_source.mute_state",
+            Self::PipeWireDefaultSourceCanSetVolume => "pipewire.default_source.can_set_volume",
+            Self::PipeWireDefaultSourceCanSetMute => "pipewire.default_source.can_set_mute",
+            Self::PipeWireConfiguredSinkAudioStatus => "pipewire.configured_sink.audio_status",
+            Self::PipeWireConfiguredSinkVolume => "pipewire.configured_sink.volume",
+            Self::PipeWireConfiguredSinkMuteState => "pipewire.configured_sink.mute_state",
+            Self::PipeWireConfiguredSinkCanSetVolume => "pipewire.configured_sink.can_set_volume",
+            Self::PipeWireConfiguredSinkCanSetMute => "pipewire.configured_sink.can_set_mute",
+            Self::PipeWireConfiguredSourceAudioStatus => "pipewire.configured_source.audio_status",
+            Self::PipeWireConfiguredSourceVolume => "pipewire.configured_source.volume",
+            Self::PipeWireConfiguredSourceMuteState => "pipewire.configured_source.mute_state",
+            Self::PipeWireConfiguredSourceCanSetVolume => {
+                "pipewire.configured_source.can_set_volume"
+            }
+            Self::PipeWireConfiguredSourceCanSetMute => "pipewire.configured_source.can_set_mute",
             Self::OutputLabel => "output.label",
             Self::OutputScale => "output.scale",
             Self::SurfaceTemplateId => "surface.template_id",
@@ -314,7 +382,27 @@ impl StateBindingKey {
             | Self::PipeWireConfiguredSourceNickname
             | Self::PipeWireConfiguredSourceDescription
             | Self::PipeWireConfiguredSourceMediaClass
-            | Self::PipeWireConfiguredSourceRawId => StateBindingScope::Process,
+            | Self::PipeWireConfiguredSourceRawId
+            | Self::PipeWireDefaultSinkAudioStatus
+            | Self::PipeWireDefaultSinkVolume
+            | Self::PipeWireDefaultSinkMuteState
+            | Self::PipeWireDefaultSinkCanSetVolume
+            | Self::PipeWireDefaultSinkCanSetMute
+            | Self::PipeWireDefaultSourceAudioStatus
+            | Self::PipeWireDefaultSourceVolume
+            | Self::PipeWireDefaultSourceMuteState
+            | Self::PipeWireDefaultSourceCanSetVolume
+            | Self::PipeWireDefaultSourceCanSetMute
+            | Self::PipeWireConfiguredSinkAudioStatus
+            | Self::PipeWireConfiguredSinkVolume
+            | Self::PipeWireConfiguredSinkMuteState
+            | Self::PipeWireConfiguredSinkCanSetVolume
+            | Self::PipeWireConfiguredSinkCanSetMute
+            | Self::PipeWireConfiguredSourceAudioStatus
+            | Self::PipeWireConfiguredSourceVolume
+            | Self::PipeWireConfiguredSourceMuteState
+            | Self::PipeWireConfiguredSourceCanSetVolume
+            | Self::PipeWireConfiguredSourceCanSetMute => StateBindingScope::Process,
             Self::OutputLabel
             | Self::OutputScale
             | Self::OverlayStatus
@@ -368,6 +456,22 @@ impl StateBindingKey {
                     | Self::PipeWireConfiguredSourceNickname
                     | Self::PipeWireConfiguredSourceDescription
                     | Self::PipeWireConfiguredSourceMediaClass
+                    | Self::PipeWireDefaultSinkAudioStatus
+                    | Self::PipeWireDefaultSinkMuteState
+                    | Self::PipeWireDefaultSinkCanSetVolume
+                    | Self::PipeWireDefaultSinkCanSetMute
+                    | Self::PipeWireDefaultSourceAudioStatus
+                    | Self::PipeWireDefaultSourceMuteState
+                    | Self::PipeWireDefaultSourceCanSetVolume
+                    | Self::PipeWireDefaultSourceCanSetMute
+                    | Self::PipeWireConfiguredSinkAudioStatus
+                    | Self::PipeWireConfiguredSinkMuteState
+                    | Self::PipeWireConfiguredSinkCanSetVolume
+                    | Self::PipeWireConfiguredSinkCanSetMute
+                    | Self::PipeWireConfiguredSourceAudioStatus
+                    | Self::PipeWireConfiguredSourceMuteState
+                    | Self::PipeWireConfiguredSourceCanSetVolume
+                    | Self::PipeWireConfiguredSourceCanSetMute
                     | Self::OutputLabel
                     | Self::OutputScale
                     | Self::SurfaceTemplateId
@@ -397,6 +501,22 @@ impl StateBindingKey {
                     | Self::PipeWireDefaultSourceStatus
                     | Self::PipeWireConfiguredSinkStatus
                     | Self::PipeWireConfiguredSourceStatus
+                    | Self::PipeWireDefaultSinkAudioStatus
+                    | Self::PipeWireDefaultSinkMuteState
+                    | Self::PipeWireDefaultSinkCanSetVolume
+                    | Self::PipeWireDefaultSinkCanSetMute
+                    | Self::PipeWireDefaultSourceAudioStatus
+                    | Self::PipeWireDefaultSourceMuteState
+                    | Self::PipeWireDefaultSourceCanSetVolume
+                    | Self::PipeWireDefaultSourceCanSetMute
+                    | Self::PipeWireConfiguredSinkAudioStatus
+                    | Self::PipeWireConfiguredSinkMuteState
+                    | Self::PipeWireConfiguredSinkCanSetVolume
+                    | Self::PipeWireConfiguredSinkCanSetMute
+                    | Self::PipeWireConfiguredSourceAudioStatus
+                    | Self::PipeWireConfiguredSourceMuteState
+                    | Self::PipeWireConfiguredSourceCanSetVolume
+                    | Self::PipeWireConfiguredSourceCanSetMute
                     | Self::SurfaceScaleProfile
                     | Self::OverlayStatus
             ),
@@ -416,12 +536,24 @@ impl StateBindingKey {
                     | Self::PipeWireDefaultSourceRawId
                     | Self::PipeWireConfiguredSinkRawId
                     | Self::PipeWireConfiguredSourceRawId
+                    | Self::PipeWireDefaultSinkVolume
+                    | Self::PipeWireDefaultSourceVolume
+                    | Self::PipeWireConfiguredSinkVolume
+                    | Self::PipeWireConfiguredSourceVolume
             ),
             StateValueKind::Boolean => matches!(
                 self,
                 Self::PowerProfileAvailability
                     | Self::PowerProfilePerformanceAvailable
                     | Self::PipeWireReady
+                    | Self::PipeWireDefaultSinkCanSetVolume
+                    | Self::PipeWireDefaultSinkCanSetMute
+                    | Self::PipeWireDefaultSourceCanSetVolume
+                    | Self::PipeWireDefaultSourceCanSetMute
+                    | Self::PipeWireConfiguredSinkCanSetVolume
+                    | Self::PipeWireConfiguredSinkCanSetMute
+                    | Self::PipeWireConfiguredSourceCanSetVolume
+                    | Self::PipeWireConfiguredSourceCanSetMute
             ),
         }
     }
@@ -444,6 +576,12 @@ impl StateBindingKey {
             Self::BatteryChangeRate => &[StateValueFormat::Raw, StateValueFormat::Power],
             Self::BatteryTimeToEmpty | Self::BatteryTimeToFull => {
                 &[StateValueFormat::Raw, StateValueFormat::Duration]
+            }
+            Self::PipeWireDefaultSinkVolume
+            | Self::PipeWireDefaultSourceVolume
+            | Self::PipeWireConfiguredSinkVolume
+            | Self::PipeWireConfiguredSourceVolume => {
+                &[StateValueFormat::Raw, StateValueFormat::Percent]
             }
             _ => &[],
         }
@@ -502,6 +640,22 @@ impl StateBindingKey {
             | Self::PipeWireDefaultSourceStatus
             | Self::PipeWireConfiguredSinkStatus
             | Self::PipeWireConfiguredSourceStatus => &["unavailable", "unresolved", "available"],
+            Self::PipeWireDefaultSinkAudioStatus
+            | Self::PipeWireDefaultSourceAudioStatus
+            | Self::PipeWireConfiguredSinkAudioStatus
+            | Self::PipeWireConfiguredSourceAudioStatus => &["unsupported", "unavailable", "ready"],
+            Self::PipeWireDefaultSinkMuteState
+            | Self::PipeWireDefaultSourceMuteState
+            | Self::PipeWireConfiguredSinkMuteState
+            | Self::PipeWireConfiguredSourceMuteState => &["unavailable", "muted", "unmuted"],
+            Self::PipeWireDefaultSinkCanSetVolume
+            | Self::PipeWireDefaultSinkCanSetMute
+            | Self::PipeWireDefaultSourceCanSetVolume
+            | Self::PipeWireDefaultSourceCanSetMute
+            | Self::PipeWireConfiguredSinkCanSetVolume
+            | Self::PipeWireConfiguredSinkCanSetMute
+            | Self::PipeWireConfiguredSourceCanSetVolume
+            | Self::PipeWireConfiguredSourceCanSetMute => &["true", "false"],
             _ => &[],
         }
     }
@@ -612,6 +766,34 @@ impl std::str::FromStr for StateBindingKey {
                 Ok(Self::PipeWireConfiguredSourceMediaClass)
             }
             "pipewire.configured_source.raw_id" => Ok(Self::PipeWireConfiguredSourceRawId),
+            "pipewire.default_sink.audio_status" => Ok(Self::PipeWireDefaultSinkAudioStatus),
+            "pipewire.default_sink.volume" => Ok(Self::PipeWireDefaultSinkVolume),
+            "pipewire.default_sink.mute_state" => Ok(Self::PipeWireDefaultSinkMuteState),
+            "pipewire.default_sink.can_set_volume" => Ok(Self::PipeWireDefaultSinkCanSetVolume),
+            "pipewire.default_sink.can_set_mute" => Ok(Self::PipeWireDefaultSinkCanSetMute),
+            "pipewire.default_source.audio_status" => Ok(Self::PipeWireDefaultSourceAudioStatus),
+            "pipewire.default_source.volume" => Ok(Self::PipeWireDefaultSourceVolume),
+            "pipewire.default_source.mute_state" => Ok(Self::PipeWireDefaultSourceMuteState),
+            "pipewire.default_source.can_set_volume" => Ok(Self::PipeWireDefaultSourceCanSetVolume),
+            "pipewire.default_source.can_set_mute" => Ok(Self::PipeWireDefaultSourceCanSetMute),
+            "pipewire.configured_sink.audio_status" => Ok(Self::PipeWireConfiguredSinkAudioStatus),
+            "pipewire.configured_sink.volume" => Ok(Self::PipeWireConfiguredSinkVolume),
+            "pipewire.configured_sink.mute_state" => Ok(Self::PipeWireConfiguredSinkMuteState),
+            "pipewire.configured_sink.can_set_volume" => {
+                Ok(Self::PipeWireConfiguredSinkCanSetVolume)
+            }
+            "pipewire.configured_sink.can_set_mute" => Ok(Self::PipeWireConfiguredSinkCanSetMute),
+            "pipewire.configured_source.audio_status" => {
+                Ok(Self::PipeWireConfiguredSourceAudioStatus)
+            }
+            "pipewire.configured_source.volume" => Ok(Self::PipeWireConfiguredSourceVolume),
+            "pipewire.configured_source.mute_state" => Ok(Self::PipeWireConfiguredSourceMuteState),
+            "pipewire.configured_source.can_set_volume" => {
+                Ok(Self::PipeWireConfiguredSourceCanSetVolume)
+            }
+            "pipewire.configured_source.can_set_mute" => {
+                Ok(Self::PipeWireConfiguredSourceCanSetMute)
+            }
             "output.label" => Ok(Self::OutputLabel),
             "output.scale" => Ok(Self::OutputScale),
             "surface.template_id" => Ok(Self::SurfaceTemplateId),
@@ -725,10 +907,15 @@ pub enum StateToken {
     ConfiguredSink,
     ConfiguredSource,
     ConfiguredSinkAndSource,
+    Unsupported,
+    Muted,
+    Unmuted,
+    Pending,
+    Failed,
 }
 
 impl StateToken {
-    pub const ALL: [Self; 84] = [
+    pub const ALL: [Self; 89] = [
         Self::Open,
         Self::Closed,
         Self::Scale1,
@@ -813,6 +1000,11 @@ impl StateToken {
         Self::ConfiguredSink,
         Self::ConfiguredSource,
         Self::ConfiguredSinkAndSource,
+        Self::Unsupported,
+        Self::Muted,
+        Self::Unmuted,
+        Self::Pending,
+        Self::Failed,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -901,6 +1093,11 @@ impl StateToken {
             Self::ConfiguredSink => "configured-sink",
             Self::ConfiguredSource => "configured-source",
             Self::ConfiguredSinkAndSource => "configured-sink-and-source",
+            Self::Unsupported => "unsupported",
+            Self::Muted => "muted",
+            Self::Unmuted => "unmuted",
+            Self::Pending => "pending",
+            Self::Failed => "failed",
         }
     }
 
@@ -920,10 +1117,14 @@ pub enum ShellAction {
     PowerProfileSetPowerSaver,
     PowerProfileSetBalanced,
     PowerProfileSetPerformance,
+    PipeWireAudioMute,
+    PipeWireAudioUnmute,
+    PipeWireAudioToggleMute,
+    PipeWireAudioSetVolume,
 }
 
 impl ShellAction {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 13] = [
         Self::OverlayToggle,
         Self::OverlayClose,
         Self::OverlayActivate,
@@ -933,6 +1134,10 @@ impl ShellAction {
         Self::PowerProfileSetPowerSaver,
         Self::PowerProfileSetBalanced,
         Self::PowerProfileSetPerformance,
+        Self::PipeWireAudioMute,
+        Self::PipeWireAudioUnmute,
+        Self::PipeWireAudioToggleMute,
+        Self::PipeWireAudioSetVolume,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -946,6 +1151,10 @@ impl ShellAction {
             Self::PowerProfileSetPowerSaver => "power_profile.set_power_saver",
             Self::PowerProfileSetBalanced => "power_profile.set_balanced",
             Self::PowerProfileSetPerformance => "power_profile.set_performance",
+            Self::PipeWireAudioMute => "pipewire.audio.mute",
+            Self::PipeWireAudioUnmute => "pipewire.audio.unmute",
+            Self::PipeWireAudioToggleMute => "pipewire.audio.toggle_mute",
+            Self::PipeWireAudioSetVolume => "pipewire.audio.set_volume",
         }
     }
 }
@@ -964,6 +1173,10 @@ impl std::str::FromStr for ShellAction {
             "power_profile.set_power_saver" => Ok(Self::PowerProfileSetPowerSaver),
             "power_profile.set_balanced" => Ok(Self::PowerProfileSetBalanced),
             "power_profile.set_performance" => Ok(Self::PowerProfileSetPerformance),
+            "pipewire.audio.mute" => Ok(Self::PipeWireAudioMute),
+            "pipewire.audio.unmute" => Ok(Self::PipeWireAudioUnmute),
+            "pipewire.audio.toggle_mute" => Ok(Self::PipeWireAudioToggleMute),
+            "pipewire.audio.set_volume" => Ok(Self::PipeWireAudioSetVolume),
             _ => Err(()),
         }
     }
@@ -995,6 +1208,13 @@ impl BuiltInSurfaceKind {
                         | ShellAction::PowerProfileSetBalanced
                         | ShellAction::PowerProfileSetPerformance
                 )
+                | (
+                    Self::Panel | Self::Overlay,
+                    ShellAction::PipeWireAudioMute
+                        | ShellAction::PipeWireAudioUnmute
+                        | ShellAction::PipeWireAudioToggleMute
+                        | ShellAction::PipeWireAudioSetVolume
+                )
         )
     }
 }
@@ -1013,11 +1233,51 @@ pub struct ElementDeclaration {
     pub binding_kind: Option<StateValueKind>,
     pub action: Option<ShellAction>,
     pub action_target: Option<ElementInstanceId>,
+    pub pipewire_target: Option<PipeWireControlTarget>,
     pub clock: Option<ClockDeclaration>,
     pub disabled: bool,
     pub enabled_binding: Option<StateBindingKey>,
     pub value_format: Option<StateValueFormat>,
     pub repeat: Option<RepeatDeclaration>,
+    pub range: Option<RangeControlDeclaration>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipeWireControlTarget {
+    CurrentItem,
+    DefaultSink,
+    DefaultSource,
+}
+
+impl PipeWireControlTarget {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CurrentItem => "item",
+            Self::DefaultSink => "pipewire.default_sink",
+            Self::DefaultSource => "pipewire.default_source",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RangeNumber(u64);
+
+impl RangeNumber {
+    fn new(value: f64) -> Self {
+        Self(value.to_bits())
+    }
+
+    pub fn get(self) -> f64 {
+        f64::from_bits(self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RangeControlDeclaration {
+    pub target: PipeWireControlTarget,
+    pub minimum: RangeNumber,
+    pub maximum: RangeNumber,
+    pub step: RangeNumber,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1032,7 +1292,11 @@ pub struct ClockDeclaration {
 pub struct RepeatedElementDeclaration {
     pub local_id: String,
     pub kind: BuiltInElementKind,
-    pub binding: ItemBindingKey,
+    pub binding: Option<ItemBindingKey>,
+    pub action: Option<ShellAction>,
+    pub enabled_binding: Option<ItemBindingKey>,
+    pub range: Option<RangeControlDeclaration>,
+    pub disabled: bool,
     pub property_key: Option<String>,
     pub value_format: Option<StateValueFormat>,
     pub prototype_order: usize,
@@ -1080,7 +1344,7 @@ struct BuiltInElementDefinition {
     required_attribute: &'static str,
 }
 
-const DEFINITIONS: [BuiltInElementDefinition; 6] = [
+const DEFINITIONS: [BuiltInElementDefinition; 7] = [
     BuiltInElementDefinition {
         name: "state-text",
         allowed_tags: &["span", "p", "output"],
@@ -1111,6 +1375,11 @@ const DEFINITIONS: [BuiltInElementDefinition; 6] = [
         allowed_tags: &["template"],
         required_attribute: SOURCE_ATTRIBUTE,
     },
+    BuiltInElementDefinition {
+        name: "range-control",
+        allowed_tags: &["input"],
+        required_attribute: BIND_ATTRIBUTE,
+    },
 ];
 
 static REGISTRY_VALIDATION: OnceLock<Result<(), String>> = OnceLock::new();
@@ -1129,6 +1398,7 @@ pub(crate) struct ActionTarget {
     pub(crate) action: ShellAction,
     pub(crate) node: ExperimentalNodeIdentity,
     pub(crate) target: Option<ElementInstanceId>,
+    pub(crate) pipewire_target: Option<PipeWireControlTarget>,
 }
 
 #[derive(Debug, Clone)]
@@ -1249,221 +1519,345 @@ impl BuiltInElementIndex {
                     "`datetime` and `data-htm-state` are runtime-owned",
                 ));
             }
-            let (binding, binding_kind, action, clock, value_format, repeat, enabled_binding) =
-                match kind {
-                    BuiltInElementKind::StateText => {
-                        validate_state_text_children(document, slot, &context)?;
-                        let binding = required.parse::<StateBindingKey>().map_err(|()| {
-                            invalid_declaration(
-                                &context,
-                                format!("unsupported state binding `{required}`"),
-                            )
-                        })?;
-                        if !binding.supports(StateValueKind::Text) {
-                            return Err(invalid_declaration(
-                                &context,
-                                format!(
-                                    "state binding `{required}` does not support text presentation"
-                                ),
-                            ));
-                        }
-                        (
-                            Some(binding),
-                            Some(StateValueKind::Text),
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
+            let (
+                binding,
+                binding_kind,
+                action,
+                pipewire_target,
+                clock,
+                value_format,
+                repeat,
+                range,
+                enabled_binding,
+            ) = match kind {
+                BuiltInElementKind::StateText => {
+                    validate_state_text_children(document, slot, &context)?;
+                    let binding = required.parse::<StateBindingKey>().map_err(|()| {
+                        invalid_declaration(
+                            &context,
+                            format!("unsupported state binding `{required}`"),
                         )
+                    })?;
+                    if !binding.supports(StateValueKind::Text) {
+                        return Err(invalid_declaration(
+                            &context,
+                            format!(
+                                "state binding `{required}` does not support text presentation"
+                            ),
+                        ));
                     }
-                    BuiltInElementKind::ActionButton => {
-                        let action = required.parse::<ShellAction>().map_err(|()| {
-                            invalid_declaration(
-                                &context,
-                                format!("unsupported action `{required}`"),
-                            )
-                        })?;
-                        if !surface_kind.permits(action) {
+                    (
+                        Some(binding),
+                        Some(StateValueKind::Text),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                }
+                BuiltInElementKind::ActionButton => {
+                    let action = required.parse::<ShellAction>().map_err(|()| {
+                        invalid_declaration(&context, format!("unsupported action `{required}`"))
+                    })?;
+                    if !surface_kind.permits(action) {
+                        return Err(invalid_declaration(
+                            &context,
+                            format!(
+                                "action `{}` is not permitted from this surface kind",
+                                action.as_str()
+                            ),
+                        ));
+                    }
+                    let clock_action = matches!(
+                        action,
+                        ShellAction::ClockEnable
+                            | ShellAction::ClockDisable
+                            | ShellAction::ClockToggle
+                    );
+                    let pipewire_action = matches!(
+                        action,
+                        ShellAction::PipeWireAudioMute
+                            | ShellAction::PipeWireAudioUnmute
+                            | ShellAction::PipeWireAudioToggleMute
+                    );
+                    if action == ShellAction::PipeWireAudioSetVolume {
+                        return Err(invalid_declaration(
+                            &context,
+                            "`pipewire.audio.set_volume` requires `range-control`",
+                        ));
+                    }
+                    let target_value = element.attr(LocalName::from(TARGET_ATTRIBUTE));
+                    let pipewire_target = match (clock_action, pipewire_action, target_value) {
+                        (true, _, Some(target)) if !target.is_empty() => {
+                            unresolved_action_targets.insert(html_id.clone(), target.to_owned());
+                            None
+                        }
+                        (true, _, _) => {
                             return Err(invalid_declaration(
                                 &context,
-                                format!(
-                                    "action `{}` is not permitted from this surface kind",
-                                    action.as_str()
-                                ),
+                                "clock action requires nonempty `data-htm-target`",
                             ));
                         }
-                        let clock_action = matches!(
-                            action,
-                            ShellAction::ClockEnable
-                                | ShellAction::ClockDisable
-                                | ShellAction::ClockToggle
-                        );
-                        match (
-                            clock_action,
-                            element.attr(LocalName::from(TARGET_ATTRIBUTE)),
-                        ) {
-                            (true, Some(target)) if !target.is_empty() => {
-                                unresolved_action_targets
-                                    .insert(html_id.clone(), target.to_owned());
-                            }
-                            (true, _) => {
-                                return Err(invalid_declaration(
-                                    &context,
-                                    "clock action requires nonempty `data-htm-target`",
-                                ));
-                            }
-                            (false, Some(_)) => {
-                                return Err(invalid_declaration(
-                                    &context,
-                                    "`data-htm-target` is forbidden for this action",
-                                ));
-                            }
-                            (false, None) => {}
+                        (false, true, Some(target)) => {
+                            Some(parse_default_pipewire_target(target, &context)?)
                         }
-                        let enabled_binding = element
-                            .attr(LocalName::from(ENABLED_BIND_ATTRIBUTE))
-                            .map(|value| {
-                                value.parse::<StateBindingKey>().map_err(|()| {
-                                    invalid_declaration(
-                                        &context,
-                                        format!("unsupported enabled binding `{value}`"),
-                                    )
-                                })
+                        (false, true, None) => {
+                            return Err(invalid_declaration(
+                                &context,
+                                "PipeWire audio action requires `data-htm-target` outside a repeat",
+                            ));
+                        }
+                        (false, false, Some(_)) => {
+                            return Err(invalid_declaration(
+                                &context,
+                                "`data-htm-target` is forbidden for this action",
+                            ));
+                        }
+                        (false, false, None) => None,
+                    };
+                    let enabled_binding = element
+                        .attr(LocalName::from(ENABLED_BIND_ATTRIBUTE))
+                        .map(|value| {
+                            value.parse::<StateBindingKey>().map_err(|()| {
+                                invalid_declaration(
+                                    &context,
+                                    format!("unsupported enabled binding `{value}`"),
+                                )
                             })
-                            .transpose()?;
-                        if enabled_binding
-                            .is_some_and(|binding| !binding.supports(StateValueKind::Boolean))
-                        {
-                            return Err(invalid_declaration(
-                                &context,
-                                "`data-htm-enabled-bind` requires a Boolean state key",
-                            ));
-                        }
-                        (None, None, Some(action), None, None, None, enabled_binding)
+                        })
+                        .transpose()?;
+                    if enabled_binding
+                        .is_some_and(|binding| !binding.supports(StateValueKind::Boolean))
+                    {
+                        return Err(invalid_declaration(
+                            &context,
+                            "`data-htm-enabled-bind` requires a Boolean state key",
+                        ));
                     }
-                    BuiltInElementKind::StateToken => {
-                        let binding = required.parse::<StateBindingKey>().map_err(|()| {
-                            invalid_declaration(
-                                &context,
-                                format!("unsupported state binding `{required}`"),
-                            )
-                        })?;
-                        if !binding.supports(StateValueKind::Token) {
-                            return Err(invalid_declaration(
-                                &context,
-                                format!(
-                                    "state binding `{required}` does not support token presentation"
-                                ),
-                            ));
-                        }
-                        (
-                            Some(binding),
-                            Some(StateValueKind::Token),
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
+                    if pipewire_action
+                        && enabled_binding != pipewire_target.map(pipewire_mute_enabled_key)
+                    {
+                        return Err(invalid_declaration(
+                            &context,
+                            "PipeWire mute action requires the matching `can_set_mute` enabled binding",
+                        ));
                     }
-                    BuiltInElementKind::ClockText => {
-                        validate_state_text_children(document, slot, &context)?;
-                        let format = ClockFormat::compile(required).map_err(|error| {
-                            invalid_declaration(
-                                &context,
-                                format!("invalid `{FORMAT_ATTRIBUTE}`: {error}"),
-                            )
-                        })?;
-                        let time_zone = ClockTimeZone::parse(
-                            element.attr(LocalName::from(TIME_ZONE_ATTRIBUTE)),
+                    (
+                        None,
+                        None,
+                        Some(action),
+                        pipewire_target,
+                        None,
+                        None,
+                        None,
+                        None,
+                        enabled_binding,
+                    )
+                }
+                BuiltInElementKind::StateToken => {
+                    let binding = required.parse::<StateBindingKey>().map_err(|()| {
+                        invalid_declaration(
+                            &context,
+                            format!("unsupported state binding `{required}`"),
                         )
-                        .map_err(|error| {
-                            invalid_declaration(
-                                &context,
-                                format!("invalid `{TIME_ZONE_ATTRIBUTE}`: {error}"),
-                            )
-                        })?;
-                        let enabled = match element.attr(LocalName::from(ENABLED_ATTRIBUTE)) {
-                            None | Some("true") => true,
-                            Some("false") => false,
-                            Some(value) => {
-                                return Err(invalid_declaration(
+                    })?;
+                    if !binding.supports(StateValueKind::Token) {
+                        return Err(invalid_declaration(
+                            &context,
+                            format!(
+                                "state binding `{required}` does not support token presentation"
+                            ),
+                        ));
+                    }
+                    (
+                        Some(binding),
+                        Some(StateValueKind::Token),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                }
+                BuiltInElementKind::ClockText => {
+                    validate_state_text_children(document, slot, &context)?;
+                    let format = ClockFormat::compile(required).map_err(|error| {
+                        invalid_declaration(
+                            &context,
+                            format!("invalid `{FORMAT_ATTRIBUTE}`: {error}"),
+                        )
+                    })?;
+                    let time_zone =
+                        ClockTimeZone::parse(element.attr(LocalName::from(TIME_ZONE_ATTRIBUTE)))
+                            .map_err(|error| {
+                                invalid_declaration(
                                     &context,
-                                    format!(
-                                        "`{ENABLED_ATTRIBUTE}` must be `true` or `false`, not `{value}`"
-                                    ),
-                                ));
-                            }
-                        };
-                        (
-                            None,
-                            None,
-                            None,
-                            Some(ClockDeclaration {
-                                id: ElementInstanceId {
-                                    document_generation,
-                                    html_id: html_id.clone(),
-                                },
-                                format,
-                                time_zone,
-                                enabled,
-                            }),
-                            None,
-                            None,
-                            None,
-                        )
-                    }
-                    BuiltInElementKind::StateValue => {
-                        validate_state_text_children(document, slot, &context)?;
-                        if element.has_attr(local_name!("value")) {
-                            return Err(invalid_declaration(
-                                &context,
-                                "`value` is runtime-owned for `state-value`",
-                            ));
-                        }
-                        let binding = required.parse::<StateBindingKey>().map_err(|()| {
-                            invalid_declaration(
-                                &context,
-                                format!("unsupported state binding `{required}`"),
-                            )
-                        })?;
-                        if !binding.supports(StateValueKind::Value) {
+                                    format!("invalid `{TIME_ZONE_ATTRIBUTE}`: {error}"),
+                                )
+                            })?;
+                    let enabled = match element.attr(LocalName::from(ENABLED_ATTRIBUTE)) {
+                        None | Some("true") => true,
+                        Some("false") => false,
+                        Some(value) => {
                             return Err(invalid_declaration(
                                 &context,
                                 format!(
-                                    "state binding `{required}` does not support numeric presentation"
+                                    "`{ENABLED_ATTRIBUTE}` must be `true` or `false`, not `{value}`"
                                 ),
                             ));
                         }
-                        let format = parse_value_format(
-                            element.attr(LocalName::from(FORMAT_ATTRIBUTE)),
-                            binding.allowed_value_formats(),
+                    };
+                    (
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(ClockDeclaration {
+                            id: ElementInstanceId {
+                                document_generation,
+                                html_id: html_id.clone(),
+                            },
+                            format,
+                            time_zone,
+                            enabled,
+                        }),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                }
+                BuiltInElementKind::StateValue => {
+                    validate_state_text_children(document, slot, &context)?;
+                    if element.has_attr(local_name!("value")) {
+                        return Err(invalid_declaration(
                             &context,
-                        )?;
-                        (
-                            Some(binding),
-                            Some(StateValueKind::Value),
-                            None,
-                            None,
-                            Some(format),
-                            None,
-                            None,
+                            "`value` is runtime-owned for `state-value`",
+                        ));
+                    }
+                    let binding = required.parse::<StateBindingKey>().map_err(|()| {
+                        invalid_declaration(
+                            &context,
+                            format!("unsupported state binding `{required}`"),
                         )
-                    }
-                    BuiltInElementKind::Repeat => {
-                        let repeat = analyze_repeat(
-                            document,
-                            identities,
-                            slot,
-                            document_generation,
-                            &html_id,
-                            required,
+                    })?;
+                    if !binding.supports(StateValueKind::Value) {
+                        return Err(invalid_declaration(
                             &context,
-                        )?;
-                        (None, None, None, None, None, Some(repeat), None)
+                            format!(
+                                "state binding `{required}` does not support numeric presentation"
+                            ),
+                        ));
                     }
-                };
+                    let format = parse_value_format(
+                        element.attr(LocalName::from(FORMAT_ATTRIBUTE)),
+                        binding.allowed_value_formats(),
+                        &context,
+                    )?;
+                    (
+                        Some(binding),
+                        Some(StateValueKind::Value),
+                        None,
+                        None,
+                        None,
+                        Some(format),
+                        None,
+                        None,
+                        None,
+                    )
+                }
+                BuiltInElementKind::Repeat => {
+                    let repeat = analyze_repeat(
+                        document,
+                        identities,
+                        slot,
+                        document_generation,
+                        &html_id,
+                        required,
+                        &context,
+                    )?;
+                    (None, None, None, None, None, None, Some(repeat), None, None)
+                }
+                BuiltInElementKind::RangeControl => {
+                    if element.attr(local_name!("type")) != Some("range") {
+                        return Err(invalid_declaration(
+                            &context,
+                            "`range-control` requires `<input type=\"range\">`",
+                        ));
+                    }
+                    if !node.children.is_empty() {
+                        return Err(invalid_declaration(
+                            &context,
+                            "`range-control` cannot contain descendants",
+                        ));
+                    }
+                    if element.has_attr(local_name!("value"))
+                        || element.has_attr(LocalName::from(STATE_ATTRIBUTE))
+                    {
+                        return Err(invalid_declaration(
+                            &context,
+                            "`value` and `data-htm-state` are runtime-owned for `range-control`",
+                        ));
+                    }
+                    let binding = required.parse::<StateBindingKey>().map_err(|()| {
+                        invalid_declaration(
+                            &context,
+                            format!("unsupported range binding `{required}`"),
+                        )
+                    })?;
+                    let target = element
+                        .attr(LocalName::from(TARGET_ATTRIBUTE))
+                        .ok_or_else(|| {
+                            invalid_declaration(
+                                &context,
+                                "`range-control` requires `data-htm-target` outside a repeat",
+                            )
+                        })
+                        .and_then(|value| parse_default_pipewire_target(value, &context))?;
+                    if binding != pipewire_volume_key(target) {
+                        return Err(invalid_declaration(
+                            &context,
+                            "range binding and PipeWire target do not match",
+                        ));
+                    }
+                    let action = element
+                            .attr(LocalName::from(ACTION_ATTRIBUTE))
+                            .and_then(|value| value.parse::<ShellAction>().ok())
+                            .filter(|action| *action == ShellAction::PipeWireAudioSetVolume)
+                            .ok_or_else(|| {
+                                invalid_declaration(
+                                    &context,
+                                    "`range-control` requires `data-htm-action=\"pipewire.audio.set_volume\"`",
+                                )
+                            })?;
+                    let enabled_binding = element
+                        .attr(LocalName::from(ENABLED_BIND_ATTRIBUTE))
+                        .and_then(|value| value.parse::<StateBindingKey>().ok());
+                    if enabled_binding != Some(pipewire_volume_enabled_key(target)) {
+                        return Err(invalid_declaration(
+                            &context,
+                            "`range-control` requires the matching `can_set_volume` enabled binding",
+                        ));
+                    }
+                    let range = parse_range_control(element, target, &context)?;
+                    (
+                        Some(binding),
+                        Some(StateValueKind::Value),
+                        Some(action),
+                        Some(target),
+                        None,
+                        Some(StateValueFormat::Raw),
+                        None,
+                        Some(range),
+                        enabled_binding,
+                    )
+                }
+            };
             let instance_id = ElementInstanceId {
                 document_generation,
                 html_id: html_id.clone(),
@@ -1475,11 +1869,13 @@ impl BuiltInElementIndex {
                 binding_kind,
                 action,
                 action_target: None,
+                pipewire_target,
                 clock,
                 disabled: element.has_attr(local_name!("disabled")),
                 enabled_binding,
                 value_format,
                 repeat,
+                range,
             };
             let indexed = IndexedElement {
                 declaration,
@@ -1521,7 +1917,7 @@ impl BuiltInElementIndex {
                     }
                 }
             }
-            if action.is_some() {
+            if action.is_some() && kind == BuiltInElementKind::ActionButton {
                 actions.push(html_id.clone());
             }
             if let Some(enabled_binding) = enabled_binding {
@@ -1571,6 +1967,42 @@ impl BuiltInElementIndex {
             return Err(RuntimeError::LimitExceeded(format!(
                 "{source} requests {} unique PipeWire property keys; the per-document limit is {MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT}",
                 property_keys.len()
+            )));
+        }
+        let top_audio_controls = elements
+            .values()
+            .filter(|element| {
+                element
+                    .declaration
+                    .action
+                    .is_some_and(|action| action.as_str().starts_with("pipewire.audio."))
+            })
+            .count();
+        let repeated_audio_controls = pipewire_repeats
+            .iter()
+            .flat_map(|repeat| repeat.descendants.iter())
+            .filter(|descendant| descendant.action.is_some())
+            .count();
+        let audio_controls = top_audio_controls.saturating_add(repeated_audio_controls);
+        if audio_controls > MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{source} contains {audio_controls} PipeWire audio controls; the per-document limit is {MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT}"
+            )));
+        }
+        let range_controls = elements
+            .values()
+            .filter(|element| element.declaration.range.is_some())
+            .count()
+            .saturating_add(
+                pipewire_repeats
+                    .iter()
+                    .flat_map(|repeat| repeat.descendants.iter())
+                    .filter(|descendant| descendant.range.is_some())
+                    .count(),
+            );
+        if range_controls > MAX_RANGE_CONTROLS_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{source} contains {range_controls} range controls; the per-document limit is {MAX_RANGE_CONTROLS_PER_DOCUMENT}"
             )));
         }
         for (action_id, target_id) in unresolved_action_targets {
@@ -1812,6 +2244,7 @@ impl BuiltInElementIndex {
             action,
             node: entry.node,
             target: entry.declaration.action_target.clone(),
+            pipewire_target: entry.declaration.pipewire_target,
         }))
     }
 }
@@ -1824,6 +2257,7 @@ pub fn built_in_registry_names() -> &'static [&'static str] {
         "clock-text",
         "state-value",
         "repeat",
+        "range-control",
     ]
 }
 
@@ -1861,6 +2295,7 @@ fn definition(kind: BuiltInElementKind) -> &'static BuiltInElementDefinition {
         BuiltInElementKind::ClockText => &DEFINITIONS[3],
         BuiltInElementKind::StateValue => &DEFINITIONS[4],
         BuiltInElementKind::Repeat => &DEFINITIONS[5],
+        BuiltInElementKind::RangeControl => &DEFINITIONS[6],
     }
 }
 
@@ -1882,6 +2317,13 @@ fn allowed_behavior_attributes(kind: BuiltInElementKind) -> &'static [&'static s
         ],
         BuiltInElementKind::StateValue => &[ELEMENT_ATTRIBUTE, BIND_ATTRIBUTE, FORMAT_ATTRIBUTE],
         BuiltInElementKind::Repeat => &[ELEMENT_ATTRIBUTE, SOURCE_ATTRIBUTE],
+        BuiltInElementKind::RangeControl => &[
+            ELEMENT_ATTRIBUTE,
+            BIND_ATTRIBUTE,
+            ACTION_ATTRIBUTE,
+            TARGET_ATTRIBUTE,
+            ENABLED_BIND_ATTRIBUTE,
+        ],
     }
 }
 
@@ -1997,12 +2439,18 @@ fn analyze_repeat(
                             format!("unknown repeated built-in element `{kind_name}`"),
                         )
                     })?;
-                    if !matches!(
+                    let read_only = matches!(
                         kind,
                         BuiltInElementKind::StateText
                             | BuiltInElementKind::StateToken
                             | BuiltInElementKind::StateValue
-                    ) {
+                    );
+                    let pipewire_control = source == RepeatSource::PipeWireNodes
+                        && matches!(
+                            kind,
+                            BuiltInElementKind::ActionButton | BuiltInElementKind::RangeControl
+                        );
+                    if !read_only && !pipewire_control {
                         return Err(invalid_declaration(
                             context,
                             format!("`{}` is not allowed inside a repeat", kind.as_str()),
@@ -2041,114 +2489,235 @@ fn analyze_repeat(
                             format!("duplicate repeat local id `{local_id}`"),
                         ));
                     }
-                    let binding_value = element
-                        .attr(LocalName::from(BIND_ATTRIBUTE))
-                        .filter(|value| !value.is_empty())
-                        .ok_or_else(|| {
-                            invalid_declaration(
-                                context,
-                                format!("`{}` requires `data-htm-bind`", kind.as_str()),
-                            )
-                        })?;
-                    let binding = binding_value.parse::<ItemBindingKey>().map_err(|()| {
-                        invalid_declaration(
-                            context,
-                            format!("unsupported item binding `{binding_value}`"),
-                        )
-                    })?;
-                    if !binding.supports_source(source) {
-                        return Err(invalid_declaration(
-                            context,
-                            format!(
-                                "item binding `{binding_value}` does not belong to `{source_value}`"
-                            ),
-                        ));
-                    }
-                    let property_key = match (
-                        binding,
-                        element.attr(LocalName::from(PROPERTY_KEY_ATTRIBUTE)),
-                    ) {
-                        (ItemBindingKey::Property, Some("")) => {
-                            return Err(invalid_declaration(
-                                context,
-                                "`data-htm-property-key` must not be empty",
-                            ));
+                    let mut binding = None;
+                    let mut action = None;
+                    let mut enabled_binding = None;
+                    let mut range = None;
+                    let mut property_key = None;
+                    let mut value_format = None;
+                    match kind {
+                        BuiltInElementKind::StateText
+                        | BuiltInElementKind::StateToken
+                        | BuiltInElementKind::StateValue => {
+                            let binding_value = element
+                                .attr(LocalName::from(BIND_ATTRIBUTE))
+                                .filter(|value| !value.is_empty())
+                                .ok_or_else(|| {
+                                    invalid_declaration(
+                                        context,
+                                        format!("`{}` requires `data-htm-bind`", kind.as_str()),
+                                    )
+                                })?;
+                            let parsed = binding_value.parse::<ItemBindingKey>().map_err(|()| {
+                                invalid_declaration(
+                                    context,
+                                    format!("unsupported item binding `{binding_value}`"),
+                                )
+                            })?;
+                            if !parsed.supports_source(source) {
+                                return Err(invalid_declaration(
+                                    context,
+                                    format!(
+                                        "item binding `{binding_value}` does not belong to `{source_value}`"
+                                    ),
+                                ));
+                            }
+                            property_key = match (
+                                parsed,
+                                element.attr(LocalName::from(PROPERTY_KEY_ATTRIBUTE)),
+                            ) {
+                                (ItemBindingKey::Property, Some("")) => {
+                                    return Err(invalid_declaration(
+                                        context,
+                                        "`data-htm-property-key` must not be empty",
+                                    ));
+                                }
+                                (ItemBindingKey::Property, Some(key))
+                                    if key.len() > MAX_PIPEWIRE_PROPERTY_KEY_BYTES =>
+                                {
+                                    return Err(invalid_declaration(
+                                        context,
+                                        format!(
+                                            "`data-htm-property-key` exceeds {MAX_PIPEWIRE_PROPERTY_KEY_BYTES} bytes"
+                                        ),
+                                    ));
+                                }
+                                (ItemBindingKey::Property, Some(key))
+                                    if !valid_pipewire_property_key(key) =>
+                                {
+                                    return Err(invalid_declaration(
+                                        context,
+                                        format!("invalid `data-htm-property-key` `{key}`"),
+                                    ));
+                                }
+                                (ItemBindingKey::Property, Some(key)) => Some(key.to_owned()),
+                                (ItemBindingKey::Property, None) => {
+                                    return Err(invalid_declaration(
+                                        context,
+                                        "`item.property` requires `data-htm-property-key`",
+                                    ));
+                                }
+                                (_, Some(_)) => {
+                                    return Err(invalid_declaration(
+                                        context,
+                                        "`data-htm-property-key` is only valid with `item.property`",
+                                    ));
+                                }
+                                (_, None) => None,
+                            };
+                            value_format = match kind {
+                                BuiltInElementKind::StateText if parsed.supports_text() => {
+                                    validate_state_text_children(document, slot, context)?;
+                                    None
+                                }
+                                BuiltInElementKind::StateToken if parsed.supports_token() => {
+                                    if element.has_attr(LocalName::from(STATE_ATTRIBUTE)) {
+                                        return Err(invalid_declaration(
+                                            context,
+                                            "`data-htm-state` is runtime-owned",
+                                        ));
+                                    }
+                                    None
+                                }
+                                BuiltInElementKind::StateValue if parsed.supports_value() => {
+                                    validate_state_text_children(document, slot, context)?;
+                                    if element.has_attr(local_name!("value")) {
+                                        return Err(invalid_declaration(
+                                            context,
+                                            "`value` is runtime-owned for `state-value`",
+                                        ));
+                                    }
+                                    Some(parse_value_format(
+                                        element.attr(LocalName::from(FORMAT_ATTRIBUTE)),
+                                        item_value_formats(parsed),
+                                        context,
+                                    )?)
+                                }
+                                _ => {
+                                    return Err(invalid_declaration(
+                                        context,
+                                        format!(
+                                            "item binding `{binding_value}` does not support `{}`",
+                                            kind.as_str()
+                                        ),
+                                    ));
+                                }
+                            };
+                            binding = Some(parsed);
                         }
-                        (ItemBindingKey::Property, Some(key))
-                            if key.len() > MAX_PIPEWIRE_PROPERTY_KEY_BYTES =>
-                        {
-                            return Err(invalid_declaration(
-                                context,
-                                format!(
-                                    "`data-htm-property-key` exceeds {MAX_PIPEWIRE_PROPERTY_KEY_BYTES} bytes"
-                                ),
-                            ));
-                        }
-                        (ItemBindingKey::Property, Some(key))
-                            if !valid_pipewire_property_key(key) =>
-                        {
-                            return Err(invalid_declaration(
-                                context,
-                                format!("invalid `data-htm-property-key` `{key}`"),
-                            ));
-                        }
-                        (ItemBindingKey::Property, Some(key)) => Some(key.to_owned()),
-                        (ItemBindingKey::Property, None) => {
-                            return Err(invalid_declaration(
-                                context,
-                                "`item.property` requires `data-htm-property-key`",
-                            ));
-                        }
-                        (_, Some(_)) => {
-                            return Err(invalid_declaration(
-                                context,
-                                "`data-htm-property-key` is only valid with `item.property`",
-                            ));
-                        }
-                        (_, None) => None,
-                    };
-                    let value_format = match kind {
-                        BuiltInElementKind::StateText if binding.supports_text() => {
-                            validate_state_text_children(document, slot, context)?;
-                            None
-                        }
-                        BuiltInElementKind::StateToken if binding.supports_token() => {
+                        BuiltInElementKind::ActionButton => {
+                            if element.has_attr(LocalName::from(TARGET_ATTRIBUTE)) {
+                                return Err(invalid_declaration(
+                                    context,
+                                    "`data-htm-target` is forbidden for an item-local action",
+                                ));
+                            }
+                            let parsed = element
+                                .attr(LocalName::from(ACTION_ATTRIBUTE))
+                                .and_then(|value| value.parse::<ShellAction>().ok())
+                                .filter(|action| {
+                                    matches!(
+                                        action,
+                                        ShellAction::PipeWireAudioMute
+                                            | ShellAction::PipeWireAudioUnmute
+                                            | ShellAction::PipeWireAudioToggleMute
+                                    )
+                                })
+                                .ok_or_else(|| {
+                                    invalid_declaration(
+                                        context,
+                                        "only PipeWire mute actions are allowed inside `pipewire.nodes`",
+                                    )
+                                })?;
+                            let enabled = element
+                                .attr(LocalName::from(ENABLED_BIND_ATTRIBUTE))
+                                .and_then(|value| value.parse::<ItemBindingKey>().ok());
+                            if enabled != Some(ItemBindingKey::CanSetMute) {
+                                return Err(invalid_declaration(
+                                    context,
+                                    "item-local mute action requires `data-htm-enabled-bind=\"item.can_set_mute\"`",
+                                ));
+                            }
                             if element.has_attr(LocalName::from(STATE_ATTRIBUTE)) {
                                 return Err(invalid_declaration(
                                     context,
-                                    "`data-htm-state` is runtime-owned",
+                                    "`data-htm-state` is runtime-owned for PipeWire controls",
                                 ));
                             }
-                            None
+                            action = Some(parsed);
+                            enabled_binding = enabled;
                         }
-                        BuiltInElementKind::StateValue if binding.supports_value() => {
-                            validate_state_text_children(document, slot, context)?;
-                            if element.has_attr(local_name!("value")) {
+                        BuiltInElementKind::RangeControl => {
+                            if element.attr(local_name!("type")) != Some("range") {
                                 return Err(invalid_declaration(
                                     context,
-                                    "`value` is runtime-owned for `state-value`",
+                                    "`range-control` requires `<input type=\"range\">`",
                                 ));
                             }
-                            Some(parse_value_format(
-                                element.attr(LocalName::from(FORMAT_ATTRIBUTE)),
-                                item_value_formats(binding),
+                            if !node.children.is_empty() {
+                                return Err(invalid_declaration(
+                                    context,
+                                    "`range-control` cannot contain descendants",
+                                ));
+                            }
+                            if element.has_attr(LocalName::from(TARGET_ATTRIBUTE)) {
+                                return Err(invalid_declaration(
+                                    context,
+                                    "`data-htm-target` is forbidden for an item-local range control",
+                                ));
+                            }
+                            if element.attr(LocalName::from(BIND_ATTRIBUTE)) != Some("item.volume")
+                            {
+                                return Err(invalid_declaration(
+                                    context,
+                                    "item-local range control requires `data-htm-bind=\"item.volume\"`",
+                                ));
+                            }
+                            if element.attr(LocalName::from(ACTION_ATTRIBUTE))
+                                != Some("pipewire.audio.set_volume")
+                            {
+                                return Err(invalid_declaration(
+                                    context,
+                                    "item-local range control requires `pipewire.audio.set_volume`",
+                                ));
+                            }
+                            if element.attr(LocalName::from(ENABLED_BIND_ATTRIBUTE))
+                                != Some("item.can_set_volume")
+                            {
+                                return Err(invalid_declaration(
+                                    context,
+                                    "item-local range control requires `data-htm-enabled-bind=\"item.can_set_volume\"`",
+                                ));
+                            }
+                            if element.has_attr(local_name!("value"))
+                                || element.has_attr(LocalName::from(STATE_ATTRIBUTE))
+                            {
+                                return Err(invalid_declaration(
+                                    context,
+                                    "`value` and `data-htm-state` are runtime-owned for `range-control`",
+                                ));
+                            }
+                            binding = Some(ItemBindingKey::Volume);
+                            action = Some(ShellAction::PipeWireAudioSetVolume);
+                            enabled_binding = Some(ItemBindingKey::CanSetVolume);
+                            range = Some(parse_range_control(
+                                element,
+                                PipeWireControlTarget::CurrentItem,
                                 context,
-                            )?)
+                            )?);
                         }
-                        _ => {
-                            return Err(invalid_declaration(
-                                context,
-                                format!(
-                                    "item binding `{binding_value}` does not support `{}`",
-                                    kind.as_str()
-                                ),
-                            ));
+                        BuiltInElementKind::ClockText | BuiltInElementKind::Repeat => {
+                            unreachable!("repeat child kind was rejected above")
                         }
-                    };
+                    }
                     descendants.push(RepeatedElementDeclaration {
                         local_id: local_id.to_owned(),
                         kind,
                         binding,
+                        action,
+                        enabled_binding,
+                        range,
+                        disabled: element.has_attr(local_name!("disabled")),
                         property_key,
                         value_format,
                         prototype_order: order,
@@ -2183,6 +2752,24 @@ fn analyze_repeat(
     if property_lookups > MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM {
         return Err(RuntimeError::LimitExceeded(format!(
             "{context}: repeat template has {property_lookups} PipeWire property lookups; the limit is {MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM}"
+        )));
+    }
+    let audio_controls = descendants
+        .iter()
+        .filter(|descendant| descendant.action.is_some())
+        .count();
+    if audio_controls > MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM {
+        return Err(RuntimeError::LimitExceeded(format!(
+            "{context}: repeat template has {audio_controls} PipeWire audio controls; the limit is {MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM}"
+        )));
+    }
+    let range_controls = descendants
+        .iter()
+        .filter(|descendant| descendant.range.is_some())
+        .count();
+    if range_controls > MAX_RANGE_CONTROLS_PER_ITEM {
+        return Err(RuntimeError::LimitExceeded(format!(
+            "{context}: repeat template has {range_controls} range controls; the limit is {MAX_RANGE_CONTROLS_PER_ITEM}"
         )));
     }
     Ok(RepeatDeclaration {
@@ -2221,8 +2808,117 @@ fn item_value_formats(binding: ItemBindingKey) -> &'static [StateValueFormat] {
             &[StateValueFormat::Raw, StateValueFormat::Percent]
         }
         ItemBindingKey::RawId => &[StateValueFormat::Raw],
+        ItemBindingKey::Volume => &[StateValueFormat::Raw, StateValueFormat::Percent],
         _ => &[],
     }
+}
+
+fn parse_default_pipewire_target(
+    value: &str,
+    context: &str,
+) -> Result<PipeWireControlTarget, RuntimeError> {
+    match value {
+        "pipewire.default_sink" => Ok(PipeWireControlTarget::DefaultSink),
+        "pipewire.default_source" => Ok(PipeWireControlTarget::DefaultSource),
+        _ => Err(invalid_declaration(
+            context,
+            format!("invalid PipeWire audio target `{value}`"),
+        )),
+    }
+}
+
+fn pipewire_volume_key(target: PipeWireControlTarget) -> StateBindingKey {
+    match target {
+        PipeWireControlTarget::DefaultSink => StateBindingKey::PipeWireDefaultSinkVolume,
+        PipeWireControlTarget::DefaultSource => StateBindingKey::PipeWireDefaultSourceVolume,
+        PipeWireControlTarget::CurrentItem => {
+            unreachable!("current-item target has no process state key")
+        }
+    }
+}
+
+fn pipewire_volume_enabled_key(target: PipeWireControlTarget) -> StateBindingKey {
+    match target {
+        PipeWireControlTarget::DefaultSink => StateBindingKey::PipeWireDefaultSinkCanSetVolume,
+        PipeWireControlTarget::DefaultSource => StateBindingKey::PipeWireDefaultSourceCanSetVolume,
+        PipeWireControlTarget::CurrentItem => {
+            unreachable!("current-item target has no process state key")
+        }
+    }
+}
+
+fn pipewire_mute_enabled_key(target: PipeWireControlTarget) -> StateBindingKey {
+    match target {
+        PipeWireControlTarget::DefaultSink => StateBindingKey::PipeWireDefaultSinkCanSetMute,
+        PipeWireControlTarget::DefaultSource => StateBindingKey::PipeWireDefaultSourceCanSetMute,
+        PipeWireControlTarget::CurrentItem => {
+            unreachable!("current-item target has no process state key")
+        }
+    }
+}
+
+fn parse_range_control(
+    element: &ElementData,
+    target: PipeWireControlTarget,
+    context: &str,
+) -> Result<RangeControlDeclaration, RuntimeError> {
+    let minimum = parse_range_number(element.attr(local_name!("min")), 0.0, "min", context)?;
+    let maximum = parse_range_number(element.attr(local_name!("max")), 1.0, "max", context)?;
+    let step = parse_range_number(element.attr(local_name!("step")), 0.01, "step", context)?;
+    if minimum < 0.0 {
+        return Err(invalid_declaration(
+            context,
+            "range minimum must be nonnegative",
+        ));
+    }
+    if maximum <= minimum {
+        return Err(invalid_declaration(
+            context,
+            "range maximum must be greater than its minimum",
+        ));
+    }
+    if maximum > MAX_PIPEWIRE_PERCEPTUAL_VOLUME {
+        return Err(invalid_declaration(
+            context,
+            format!("range maximum exceeds the runtime limit of {MAX_PIPEWIRE_PERCEPTUAL_VOLUME}"),
+        ));
+    }
+    if step <= 0.0 {
+        return Err(invalid_declaration(context, "range step must be positive"));
+    }
+    Ok(RangeControlDeclaration {
+        target,
+        minimum: RangeNumber::new(minimum),
+        maximum: RangeNumber::new(maximum),
+        step: RangeNumber::new(step),
+    })
+}
+
+fn parse_range_number(
+    value: Option<&str>,
+    default: f64,
+    name: &str,
+    context: &str,
+) -> Result<f64, RuntimeError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    if value.is_empty() || value.len() > MAX_RANGE_NUMBER_BYTES {
+        return Err(invalid_declaration(
+            context,
+            format!("range `{name}` is empty or exceeds {MAX_RANGE_NUMBER_BYTES} bytes"),
+        ));
+    }
+    let parsed = value.parse::<f64>().map_err(|_| {
+        invalid_declaration(context, format!("range `{name}` must be a finite number"))
+    })?;
+    if !parsed.is_finite() {
+        return Err(invalid_declaration(
+            context,
+            format!("range `{name}` must be finite"),
+        ));
+    }
+    Ok(parsed)
 }
 
 fn parse_value_format(
@@ -2333,15 +3029,16 @@ mod tests {
                 "clock-text",
                 "state-value",
                 "repeat",
+                "range-control",
             ]
         );
         assert!(validate_definitions(&DEFINITIONS).is_ok());
         let duplicate = [DEFINITIONS[0], DEFINITIONS[0]];
         assert!(validate_definitions(&duplicate).is_err());
-        assert_eq!(StateBindingKey::ALL.len(), 61);
+        assert_eq!(StateBindingKey::ALL.len(), 81);
         assert!(StateBindingKey::ALL.contains(&StateBindingKey::UPowerOnBattery));
         assert!(StateBindingKey::ALL.contains(&StateBindingKey::PowerProfileCurrent));
-        assert_eq!(ShellAction::ALL.len(), 9);
+        assert_eq!(ShellAction::ALL.len(), 13);
         assert!(ShellAction::ALL.contains(&ShellAction::PowerProfileSetPerformance));
         for key in StateBindingKey::ALL {
             assert_eq!(key.as_str().parse::<StateBindingKey>(), Ok(key));
@@ -2380,7 +3077,7 @@ mod tests {
         assert!(StateBindingKey::SurfaceScaleProfile.supports(StateValueKind::Token));
         assert!(!StateBindingKey::SurfaceScaleProfile.supports(StateValueKind::Text));
         assert!(!StateBindingKey::ClockTime.supports(StateValueKind::Token));
-        assert_eq!(StateToken::ALL.len(), 84);
+        assert_eq!(StateToken::ALL.len(), 89);
         assert!(StateToken::ALL.contains(&StateToken::BluetoothGeneric));
         assert!(StateToken::ALL.contains(&StateToken::HighTemperature));
         assert!(StateToken::Open.valid_for(StateBindingKey::OverlayStatus));
@@ -2472,7 +3169,7 @@ mod tests {
             index.element("clock-a").unwrap().kind,
             BuiltInElementKind::StateText
         );
-        assert_eq!(built_in_registry_names().len(), 6);
+        assert_eq!(built_in_registry_names().len(), 7);
     }
 
     #[test]
@@ -2538,7 +3235,7 @@ mod tests {
             repeat
                 .descendants
                 .iter()
-                .find(|element| element.binding == ItemBindingKey::Property)
+                .find(|element| element.binding == Some(ItemBindingKey::Property))
                 .and_then(|element| element.property_key.as_deref()),
             Some("application.name")
         );
@@ -2613,6 +3310,94 @@ mod tests {
             })
             .collect::<String>();
         assert!(discover(&repeats, BuiltInSurfaceKind::Overlay).is_err());
+    }
+
+    #[test]
+    fn pipewire_audio_controls_are_narrowly_typed_and_bounded() {
+        let index = discover(
+            r#"<input id="sink-volume" type="range"
+                    data-htm-element="range-control"
+                    data-htm-bind="pipewire.default_sink.volume"
+                    data-htm-action="pipewire.audio.set_volume"
+                    data-htm-target="pipewire.default_sink"
+                    data-htm-enabled-bind="pipewire.default_sink.can_set_volume">
+               <button id="source-mute"
+                    data-htm-element="action-button"
+                    data-htm-action="pipewire.audio.toggle_mute"
+                    data-htm-target="pipewire.default_source"
+                    data-htm-enabled-bind="pipewire.default_source.can_set_mute">Mute</button>
+               <template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes">
+                 <div>
+                   <input type="range"
+                          data-htm-element="range-control"
+                          data-htm-local-id="volume"
+                          data-htm-bind="item.volume"
+                          data-htm-action="pipewire.audio.set_volume"
+                          data-htm-enabled-bind="item.can_set_volume"
+                          min="0" max="2" step="0.05">
+                   <button data-htm-element="action-button"
+                           data-htm-local-id="mute"
+                           data-htm-action="pipewire.audio.mute"
+                           data-htm-enabled-bind="item.can_set_mute">Mute</button>
+                 </div>
+               </template>"#,
+            BuiltInSurfaceKind::Overlay,
+        )
+        .unwrap();
+        let sink = index.element("sink-volume").unwrap();
+        assert_eq!(sink.kind, BuiltInElementKind::RangeControl);
+        assert_eq!(
+            sink.pipewire_target,
+            Some(PipeWireControlTarget::DefaultSink)
+        );
+        let range = sink.range.unwrap();
+        assert_eq!(range.minimum.get(), 0.0);
+        assert_eq!(range.maximum.get(), 1.0);
+        assert_eq!(range.step.get(), 0.01);
+        let repeated = &index.repeat_declarations()[0].descendants;
+        let repeated_range = repeated
+            .iter()
+            .find(|element| element.local_id == "volume")
+            .and_then(|element| element.range)
+            .unwrap();
+        assert_eq!(repeated_range.maximum.get(), 2.0);
+        assert_eq!(
+            repeated
+                .iter()
+                .find(|element| element.local_id == "mute")
+                .and_then(|element| element.action),
+            Some(ShellAction::PipeWireAudioMute)
+        );
+
+        for invalid in [
+            r#"<div id="range" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-action="pipewire.audio.set_volume" data-htm-target="pipewire.default_sink" data-htm-enabled-bind="pipewire.default_sink.can_set_volume"></div>"#,
+            r#"<input id="range" type="text" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-action="pipewire.audio.set_volume" data-htm-target="pipewire.default_sink" data-htm-enabled-bind="pipewire.default_sink.can_set_volume">"#,
+            r#"<input id="range" type="range" data-htm-element="range-control" data-htm-action="pipewire.audio.set_volume" data-htm-target="pipewire.default_sink" data-htm-enabled-bind="pipewire.default_sink.can_set_volume">"#,
+            r#"<input id="range" type="range" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-target="pipewire.default_sink" data-htm-enabled-bind="pipewire.default_sink.can_set_volume">"#,
+            r#"<input id="range" type="range" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-action="pipewire.audio.toggle_mute" data-htm-target="pipewire.default_sink" data-htm-enabled-bind="pipewire.default_sink.can_set_volume">"#,
+            r#"<input id="range" type="range" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-action="pipewire.audio.set_volume" data-htm-target="pipewire.default_source" data-htm-enabled-bind="pipewire.default_source.can_set_volume">"#,
+            r#"<input id="range" type="range" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-action="pipewire.audio.set_volume" data-htm-enabled-bind="pipewire.default_sink.can_set_volume">"#,
+            r#"<input id="range" type="range" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-action="pipewire.audio.set_volume" data-htm-target="pipewire.configured_sink" data-htm-enabled-bind="pipewire.configured_sink.can_set_volume">"#,
+            r#"<input id="range" type="range" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-action="pipewire.audio.set_volume" data-htm-target="42" data-htm-enabled-bind="pipewire.default_sink.can_set_volume">"#,
+            r#"<input id="range" type="range" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-action="pipewire.audio.set_volume" data-htm-target=".sink" data-htm-enabled-bind="pipewire.default_sink.can_set_volume">"#,
+            r#"<input id="range" type="range" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-action="pipewire.audio.set_volume" data-htm-target="pipewire.default_sink" data-htm-enabled-bind="pipewire.default_sink.can_set_volume" min="-1">"#,
+            r#"<input id="range" type="range" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-action="pipewire.audio.set_volume" data-htm-target="pipewire.default_sink" data-htm-enabled-bind="pipewire.default_sink.can_set_volume" min="NaN">"#,
+            r#"<input id="range" type="range" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-action="pipewire.audio.set_volume" data-htm-target="pipewire.default_sink" data-htm-enabled-bind="pipewire.default_sink.can_set_volume" max="0">"#,
+            r#"<input id="range" type="range" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-action="pipewire.audio.set_volume" data-htm-target="pipewire.default_sink" data-htm-enabled-bind="pipewire.default_sink.can_set_volume" max="2.01">"#,
+            r#"<input id="range" type="range" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-action="pipewire.audio.set_volume" data-htm-target="pipewire.default_sink" data-htm-enabled-bind="pipewire.default_sink.can_set_volume" step="0">"#,
+            r#"<input id="range" type="range" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-action="pipewire.audio.set_volume" data-htm-target="pipewire.default_sink" data-htm-enabled-bind="pipewire.default_sink.can_set_volume" step="${step}">"#,
+            r#"<button id="set" data-htm-element="action-button" data-htm-action="pipewire.audio.set_volume" data-htm-target="pipewire.default_sink"></button>"#,
+            r#"<button id="mute" data-htm-element="action-button" data-htm-action="pipewire.audio.toggle_mute" data-htm-enabled-bind="pipewire.default_sink.can_set_mute"></button>"#,
+            r#"<button id="mute" data-htm-element="action-button" data-htm-action="pipewire.audio.toggle_mute" data-htm-target="pipewire.configured_sink" data-htm-enabled-bind="pipewire.configured_sink.can_set_mute"></button>"#,
+            r#"<template id="devices" data-htm-element="repeat" data-htm-source="upower.devices"><div><input type="range" data-htm-element="range-control" data-htm-local-id="volume" data-htm-bind="item.volume" data-htm-action="pipewire.audio.set_volume" data-htm-enabled-bind="item.can_set_volume"></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><input type="range" data-htm-element="range-control" data-htm-local-id="volume" data-htm-bind="item.volume" data-htm-action="pipewire.audio.set_volume" data-htm-target="pipewire.default_sink" data-htm-enabled-bind="item.can_set_volume"></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><button data-htm-element="action-button" data-htm-local-id="mute" data-htm-action="overlay.close"></button></div></template>"#,
+        ] {
+            assert!(
+                discover(invalid, BuiltInSurfaceKind::Overlay).is_err(),
+                "{invalid}"
+            );
+        }
     }
 
     #[test]

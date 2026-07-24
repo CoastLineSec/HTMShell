@@ -1,6 +1,6 @@
 # State and actions
 
-HTMShell attaches typed behavior to ordinary HTML through six built-in declarations. Declarations outside repeats require a unique, nonempty HTML `id`.
+HTMShell attaches typed behavior to ordinary HTML through seven built-in declarations. Declarations outside repeats require a unique, nonempty HTML `id`.
 
 ## Text state
 
@@ -44,7 +44,7 @@ Authors cannot set `data-htm-state` on a registered element.
 
 ## Collections
 
-[`repeat`](../types/HTMShell.Elements/repeat.md) expands one inert `template` for each keyed source item. Registered descendants use `data-htm-local-id`. Repeats are read-only and cannot be nested.
+[`repeat`](../types/HTMShell.Elements/repeat.md) expands one inert `template` for each keyed source item. Registered descendants use `data-htm-local-id`. Repeats cannot be nested. Power repeats are read-only. `pipewire.nodes` also permits its narrow mute buttons and volume range controls.
 
 ## Actions
 
@@ -74,6 +74,8 @@ Clock control actions use an exact document-local target:
 The target must be a [`clock-text`](../types/HTMShell.Elements/clock-text.md) element in the same document. Overlay actions do not accept `data-htm-target`.
 
 Power profile buttons may use `data-htm-enabled-bind` to follow a typed Boolean availability key. An author-provided `disabled` attribute always remains effective.
+
+[`range-control`](../types/HTMShell.Elements/range-control.md) uses a semantic `input type="range"` for one approved PipeWire volume target. It is not a general numeric assignment control.
 
 State has process, output, or surface scope. Process state is shared across outputs. Output state affects one output group. Surface state describes one document surface.
 

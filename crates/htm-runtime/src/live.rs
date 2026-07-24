@@ -2,8 +2,9 @@ use crate::adapter::{elapsed_ms, render_rgba_scaled, resolve_resources, validate
 use crate::builtin::{
     BindingUpdate, BuiltInElementIndex, BuiltInElementKind, BuiltInElementSummary,
     BuiltInSurfaceKind, ClockDeclaration, DATETIME_ATTRIBUTE, ElementDeclaration,
-    ElementInstanceId, RepeatDeclaration, RepeatedElementDeclaration, STATE_ATTRIBUTE, ShellAction,
-    StateBindingKey, StateToken, StateValueKind, ensure_registry_valid,
+    ElementInstanceId, PipeWireControlTarget, RangeControlDeclaration, RepeatDeclaration,
+    RepeatedElementDeclaration, STATE_ATTRIBUTE, ShellAction, StateBindingKey, StateToken,
+    StateValueKind, ensure_registry_valid,
 };
 use crate::identity::IdentityRegistry;
 use crate::model::{DiagnosticMessage, LogicalRect, ViewportSpec};
@@ -11,7 +12,7 @@ use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
 use crate::{
     ExperimentalDocumentIdentity, ExperimentalNodeIdentity, MAX_CLONED_NODES_PER_DOCUMENT,
     MAX_CLONED_NODES_PER_REPEAT, MAX_ITEMS_PER_REPEAT, NumericValue, PipeWireDocumentDemand,
-    RepeatItemSnapshot, RepeatSource, RepeatSourceSnapshot, RuntimeError,
+    RepeatItemSnapshot, RepeatSource, RepeatSourceSnapshot, RuntimeError, StateValueFormat,
 };
 use blitz_dom::node::NodeData;
 use blitz_dom::{Document, DocumentConfig, LocalName, QualName, StyleThreading, local_name, ns};
@@ -123,18 +124,105 @@ pub enum LiveAction {
     PowerProfileSetPowerSaver,
     PowerProfileSetBalanced,
     PowerProfileSetPerformance,
+    PipeWireAudio(PipeWireControlRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingActivation {
-    id: ElementInstanceId,
+    id: String,
     action: LiveAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PipeWireControlIdentity {
+    pub document_generation: ExperimentalDocumentIdentity,
+    pub locator: PipeWireControlLocator,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PipeWireControlLocator {
+    Element(String),
+    Repeated {
+        repeat_id: String,
+        item_key: String,
+        local_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipeWireAudioTarget {
+    NodeItem {
+        source_generation: u64,
+        item_key: String,
+    },
+    DefaultSink,
+    DefaultSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipeWireAudioOperation {
+    Mute,
+    Unmute,
+    ToggleMute,
+    SetVolume,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipeWireDesiredVolume(u64);
+
+impl PipeWireDesiredVolume {
+    pub fn new(value: f64) -> Option<Self> {
+        (value.is_finite() && value >= 0.0).then(|| Self(value.to_bits()))
+    }
+
+    pub fn get(self) -> f64 {
+        f64::from_bits(self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeWireControlRequest {
+    pub control: PipeWireControlIdentity,
+    pub target: PipeWireAudioTarget,
+    pub operation: PipeWireAudioOperation,
+    pub volume: Option<PipeWireDesiredVolume>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipeWireControlState {
+    Idle,
+    Pending,
+    Failed,
+    Unavailable,
+}
+
+impl PipeWireControlState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Pending => "pending",
+            Self::Failed => "failed",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingRange {
+    control: PipeWireControlIdentity,
+    target: PipeWireAudioTarget,
+    node: ExperimentalNodeIdentity,
+    range: RangeControlDeclaration,
+    authoritative_value: Option<String>,
+    last_desired: Option<PipeWireDesiredVolume>,
 }
 
 impl LiveAction {
     fn from_registered(
         action: ShellAction,
         target: Option<ElementInstanceId>,
+        pipewire_target: Option<PipeWireControlTarget>,
+        control: PipeWireControlIdentity,
     ) -> Result<Self, RuntimeError> {
         Ok(match action {
             ShellAction::OverlayToggle => Self::ToggleOverlay,
@@ -152,6 +240,16 @@ impl LiveAction {
             ShellAction::PowerProfileSetPowerSaver => Self::PowerProfileSetPowerSaver,
             ShellAction::PowerProfileSetBalanced => Self::PowerProfileSetBalanced,
             ShellAction::PowerProfileSetPerformance => Self::PowerProfileSetPerformance,
+            ShellAction::PipeWireAudioMute
+            | ShellAction::PipeWireAudioUnmute
+            | ShellAction::PipeWireAudioToggleMute => {
+                Self::PipeWireAudio(pipewire_mute_request(action, pipewire_target, control)?)
+            }
+            ShellAction::PipeWireAudioSetVolume => {
+                return Err(RuntimeError::InvalidMutationTarget(
+                    "set-volume is emitted by range interaction".into(),
+                ));
+            }
         })
     }
 }
@@ -236,6 +334,7 @@ pub struct LiveDocument {
     kind: LiveDocumentKind,
     last_pointer: Option<Point<f32>>,
     pressed_action: Option<PendingActivation>,
+    pressed_range: Option<PendingRange>,
     pending_action: Option<LiveAction>,
     click_count: u64,
     measurements: LiveRuntimeMeasurements,
@@ -464,6 +563,7 @@ impl LiveDocument {
             kind,
             last_pointer: None,
             pressed_action: None,
+            pressed_range: None,
             pending_action: None,
             click_count: 0,
             measurements: LiveRuntimeMeasurements {
@@ -533,6 +633,9 @@ impl LiveDocument {
     pub fn pointer_move(&mut self, x: f64, y: f64) -> Result<bool, RuntimeError> {
         let point = checked_point(x, y)?;
         self.last_pointer = Some(point);
+        if self.pressed_range.is_some() {
+            return self.update_pressed_range(point.x);
+        }
         let changed = self.document.set_hover_to(point.x, point.y);
         if changed {
             self.resolve();
@@ -542,6 +645,13 @@ impl LiveDocument {
 
     pub fn pointer_leave(&mut self) -> bool {
         let mut changed = self.document.clear_hover();
+        if let Some(range) = self.pressed_range.take()
+            && self
+                .apply_attribute_to_node(range.node, "value", range.authoritative_value.as_deref())
+                .unwrap_or(false)
+        {
+            changed = true;
+        }
         if self.pressed_action.is_some() {
             let point = self.last_pointer.unwrap_or_default();
             self.document
@@ -561,7 +671,17 @@ impl LiveDocument {
             return Ok(false);
         };
         match pressed {
-            true if self.pressed_action.is_none() => {
+            true if self.pressed_action.is_none() && self.pressed_range.is_none() => {
+                if let Some(range) = self.range_at(point.x, point.y)? {
+                    self.document
+                        .handle_ui_event(UiEvent::PointerDown(pointer_event(
+                            point.x, point.y, true,
+                        )));
+                    self.pressed_range = Some(range);
+                    self.update_pressed_range(point.x)?;
+                    self.resolve();
+                    return Ok(true);
+                }
                 let Some(action) = self.action_at(point.x, point.y)? else {
                     return Ok(false);
                 };
@@ -587,6 +707,14 @@ impl LiveDocument {
                     }
                     self.pending_action = Some(action);
                 }
+                self.resolve();
+                Ok(true)
+            }
+            false if self.pressed_range.is_some() => {
+                self.update_pressed_range(point.x)?;
+                self.document
+                    .handle_ui_event(UiEvent::PointerUp(pointer_event(point.x, point.y, false)));
+                self.pressed_range = None;
                 self.resolve();
                 Ok(true)
             }
@@ -723,6 +851,71 @@ impl LiveDocument {
 
     pub fn take_action(&mut self) -> Option<LiveAction> {
         self.pending_action.take()
+    }
+
+    pub fn apply_pipewire_control_state(
+        &mut self,
+        identity: &PipeWireControlIdentity,
+        state: PipeWireControlState,
+    ) -> Result<bool, RuntimeError> {
+        if identity.document_generation != self.document_identity {
+            return Err(RuntimeError::InvalidMutationTarget(
+                "PipeWire control belongs to a stale document generation".into(),
+            ));
+        }
+        let node = match &identity.locator {
+            PipeWireControlLocator::Element(html_id) => {
+                let declaration = self.builtins.element(html_id).ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "PipeWire control `#{html_id}` disappeared"
+                    ))
+                })?;
+                if declaration
+                    .action
+                    .is_none_or(|action| !action.as_str().starts_with("pipewire.audio."))
+                {
+                    return Err(RuntimeError::InvalidMutationTarget(format!(
+                        "`#{html_id}` is not a PipeWire audio control"
+                    )));
+                }
+                self.builtins.indexed_node(html_id).ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "PipeWire control `#{html_id}` disappeared"
+                    ))
+                })?
+            }
+            PipeWireControlLocator::Repeated {
+                repeat_id,
+                item_key,
+                local_id,
+            } => {
+                let repeat = self.repeats.get(repeat_id).ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "PipeWire repeat `#{repeat_id}` disappeared"
+                    ))
+                })?;
+                let item = repeat.items.get(item_key).ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "PipeWire node item `{item_key}` disappeared"
+                    ))
+                })?;
+                item.elements
+                    .iter()
+                    .find(|element| element.declaration.local_id == *local_id)
+                    .filter(|element| element.declaration.action.is_some())
+                    .map(|element| element.node)
+                    .ok_or_else(|| {
+                        RuntimeError::InvalidMutationTarget(format!(
+                            "PipeWire control `{local_id}` disappeared"
+                        ))
+                    })?
+            }
+        };
+        let changed = self.apply_attribute_to_node(node, STATE_ATTRIBUTE, Some(state.as_str()))?;
+        if changed {
+            self.resolve();
+        }
+        Ok(changed)
     }
 
     pub fn built_in_summary(&self) -> BuiltInElementSummary {
@@ -875,6 +1068,43 @@ impl LiveDocument {
                 demand.nodes = true;
                 demand.defaults = true;
             }
+            if matches!(
+                key,
+                StateBindingKey::PipeWireDefaultSinkAudioStatus
+                    | StateBindingKey::PipeWireDefaultSinkVolume
+                    | StateBindingKey::PipeWireDefaultSinkMuteState
+                    | StateBindingKey::PipeWireDefaultSinkCanSetVolume
+                    | StateBindingKey::PipeWireDefaultSinkCanSetMute
+                    | StateBindingKey::PipeWireDefaultSourceAudioStatus
+                    | StateBindingKey::PipeWireDefaultSourceVolume
+                    | StateBindingKey::PipeWireDefaultSourceMuteState
+                    | StateBindingKey::PipeWireDefaultSourceCanSetVolume
+                    | StateBindingKey::PipeWireDefaultSourceCanSetMute
+                    | StateBindingKey::PipeWireConfiguredSinkAudioStatus
+                    | StateBindingKey::PipeWireConfiguredSinkVolume
+                    | StateBindingKey::PipeWireConfiguredSinkMuteState
+                    | StateBindingKey::PipeWireConfiguredSinkCanSetVolume
+                    | StateBindingKey::PipeWireConfiguredSinkCanSetMute
+                    | StateBindingKey::PipeWireConfiguredSourceAudioStatus
+                    | StateBindingKey::PipeWireConfiguredSourceVolume
+                    | StateBindingKey::PipeWireConfiguredSourceMuteState
+                    | StateBindingKey::PipeWireConfiguredSourceCanSetVolume
+                    | StateBindingKey::PipeWireConfiguredSourceCanSetMute
+            ) {
+                demand.audio_state = true;
+            }
+        }
+        for declaration in self.builtins.declarations() {
+            if declaration
+                .action
+                .is_some_and(|action| action.as_str().starts_with("pipewire.audio."))
+            {
+                demand.service = true;
+                demand.nodes = true;
+                demand.defaults = true;
+                demand.audio_state = true;
+                demand.audio_writes = true;
+            }
         }
         for repeat in self
             .repeats
@@ -886,18 +1116,38 @@ impl LiveDocument {
             for descendant in &repeat.declaration.descendants {
                 if matches!(
                     descendant.binding,
-                    crate::ItemBindingKey::Ready
-                        | crate::ItemBindingKey::NodeState
-                        | crate::ItemBindingKey::Direction
-                        | crate::ItemBindingKey::Property
+                    Some(
+                        crate::ItemBindingKey::Ready
+                            | crate::ItemBindingKey::NodeState
+                            | crate::ItemBindingKey::Direction
+                            | crate::ItemBindingKey::Property
+                    )
                 ) {
                     demand.node_details = true;
                 }
                 if matches!(
                     descendant.binding,
-                    crate::ItemBindingKey::DefaultRole | crate::ItemBindingKey::ConfiguredRole
+                    Some(
+                        crate::ItemBindingKey::DefaultRole | crate::ItemBindingKey::ConfiguredRole
+                    )
                 ) {
                     demand.defaults = true;
+                }
+                if matches!(
+                    descendant.binding,
+                    Some(
+                        crate::ItemBindingKey::AudioStatus
+                            | crate::ItemBindingKey::Volume
+                            | crate::ItemBindingKey::MuteState
+                            | crate::ItemBindingKey::CanSetVolume
+                            | crate::ItemBindingKey::CanSetMute
+                    )
+                ) {
+                    demand.audio_state = true;
+                }
+                if descendant.action.is_some() {
+                    demand.audio_state = true;
+                    demand.audio_writes = true;
                 }
                 if let Some(property_key) = &descendant.property_key {
                     demand.property_keys.insert(property_key.clone());
@@ -1183,7 +1433,12 @@ impl LiveDocument {
                         "numeric binding target `#{html_id}` has no format"
                     ))
                 })?;
-                let formatted = value.format(format).map_err(|error| {
+                let formatted = if is_pipewire_volume_key(*key) {
+                    value.format_volume(format)
+                } else {
+                    value.format(format)
+                }
+                .map_err(|error| {
                     RuntimeError::InvalidMutationTarget(format!(
                         "numeric binding `{}` could not be formatted: {error}",
                         key.as_str()
@@ -1194,7 +1449,34 @@ impl LiveDocument {
                         "numeric binding target `#{html_id}` disappeared"
                     ))
                 })?;
-                if self.apply_value_to_node(node, &formatted.display, formatted.value.as_deref())? {
+                let changed = if declaration.kind == BuiltInElementKind::RangeControl {
+                    let range = declaration.range.ok_or_else(|| {
+                        RuntimeError::InvalidMutationTarget(format!(
+                            "range control `#{html_id}` has no validated bounds"
+                        ))
+                    })?;
+                    let visual = value
+                        .as_f64()
+                        .map(|value| value.clamp(range.minimum.get(), range.maximum.get()));
+                    let visual = visual
+                        .map(|value| NumericValue::Decimal(value).format(StateValueFormat::Raw))
+                        .transpose()
+                        .map_err(|error| {
+                            RuntimeError::InvalidMutationTarget(format!(
+                                "range control `#{html_id}` value could not be formatted: {error}"
+                            ))
+                        })?
+                        .and_then(|value| value.value);
+                    self.record_range_authoritative(node, visual.clone());
+                    if self.node_attribute(node, STATE_ATTRIBUTE)?.as_deref() == Some("pending") {
+                        false
+                    } else {
+                        self.apply_attribute_to_node(node, "value", visual.as_deref())?
+                    }
+                } else {
+                    self.apply_value_to_node(node, &formatted.display, formatted.value.as_deref())?
+                };
+                if changed {
                     update.changed_elements = update.changed_elements.saturating_add(1);
                     update.changed_value_elements = update.changed_value_elements.saturating_add(1);
                 }
@@ -1237,6 +1519,27 @@ impl LiveDocument {
                         "Boolean binding target `#{html_id}` disappeared"
                     ))
                 })?;
+                if declaration.kind == BuiltInElementKind::RangeControl
+                    || declaration
+                        .action
+                        .is_some_and(|action| action.as_str().starts_with("pipewire.audio."))
+                {
+                    let node = self.builtins.indexed_node(&html_id).ok_or_else(|| {
+                        RuntimeError::InvalidMutationTarget(format!(
+                            "control `#{html_id}` disappeared"
+                        ))
+                    })?;
+                    if self.apply_control_availability(
+                        node,
+                        declaration.disabled,
+                        *value == Some(true),
+                    )? {
+                        update.changed_elements = update.changed_elements.saturating_add(1);
+                        update.changed_boolean_elements =
+                            update.changed_boolean_elements.saturating_add(1);
+                    }
+                    continue;
+                }
                 let disabled = declaration.disabled || *value != Some(true);
                 let current = self.registered_attribute(&html_id, "disabled")?.is_some();
                 if current == disabled {
@@ -1731,6 +2034,14 @@ impl LiveDocument {
             return Ok(());
         };
         let slots = self.identities.subtree_slots(&self.document, item.root)?;
+        if self
+            .pressed_range
+            .as_ref()
+            .is_some_and(|range| slots.contains(&range.node.slot))
+        {
+            self.pressed_range = None;
+            self.pending_action = None;
+        }
         let root = self.identities.resolve(&self.document, item.root)?;
         self.document.mutate().remove_and_drop_node(root);
         self.identities.retire_removed(&self.document, &slots)?;
@@ -1750,7 +2061,12 @@ impl LiveDocument {
         for element in &live.elements {
             let element_changed = match element.declaration.kind {
                 BuiltInElementKind::StateText => {
-                    let value = if element.declaration.binding == crate::ItemBindingKey::Property {
+                    let binding = element.declaration.binding.ok_or_else(|| {
+                        RuntimeError::InvalidMutationTarget(
+                            "repeated text binding disappeared".into(),
+                        )
+                    })?;
+                    let value = if binding == crate::ItemBindingKey::Property {
                         element
                             .declaration
                             .property_key
@@ -1759,15 +2075,17 @@ impl LiveDocument {
                             .map(String::as_str)
                             .unwrap_or("—")
                     } else {
-                        item.text
-                            .get(&element.declaration.binding)
-                            .map(String::as_str)
-                            .unwrap_or("—")
+                        item.text.get(&binding).map(String::as_str).unwrap_or("—")
                     };
                     self.apply_text_to_node(element.node, value)?
                 }
                 BuiltInElementKind::StateToken => {
-                    let token = if element.declaration.binding == crate::ItemBindingKey::Property {
+                    let binding = element.declaration.binding.ok_or_else(|| {
+                        RuntimeError::InvalidMutationTarget(
+                            "repeated token binding disappeared".into(),
+                        )
+                    })?;
+                    let token = if binding == crate::ItemBindingKey::Property {
                         if element
                             .declaration
                             .property_key
@@ -1780,7 +2098,7 @@ impl LiveDocument {
                         }
                     } else {
                         item.tokens
-                            .get(&element.declaration.binding)
+                            .get(&binding)
                             .copied()
                             .unwrap_or(StateToken::Unknown)
                     };
@@ -1791,9 +2109,14 @@ impl LiveDocument {
                     )?
                 }
                 BuiltInElementKind::StateValue => {
+                    let binding = element.declaration.binding.ok_or_else(|| {
+                        RuntimeError::InvalidMutationTarget(
+                            "repeated value binding disappeared".into(),
+                        )
+                    })?;
                     let value = item
                         .values
-                        .get(&element.declaration.binding)
+                        .get(&binding)
                         .copied()
                         .unwrap_or(NumericValue::Unknown);
                     let format = element.declaration.value_format.ok_or_else(|| {
@@ -1802,7 +2125,12 @@ impl LiveDocument {
                             element.declaration.local_id
                         ))
                     })?;
-                    let formatted = value.format(format).map_err(|error| {
+                    let formatted = if binding == crate::ItemBindingKey::Volume {
+                        value.format_volume(format)
+                    } else {
+                        value.format(format)
+                    }
+                    .map_err(|error| {
                         RuntimeError::InvalidMutationTarget(format!(
                             "repeat value `{}` could not be formatted: {error}",
                             element.declaration.local_id
@@ -1814,6 +2142,63 @@ impl LiveDocument {
                         formatted.value.as_deref(),
                     )?
                 }
+                BuiltInElementKind::ActionButton => {
+                    let enabled = element
+                        .declaration
+                        .enabled_binding
+                        .and_then(|binding| item.tokens.get(&binding))
+                        .is_some_and(|token| *token == StateToken::True);
+                    self.apply_control_availability(
+                        element.node,
+                        element.declaration.disabled,
+                        enabled,
+                    )?
+                }
+                BuiltInElementKind::RangeControl => {
+                    let enabled = element
+                        .declaration
+                        .enabled_binding
+                        .and_then(|binding| item.tokens.get(&binding))
+                        .is_some_and(|token| *token == StateToken::True);
+                    let mut changed = self.apply_control_availability(
+                        element.node,
+                        element.declaration.disabled,
+                        enabled,
+                    )?;
+                    let value = item
+                        .values
+                        .get(&crate::ItemBindingKey::Volume)
+                        .and_then(|value| value.as_f64());
+                    let range = element.declaration.range.ok_or_else(|| {
+                        RuntimeError::InvalidMutationTarget(
+                            "repeated range control has no validated bounds".into(),
+                        )
+                    })?;
+                    let value = value
+                        .map(|value| {
+                            NumericValue::Decimal(
+                                value.clamp(range.minimum.get(), range.maximum.get()),
+                            )
+                            .format(StateValueFormat::Raw)
+                        })
+                        .transpose()
+                        .map_err(|error| {
+                            RuntimeError::InvalidMutationTarget(format!(
+                                "repeated range value could not be formatted: {error}"
+                            ))
+                        })?
+                        .and_then(|value| value.value);
+                    self.record_range_authoritative(element.node, value.clone());
+                    if self
+                        .node_attribute(element.node, STATE_ATTRIBUTE)?
+                        .as_deref()
+                        != Some("pending")
+                    {
+                        changed |=
+                            self.apply_attribute_to_node(element.node, "value", value.as_deref())?;
+                    }
+                    changed
+                }
                 _ => {
                     return Err(RuntimeError::InvalidMutationTarget(
                         "repeat contains a forbidden live element kind".into(),
@@ -1821,6 +2206,57 @@ impl LiveDocument {
                 }
             };
             changed = changed.saturating_add(usize::from(element_changed));
+        }
+        Ok(changed)
+    }
+
+    fn apply_control_availability(
+        &mut self,
+        identity: ExperimentalNodeIdentity,
+        author_disabled: bool,
+        enabled: bool,
+    ) -> Result<bool, RuntimeError> {
+        let disabled = author_disabled || !enabled;
+        let mut changed =
+            self.apply_attribute_to_node(identity, "disabled", disabled.then_some(""))?;
+        if disabled
+            && self
+                .pressed_range
+                .as_ref()
+                .is_some_and(|range| range.node == identity)
+        {
+            let range = self.pressed_range.take().expect("checked above");
+            if self.pending_action.as_ref().is_some_and(|action| {
+                matches!(
+                    action,
+                    LiveAction::PipeWireAudio(request) if request.control == range.control
+                )
+            }) {
+                self.pending_action = None;
+            }
+            changed |= self.apply_attribute_to_node(
+                identity,
+                "value",
+                range.authoritative_value.as_deref(),
+            )?;
+        }
+        let slot = self.identities.resolve(&self.document, identity)?;
+        let current = self
+            .document
+            .get_node(slot)
+            .and_then(|node| node.element_data())
+            .and_then(|element| element.attr(LocalName::from(STATE_ATTRIBUTE)));
+        let desired = if enabled {
+            match current {
+                Some("pending" | "failed") => None,
+                Some("idle") => None,
+                _ => Some("idle"),
+            }
+        } else {
+            Some("unavailable")
+        };
+        if let Some(desired) = desired {
+            changed |= self.apply_attribute_to_node(identity, STATE_ATTRIBUTE, Some(desired))?;
         }
         Ok(changed)
     }
@@ -2001,6 +2437,51 @@ impl LiveDocument {
 
     fn action_at(&self, x: f32, y: f32) -> Result<Option<PendingActivation>, RuntimeError> {
         if !self.builtins.is_empty() {
+            for (repeat_id, repeat) in &self.repeats {
+                if repeat.declaration.source != RepeatSource::PipeWireNodes {
+                    continue;
+                }
+                for item_key in repeat.order.iter().rev() {
+                    let item = &repeat.items[item_key];
+                    for element in item.elements.iter().rev() {
+                        let Some(action) = element.declaration.action else {
+                            continue;
+                        };
+                        if element.declaration.kind != BuiltInElementKind::ActionButton
+                            || self.node_is_disabled(element.node)?
+                        {
+                            continue;
+                        }
+                        let bounds = self.bounds_for_identity(element.node)?;
+                        if contains(&bounds, x, y) {
+                            let control = PipeWireControlIdentity {
+                                document_generation: self.document_identity,
+                                locator: PipeWireControlLocator::Repeated {
+                                    repeat_id: repeat_id.clone(),
+                                    item_key: item_key.clone(),
+                                    local_id: element.declaration.local_id.clone(),
+                                },
+                            };
+                            let operation = pipewire_mute_operation(action)?;
+                            return Ok(Some(PendingActivation {
+                                id: format!(
+                                    "{repeat_id}:{}:{}",
+                                    item_key, element.declaration.local_id
+                                ),
+                                action: LiveAction::PipeWireAudio(PipeWireControlRequest {
+                                    control,
+                                    target: PipeWireAudioTarget::NodeItem {
+                                        source_generation: repeat.source_generation,
+                                        item_key: item_key.clone(),
+                                    },
+                                    operation,
+                                    volume: None,
+                                }),
+                            }));
+                        }
+                    }
+                }
+            }
             for html_id in self.builtins.action_candidates() {
                 let Some(target) =
                     self.builtins
@@ -2017,9 +2498,18 @@ impl LiveDocument {
                 )?;
                 validate_rect(&bounds)?;
                 if contains(&bounds, x, y) {
+                    let control = PipeWireControlIdentity {
+                        document_generation: self.document_identity,
+                        locator: PipeWireControlLocator::Element(target.id.html_id.clone()),
+                    };
                     return Ok(Some(PendingActivation {
-                        id: target.id,
-                        action: LiveAction::from_registered(target.action, target.target)?,
+                        id: target.id.html_id.clone(),
+                        action: LiveAction::from_registered(
+                            target.action,
+                            target.target,
+                            target.pipewire_target,
+                            control,
+                        )?,
                     }));
                 }
             }
@@ -2028,15 +2518,178 @@ impl LiveDocument {
         for (selector, action) in self.kind.actions() {
             if contains(&self.bounds_for(selector)?, x, y) {
                 return Ok(Some(PendingActivation {
-                    id: ElementInstanceId {
-                        document_generation: self.document_identity,
-                        html_id: selector.trim_start_matches('#').to_owned(),
-                    },
+                    id: (*selector).to_owned(),
                     action: action.clone(),
                 }));
             }
         }
         Ok(None)
+    }
+
+    fn range_at(&self, x: f32, y: f32) -> Result<Option<PendingRange>, RuntimeError> {
+        for (repeat_id, repeat) in &self.repeats {
+            if repeat.declaration.source != RepeatSource::PipeWireNodes {
+                continue;
+            }
+            for item_key in repeat.order.iter().rev() {
+                let item = &repeat.items[item_key];
+                for element in item.elements.iter().rev() {
+                    let Some(range) = element.declaration.range else {
+                        continue;
+                    };
+                    if self.node_is_disabled(element.node)? {
+                        continue;
+                    }
+                    let bounds = self.bounds_for_identity(element.node)?;
+                    if contains(&bounds, x, y) {
+                        return Ok(Some(PendingRange {
+                            control: PipeWireControlIdentity {
+                                document_generation: self.document_identity,
+                                locator: PipeWireControlLocator::Repeated {
+                                    repeat_id: repeat_id.clone(),
+                                    item_key: item_key.clone(),
+                                    local_id: element.declaration.local_id.clone(),
+                                },
+                            },
+                            target: PipeWireAudioTarget::NodeItem {
+                                source_generation: repeat.source_generation,
+                                item_key: item_key.clone(),
+                            },
+                            node: element.node,
+                            range,
+                            authoritative_value: self.node_attribute(element.node, "value")?,
+                            last_desired: None,
+                        }));
+                    }
+                }
+            }
+        }
+        for declaration in self.builtins.declarations() {
+            let Some(range) = declaration.range else {
+                continue;
+            };
+            let node = self
+                .builtins
+                .indexed_node(&declaration.id.html_id)
+                .ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "range control `#{}` disappeared",
+                        declaration.id.html_id
+                    ))
+                })?;
+            if self.node_is_disabled(node)? {
+                continue;
+            }
+            let bounds = self.bounds_for_identity(node)?;
+            if contains(&bounds, x, y) {
+                return Ok(Some(PendingRange {
+                    control: PipeWireControlIdentity {
+                        document_generation: self.document_identity,
+                        locator: PipeWireControlLocator::Element(declaration.id.html_id.clone()),
+                    },
+                    target: pipewire_audio_target(range.target)?,
+                    node,
+                    range,
+                    authoritative_value: self.node_attribute(node, "value")?,
+                    last_desired: None,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn update_pressed_range(&mut self, x: f32) -> Result<bool, RuntimeError> {
+        let Some(mut pending) = self.pressed_range.take() else {
+            return Ok(false);
+        };
+        let bounds = self.bounds_for_identity(pending.node)?;
+        let span = f64::from(bounds.width.max(1.0));
+        let position = ((f64::from(x) - f64::from(bounds.x)) / span).clamp(0.0, 1.0);
+        let minimum = pending.range.minimum.get();
+        let maximum = pending.range.maximum.get();
+        let step = pending.range.step.get();
+        let raw = minimum + position * (maximum - minimum);
+        let steps = ((raw - minimum) / step).round();
+        let desired = (minimum + steps * step).clamp(minimum, maximum);
+        let desired = PipeWireDesiredVolume::new(desired).ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget("range produced an invalid volume".into())
+        })?;
+        let changed = pending.last_desired != Some(desired);
+        if changed {
+            let value = NumericValue::Decimal(desired.get())
+                .format(StateValueFormat::Raw)
+                .map_err(|error| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "range value could not be formatted: {error}"
+                    ))
+                })?
+                .value;
+            self.apply_attribute_to_node(pending.node, "value", value.as_deref())?;
+            self.apply_attribute_to_node(
+                pending.node,
+                STATE_ATTRIBUTE,
+                Some(PipeWireControlState::Pending.as_str()),
+            )?;
+            self.pending_action = Some(LiveAction::PipeWireAudio(PipeWireControlRequest {
+                control: pending.control.clone(),
+                target: pending.target.clone(),
+                operation: PipeWireAudioOperation::SetVolume,
+                volume: Some(desired),
+            }));
+            pending.last_desired = Some(desired);
+            self.resolve();
+        }
+        self.pressed_range = Some(pending);
+        Ok(changed)
+    }
+
+    fn record_range_authoritative(
+        &mut self,
+        node: ExperimentalNodeIdentity,
+        value: Option<String>,
+    ) {
+        if let Some(pending) = self
+            .pressed_range
+            .as_mut()
+            .filter(|pending| pending.node == node)
+        {
+            pending.authoritative_value = value;
+        }
+    }
+
+    fn bounds_for_identity(
+        &self,
+        identity: ExperimentalNodeIdentity,
+    ) -> Result<LogicalRect, RuntimeError> {
+        let slot = self.identities.resolve(&self.document, identity)?;
+        let bounds =
+            self.document
+                .get_node(slot)
+                .map(node_bounds)
+                .ok_or(RuntimeError::StaleIdentity {
+                    slot: identity.slot,
+                    generation: identity.generation,
+                })?;
+        validate_rect(&bounds)?;
+        Ok(bounds)
+    }
+
+    fn node_attribute(
+        &self,
+        identity: ExperimentalNodeIdentity,
+        attribute: &str,
+    ) -> Result<Option<String>, RuntimeError> {
+        let slot = self.identities.resolve(&self.document, identity)?;
+        Ok(self
+            .document
+            .get_node(slot)
+            .and_then(|node| node.element_data())
+            .and_then(|element| element.attr(LocalName::from(attribute)))
+            .map(str::to_owned))
+    }
+
+    fn node_is_disabled(&self, identity: ExperimentalNodeIdentity) -> Result<bool, RuntimeError> {
+        Ok(self.node_attribute(identity, "disabled")?.is_some())
     }
 
     fn bounds_for(&self, selector: &str) -> Result<LogicalRect, RuntimeError> {
@@ -2054,6 +2707,55 @@ impl LiveDocument {
         self.document.resolve(self.started.elapsed().as_secs_f64());
         self.measurements.last_resolve_ms = elapsed_ms(started);
     }
+}
+
+const fn is_pipewire_volume_key(key: StateBindingKey) -> bool {
+    matches!(
+        key,
+        StateBindingKey::PipeWireDefaultSinkVolume
+            | StateBindingKey::PipeWireDefaultSourceVolume
+            | StateBindingKey::PipeWireConfiguredSinkVolume
+            | StateBindingKey::PipeWireConfiguredSourceVolume
+    )
+}
+
+fn pipewire_audio_target(
+    target: PipeWireControlTarget,
+) -> Result<PipeWireAudioTarget, RuntimeError> {
+    match target {
+        PipeWireControlTarget::DefaultSink => Ok(PipeWireAudioTarget::DefaultSink),
+        PipeWireControlTarget::DefaultSource => Ok(PipeWireAudioTarget::DefaultSource),
+        PipeWireControlTarget::CurrentItem => Err(RuntimeError::InvalidMutationTarget(
+            "current-item target requires a repeat identity".into(),
+        )),
+    }
+}
+
+fn pipewire_mute_operation(action: ShellAction) -> Result<PipeWireAudioOperation, RuntimeError> {
+    match action {
+        ShellAction::PipeWireAudioMute => Ok(PipeWireAudioOperation::Mute),
+        ShellAction::PipeWireAudioUnmute => Ok(PipeWireAudioOperation::Unmute),
+        ShellAction::PipeWireAudioToggleMute => Ok(PipeWireAudioOperation::ToggleMute),
+        _ => Err(RuntimeError::InvalidMutationTarget(format!(
+            "action `{}` is not a PipeWire mute operation",
+            action.as_str()
+        ))),
+    }
+}
+
+fn pipewire_mute_request(
+    action: ShellAction,
+    target: Option<PipeWireControlTarget>,
+    control: PipeWireControlIdentity,
+) -> Result<PipeWireControlRequest, RuntimeError> {
+    Ok(PipeWireControlRequest {
+        control,
+        target: pipewire_audio_target(target.ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget("PipeWire mute action has no target".into())
+        })?)?,
+        operation: pipewire_mute_operation(action)?,
+        volume: None,
+    })
 }
 
 fn checked_scaled_dimension(logical: u32, numerator: u32) -> Result<u32, RuntimeError> {
@@ -2469,6 +3171,8 @@ mod tests {
         assert!(demand.nodes);
         assert!(demand.node_details);
         assert!(demand.defaults);
+        assert!(demand.audio_state);
+        assert!(demand.audio_writes);
         assert_eq!(
             demand.property_keys,
             BTreeSet::from(["application.name".into(), "media.title".into()])
@@ -2499,8 +3203,15 @@ mod tests {
                 (crate::ItemBindingKey::IsAudio, StateToken::True),
                 (crate::ItemBindingKey::IsVideo, StateToken::False),
                 (crate::ItemBindingKey::IsStream, StateToken::False),
+                (crate::ItemBindingKey::AudioStatus, StateToken::Ready),
+                (crate::ItemBindingKey::MuteState, StateToken::Unmuted),
+                (crate::ItemBindingKey::CanSetVolume, StateToken::True),
+                (crate::ItemBindingKey::CanSetMute, StateToken::True),
             ]),
-            values: BTreeMap::from([(crate::ItemBindingKey::RawId, NumericValue::Integer(42))]),
+            values: BTreeMap::from([
+                (crate::ItemBindingKey::RawId, NumericValue::Integer(42)),
+                (crate::ItemBindingKey::Volume, NumericValue::Decimal(0.75)),
+            ]),
             properties: BTreeMap::from([("application.name".into(), "Player".into())]),
         };
         let first = RepeatSourceSnapshot {
@@ -2510,11 +3221,63 @@ mod tests {
         };
         assert_eq!(overlay.apply_repeat_source(&first).unwrap().insertions, 1);
         let identity = overlay.repeats["node-card"].items["7:42"].root;
+        let repeated = &overlay.repeats["node-card"].items["7:42"].elements;
+        let mute_node = repeated
+            .iter()
+            .find(|element| element.declaration.local_id == "mute-control")
+            .unwrap()
+            .node;
+        let range_node = repeated
+            .iter()
+            .find(|element| element.declaration.local_id == "volume-control")
+            .unwrap()
+            .node;
+        let mute_bounds = overlay.bounds_for_identity(mute_node).unwrap();
+        let mute_action = click_action(&mut overlay, &mute_bounds);
+        let LiveAction::PipeWireAudio(mute_request) = mute_action else {
+            panic!("item-local mute action was not emitted");
+        };
+        assert_eq!(mute_request.operation, PipeWireAudioOperation::ToggleMute);
+        assert_eq!(
+            mute_request.target,
+            PipeWireAudioTarget::NodeItem {
+                source_generation: 7,
+                item_key: "7:42".into(),
+            }
+        );
+        assert!(
+            overlay
+                .apply_pipewire_control_state(&mute_request.control, PipeWireControlState::Pending,)
+                .unwrap()
+        );
+        assert_eq!(
+            overlay.node_attribute(mute_node, STATE_ATTRIBUTE).unwrap(),
+            Some("pending".into())
+        );
+
+        let range_bounds = overlay.bounds_for_identity(range_node).unwrap();
+        let range_x = f64::from(range_bounds.x + range_bounds.width * 0.5);
+        let range_y = f64::from(range_bounds.y + range_bounds.height * 0.5);
+        assert!(overlay.pointer_move(range_x, range_y).unwrap());
+        assert!(overlay.pointer_primary(true).unwrap());
+        let LiveAction::PipeWireAudio(volume_request) =
+            overlay.take_action().expect("range emits set-volume")
+        else {
+            panic!("range did not emit a PipeWire audio request");
+        };
+        assert_eq!(volume_request.operation, PipeWireAudioOperation::SetVolume);
+        assert_eq!(volume_request.volume.unwrap().get(), 0.5);
+        assert!(overlay.pointer_primary(false).unwrap());
+        overlay
+            .apply_pipewire_control_state(&volume_request.control, PipeWireControlState::Failed)
+            .unwrap();
 
         item.properties
             .insert("application.name".into(), "Player updated".into());
         item.properties
             .insert("media.title".into(), "Current track".into());
+        item.values
+            .insert(crate::ItemBindingKey::Volume, NumericValue::Decimal(0.9));
         let second = RepeatSourceSnapshot {
             source: RepeatSource::PipeWireNodes,
             source_generation: 7,
@@ -2524,10 +3287,178 @@ mod tests {
         assert!(update.property_updates > 0);
         assert_eq!(overlay.repeats["node-card"].items["7:42"].root, identity);
         assert_eq!(
+            overlay.node_attribute(range_node, "value").unwrap(),
+            Some("0.9".into())
+        );
+        assert_eq!(
             overlay.snapshot().unwrap().document_parse_count,
             parse_count
         );
         assert_eq!(overlay.measurements().registry_scan_count, scans);
+    }
+
+    #[test]
+    fn default_pipewire_controls_use_typed_targets_and_authoritative_values() {
+        let mut overlay = LiveDocument::load_surface_document(
+            audio_fixture(),
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            1100,
+            800,
+        )
+        .unwrap();
+        overlay
+            .apply_bound_values(&[
+                (
+                    StateBindingKey::PipeWireDefaultSinkVolume,
+                    NumericValue::Decimal(0.72),
+                ),
+                (
+                    StateBindingKey::PipeWireDefaultSourceVolume,
+                    NumericValue::Decimal(0.31),
+                ),
+            ])
+            .unwrap();
+        overlay
+            .apply_bound_booleans(&[
+                (StateBindingKey::PipeWireDefaultSinkCanSetVolume, Some(true)),
+                (StateBindingKey::PipeWireDefaultSinkCanSetMute, Some(true)),
+                (
+                    StateBindingKey::PipeWireDefaultSourceCanSetVolume,
+                    Some(true),
+                ),
+                (StateBindingKey::PipeWireDefaultSourceCanSetMute, Some(true)),
+            ])
+            .unwrap();
+
+        let mute_bounds = selector_bounds(&overlay, "#default-output-toggle");
+        let LiveAction::PipeWireAudio(mute) = click_action(&mut overlay, &mute_bounds) else {
+            panic!("default mute control did not emit a PipeWire action");
+        };
+        assert_eq!(mute.target, PipeWireAudioTarget::DefaultSink);
+        assert_eq!(mute.operation, PipeWireAudioOperation::ToggleMute);
+
+        let range_bounds = selector_bounds(&overlay, "#default-input-range");
+        let x = f64::from(range_bounds.x + range_bounds.width);
+        let y = f64::from(range_bounds.y + range_bounds.height * 0.5);
+        assert!(overlay.pointer_move(x - 0.5, y).unwrap());
+        assert!(overlay.pointer_primary(true).unwrap());
+        let LiveAction::PipeWireAudio(volume) = overlay
+            .take_action()
+            .expect("default range emits an action")
+        else {
+            panic!("default range did not emit a PipeWire action");
+        };
+        assert_eq!(volume.target, PipeWireAudioTarget::DefaultSource);
+        assert_eq!(volume.operation, PipeWireAudioOperation::SetVolume);
+        assert_eq!(volume.volume.unwrap().get(), 1.0);
+        assert!(overlay.pointer_primary(false).unwrap());
+
+        overlay
+            .apply_pipewire_control_state(&volume.control, PipeWireControlState::Failed)
+            .unwrap();
+        overlay
+            .apply_bound_values(&[(
+                StateBindingKey::PipeWireDefaultSourceVolume,
+                NumericValue::Decimal(0.31),
+            )])
+            .unwrap();
+        assert_eq!(
+            overlay
+                .registered_attribute("default-input-range", "value")
+                .unwrap(),
+            Some("0.31".into())
+        );
+
+        overlay
+            .apply_bound_booleans(&[(StateBindingKey::PipeWireDefaultSinkCanSetMute, Some(false))])
+            .unwrap();
+        assert!(
+            overlay
+                .registered_attribute("default-output-toggle", "disabled")
+                .unwrap()
+                .is_some()
+        );
+
+        let output_range = selector_bounds(&overlay, "#default-output-range");
+        let output_x = f64::from(output_range.x + output_range.width * 0.8);
+        let output_y = f64::from(output_range.y + output_range.height * 0.5);
+        assert!(overlay.pointer_move(output_x, output_y).unwrap());
+        assert!(overlay.pointer_primary(true).unwrap());
+        assert!(overlay.take_action().is_some());
+        overlay
+            .apply_bound_booleans(&[(
+                StateBindingKey::PipeWireDefaultSinkCanSetVolume,
+                Some(false),
+            )])
+            .unwrap();
+        assert!(overlay.take_action().is_none());
+        assert!(!overlay.pointer_primary(false).unwrap());
+        assert_eq!(
+            overlay
+                .registered_attribute("default-output-range", "value")
+                .unwrap(),
+            Some("0.72".into())
+        );
+        assert_eq!(
+            overlay
+                .registered_attribute("default-output-range", STATE_ATTRIBUTE)
+                .unwrap(),
+            Some("unavailable".into())
+        );
+    }
+
+    #[test]
+    fn one_thousand_range_motion_events_retain_only_the_latest_intent() {
+        let mut overlay = LiveDocument::load_surface_document(
+            audio_fixture(),
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            1100,
+            800,
+        )
+        .unwrap();
+        overlay
+            .apply_bound_values(&[(
+                StateBindingKey::PipeWireDefaultSinkVolume,
+                NumericValue::Decimal(0.5),
+            )])
+            .unwrap();
+        overlay
+            .apply_bound_booleans(&[(StateBindingKey::PipeWireDefaultSinkCanSetVolume, Some(true))])
+            .unwrap();
+        let bounds = selector_bounds(&overlay, "#default-output-range");
+        let y = f64::from(bounds.y + bounds.height * 0.5);
+        assert!(overlay.pointer_move(f64::from(bounds.x + 1.0), y).unwrap());
+        assert!(overlay.pointer_primary(true).unwrap());
+        for index in 0..1_000 {
+            let position = (index % 101) as f32 / 100.0;
+            let x = bounds.x + position * bounds.width.max(1.0);
+            overlay.pointer_move(f64::from(x), y).unwrap();
+        }
+        let LiveAction::PipeWireAudio(latest) = overlay
+            .take_action()
+            .expect("latest range intent is retained")
+        else {
+            panic!("range emitted the wrong action");
+        };
+        assert_eq!(latest.operation, PipeWireAudioOperation::SetVolume);
+        assert!(latest.volume.unwrap().get() <= 1.0);
+        assert!(overlay.take_action().is_none());
+        overlay
+            .apply_bound_values(&[(
+                StateBindingKey::PipeWireDefaultSinkVolume,
+                NumericValue::Decimal(0.27),
+            )])
+            .unwrap();
+        assert!(overlay.pointer_leave());
+        assert_eq!(
+            overlay
+                .registered_attribute("default-output-range", "value")
+                .unwrap(),
+            Some("0.27".into())
+        );
+        assert!(!overlay.pointer_primary(false).unwrap());
     }
 
     #[test]

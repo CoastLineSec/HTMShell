@@ -6,9 +6,13 @@ body { background: transparent; }
 button { padding: 8px 12px; color: inherit; background: #263650; border: 1px solid #4c6488; border-radius: 8px; }
 button:hover { background: #304563; }
 button:active { background: #1b2b42; }
+button:disabled, input:disabled { opacity: 0.45; }
 [data-htm-state="unavailable"] { color: #ffadad; }
+[data-htm-state="unsupported"] { color: #74839a; }
 [data-htm-state="synchronizing"] { color: #ffd487; }
 [data-htm-state="ready"], [data-htm-state="running"] { color: #8ee6b1; }
+[data-htm-state="pending"] { outline: 2px solid #ffd487; }
+[data-htm-state="failed"] { outline: 2px solid #ff8f8f; }
 .inspector { width: min(1100px, 94%); max-height: 88%; margin: 62px auto 0; padding: 24px; overflow: auto; border: 1px solid #3b4c68; border-radius: 18px; background: #111a2af2; }
 .inspector-header { display: flex; align-items: center; justify-content: space-between; }
 .inspector-header h1 { margin: 2px 0 0; }
@@ -16,6 +20,11 @@ button:active { background: #1b2b42; }
 .summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 22px 0; }
 .summary > div { padding: 12px; border-radius: 10px; background: #1b2940; }
 .summary span { display: block; margin-bottom: 5px; color: #92a5c0; }
+.audio-summary { display: flex; gap: 8px; }
+.default-controls { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin: 20px 0; }
+.default-controls article { padding: 14px; border-radius: 10px; background: #1b2940; }
+.default-controls h2 { margin-top: 0; }
+input[type="range"] { width: 100%; accent-color: #71d8a7; }
 .node-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
 .node { min-width: 0; padding: 14px; border-left: 4px solid #526f9c; border-radius: 10px; background: #1b2940; }
 .node[data-htm-state="audio-sink"], .node[data-htm-state="audio-source"] { border-left-color: #78d6ad; }
@@ -28,6 +37,9 @@ dl { display: grid; grid-template-columns: 110px 1fr; gap: 5px 10px; }
 dt { color: #91a8c8; }
 dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 dd[data-htm-state="unavailable"] { color: #74839a; }
+.node-audio { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; margin-top: 12px; padding-top: 12px; border-top: 1px solid #3c4f6c; }
+.node-audio input { grid-column: 1 / -1; }
+.audio-reading { display: flex; gap: 8px; }
 footer { display: flex; gap: 6px; margin-top: 12px; }
 footer > span { min-width: 12px; min-height: 5px; border-radius: 4px; background: #42536e; }
 .overlay-footer { align-items: center; }

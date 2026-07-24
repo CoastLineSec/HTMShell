@@ -10,6 +10,8 @@ pub const MAX_PROPERTY_VALUE_BYTES: usize = 1_024;
 pub const MAX_NODE_TEXT_BYTES: usize = 256;
 pub const MAX_METADATA_VALUE_BYTES: usize = 1_024;
 pub const MAX_STAGED_DELTAS: usize = MAX_NODES + MAX_LINKS + 4_096;
+pub const MAX_AUDIO_CHANNELS: usize = 64;
+pub const MAX_PERCEPTUAL_VOLUME: f32 = 2.0;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -132,7 +134,107 @@ pub struct PipeWireNodeSnapshot {
     pub output_ports: u32,
     pub properties: BTreeMap<String, String>,
     pub audio_capable: bool,
+    pub audio: PipeWireNodeAudioSnapshot,
     pub ready: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FiniteVolume(u32);
+
+impl FiniteVolume {
+    pub(crate) fn new(value: f32) -> Option<Self> {
+        (value.is_finite() && value >= 0.0).then(|| Self(value.to_bits()))
+    }
+
+    pub(crate) fn get(self) -> f32 {
+        f32::from_bits(self.0)
+    }
+}
+
+impl Serialize for FiniteVolume {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_f32(self.get())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PipeWireNodeAudioSnapshot {
+    pub channels: Vec<FiniteVolume>,
+    pub average_volume: Option<FiniteVolume>,
+    pub muted: Option<bool>,
+    pub ready: bool,
+    pub can_set_volume: bool,
+    pub can_set_mute: bool,
+}
+
+impl PipeWireNodeAudioSnapshot {
+    #[cfg(test)]
+    pub(crate) fn from_linear_channels(
+        channels: &[f32],
+        muted: Option<bool>,
+        writable: bool,
+    ) -> Option<Self> {
+        if channels.len() > MAX_AUDIO_CHANNELS {
+            return None;
+        }
+        let channels = channels
+            .iter()
+            .map(|value| FiniteVolume::new(value.cbrt()))
+            .collect::<Option<Vec<_>>>()?;
+        let average_volume = perceptual_average(&channels);
+        Some(Self {
+            ready: average_volume.is_some() && muted.is_some(),
+            can_set_volume: writable && average_volume.is_some(),
+            can_set_mute: writable && muted.is_some(),
+            channels,
+            average_volume,
+            muted,
+        })
+    }
+}
+
+pub(crate) fn perceptual_average(channels: &[FiniteVolume]) -> Option<FiniteVolume> {
+    if channels.is_empty() {
+        return None;
+    }
+    let sum = channels.iter().try_fold(0.0_f32, |sum, value| {
+        let next = sum + value.get();
+        next.is_finite().then_some(next)
+    })?;
+    FiniteVolume::new(sum / channels.len() as f32)
+}
+
+pub(crate) fn scaled_linear_channels(
+    channels: &[FiniteVolume],
+    desired_average: f32,
+) -> Option<Vec<f32>> {
+    if !desired_average.is_finite()
+        || !(0.0..=MAX_PERCEPTUAL_VOLUME).contains(&desired_average)
+        || channels.is_empty()
+        || channels.len() > MAX_AUDIO_CHANNELS
+    {
+        return None;
+    }
+    let current_average = perceptual_average(channels)?.get();
+    let perceptual = if current_average > 0.0 {
+        let scale = desired_average / current_average;
+        channels
+            .iter()
+            .map(|channel| channel.get() * scale)
+            .collect::<Vec<_>>()
+    } else {
+        vec![desired_average; channels.len()]
+    };
+    perceptual
+        .into_iter()
+        .map(|value| {
+            let linear = value * value * value;
+            (linear.is_finite() && linear >= 0.0).then_some(linear)
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -180,6 +282,21 @@ pub struct PipeWireDefaultsSnapshot {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PipeWireControlCounters {
+    pub audio_state_activations: u64,
+    pub audio_state_releases: u64,
+    pub audio_parameter_updates: u64,
+    pub mute_writes_sent: u64,
+    pub volume_writes_sent: u64,
+    pub writes_coalesced: u64,
+    pub writes_confirmed: u64,
+    pub writes_failed: u64,
+    pub writes_timed_out: u64,
+    pub stale_writes_rejected: u64,
+    pub duplicate_writes_suppressed: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PipeWireResourceCounters {
     pub node_count: usize,
     pub link_count: usize,
@@ -194,6 +311,7 @@ pub struct PipeWireResourceCounters {
     pub duplicate_publications_suppressed: u64,
     pub reconnect_attempts: u64,
     pub diagnostics_contained: u64,
+    pub controls: PipeWireControlCounters,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -260,6 +378,13 @@ pub(crate) struct RawNodeInfo {
     pub properties: Option<BTreeMap<String, String>>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RawNodeAudioInfo {
+    pub raw_id: u32,
+    pub channel_volumes: Option<Vec<f32>>,
+    pub muted: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RawLinkInfo {
     pub raw_id: u32,
@@ -271,14 +396,23 @@ pub(crate) struct RawLinkInfo {
     pub raw_state: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PipeWireDelta {
     NodeAdded {
         raw_id: u32,
         properties: BTreeMap<String, String>,
     },
+    NodePermissions {
+        raw_id: u32,
+        writable: bool,
+    },
     NodeInfo(RawNodeInfo),
     NodeTracking {
+        raw_id: u32,
+        tracked: bool,
+    },
+    NodeAudioInfo(RawNodeAudioInfo),
+    NodeAudioTracking {
         raw_id: u32,
         tracked: bool,
     },
@@ -419,6 +553,37 @@ mod tests {
         assert!(bounded_properties([(long_key.as_str(), "value")]).is_err());
         let long_value = "v".repeat(MAX_PROPERTY_VALUE_BYTES + 1);
         assert!(bounded_properties([("key", long_value.as_str())]).is_err());
+    }
+
+    #[test]
+    fn perceptual_volume_matches_the_audited_channel_rule() {
+        let audio =
+            PipeWireNodeAudioSnapshot::from_linear_channels(&[1.0, 0.125], Some(false), true)
+                .unwrap();
+        assert!(audio.ready);
+        assert!(audio.can_set_volume);
+        assert!(audio.can_set_mute);
+        assert!((audio.channels[0].get() - 1.0).abs() < 0.000_001);
+        assert!((audio.channels[1].get() - 0.5).abs() < 0.000_001);
+        assert!((audio.average_volume.unwrap().get() - 0.75).abs() < 0.000_001);
+
+        let scaled = scaled_linear_channels(&audio.channels, 1.5).unwrap();
+        assert!((scaled[0] - 8.0).abs() < 0.000_01);
+        assert!((scaled[1] - 1.0).abs() < 0.000_01);
+    }
+
+    #[test]
+    fn zero_balance_and_invalid_vectors_are_contained() {
+        let audio =
+            PipeWireNodeAudioSnapshot::from_linear_channels(&[0.0, 0.0], Some(true), true).unwrap();
+        let scaled = scaled_linear_channels(&audio.channels, 0.5).unwrap();
+        assert_eq!(scaled, vec![0.125, 0.125]);
+        assert!(
+            PipeWireNodeAudioSnapshot::from_linear_channels(&[f32::NAN], Some(false), true)
+                .is_none()
+        );
+        assert!(scaled_linear_channels(&audio.channels, MAX_PERCEPTUAL_VOLUME + 0.1).is_none());
+        assert!(scaled_linear_channels(&[], 0.5).is_none());
     }
 
     #[test]

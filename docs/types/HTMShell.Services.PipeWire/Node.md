@@ -39,6 +39,8 @@ Missing text uses the standard unavailable marker.
 
 `item.node_type` and `item.node_state` also support token presentation.
 
+Audio nodes add `item.audio_status`, `item.volume`, `item.mute_state`, `item.can_set_volume`, and `item.can_set_mute`. See [`AudioNode`](AudioNode.md).
+
 ## Identity and ordering
 
 Identity combines the connection generation and node global ID. Updates and keyed moves preserve the repeated subtree. Removal invalidates it.
@@ -49,3 +51,4 @@ Nodes are ordered by normalized type, media class, description, name, then raw I
 
 - [`Properties`](Properties.md)
 - [`Defaults`](Defaults.md)
+- [`AudioNode`](AudioNode.md)

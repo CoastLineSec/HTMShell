@@ -1,6 +1,6 @@
 # `HTMShell.Elements`
 
-The `HTMShell.Elements` module contains six immutable built-in behavior declarations.
+The `HTMShell.Elements` module contains seven immutable built-in behavior declarations.
 
 ## Elements
 
@@ -10,6 +10,7 @@ The `HTMShell.Elements` module contains six immutable built-in behavior declarat
 - [`clock-text`](clock-text.md): Formats one wall-clock instant in a semantic `time` element.
 - [`state-value`](state-value.md): Projects a numeric value into text and a `value` attribute.
 - [`repeat`](repeat.md): Expands a keyed service collection from an inert template.
+- [`range-control`](range-control.md): Sets one approved PipeWire average-volume target.
 
 Declarations use ordinary HTML. Registered descendants inside a repeat use `data-htm-local-id` instead of `id`. Unknown HTMShell behavior attributes are rejected.
 

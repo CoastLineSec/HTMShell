@@ -24,7 +24,7 @@
 | `id` | Required, nonempty, and unique in the document |
 | `data-htm-element` | Must be `action-button` |
 | `data-htm-action` | Required approved action |
-| `data-htm-target` | Required for clock actions, forbidden for overlay and power-profile actions |
+| `data-htm-target` | Required for clock and external PipeWire audio actions, forbidden where the action defines no target |
 | `data-htm-enabled-bind` | Optional typed Boolean availability binding |
 | `disabled` | Optional HTML boolean attribute |
 
@@ -42,11 +42,16 @@ Actions cannot execute arbitrary methods, shell commands, files, or network requ
 
 Clock actions resolve `data-htm-target` as an exact `id` in the same document. The target must be a live [`clock-text`](clock-text.md) declaration. Target identity is checked again at dispatch.
 
-`data-htm-enabled-bind` controls the runtime portion of the effective disabled state. Unknown, unavailable, or false values disable the button. An author-provided `disabled` attribute is permanent and is never removed by a binding. Dynamic enabled bindings are not accepted inside repeats.
+`data-htm-enabled-bind` controls the runtime portion of the effective disabled state. Unknown, unavailable, or false values disable the button. An author-provided `disabled` attribute is permanent and is never removed by a binding.
+
+Inside `pipewire.nodes`, the mute actions `pipewire.audio.mute`, `pipewire.audio.unmute`, and `pipewire.audio.toggle_mute` target the current item and require `item.can_set_mute`. No target attribute is used. Other actions and repeats remain read-only.
+
+Outside a repeat, PipeWire mute actions require `pipewire.default_sink` or `pipewire.default_source` as `data-htm-target`. Raw IDs and configured defaults are rejected. `pipewire.audio.set_volume` is valid only on [`range-control`](range-control.md).
 
 ## See also
 
 - [Overlay actions](../HTMShell.Actions/Overlay.md)
 - [Clock actions](../HTMShell.Actions/Clock.md)
 - [Power profile actions](../HTMShell.Actions/PowerProfile.md)
+- [PipeWire audio actions](../HTMShell.Actions/PipeWireAudio.md)
 - [State and actions guide](../../guide/state-and-actions.md)

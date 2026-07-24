@@ -26,17 +26,20 @@
 | `id` | Required and document-unique |
 | `data-htm-source` | `upower.devices`, `power_profile.holds`, or `pipewire.nodes` |
 | Template content | Exactly one root element |
-| Registered descendants | `state-text`, `state-token`, or `state-value` |
+| Registered descendants | `state-text`, `state-token`, or `state-value`; `pipewire.nodes` also permits narrow audio controls |
 | `data-htm-local-id` | Required and template-unique on registered descendants |
 
-Normal `id` attributes, actions, clocks, and nested repeats are rejected in the template subtree. Item bindings must match the selected source.
+Normal `id` attributes, clocks, and nested repeats are rejected in the template subtree. Item bindings must match the selected source.
+
+`upower.devices` and `power_profile.holds` are read-only. `pipewire.nodes` also accepts item-local `pipewire.audio.mute`, `pipewire.audio.unmute`, and `pipewire.audio.toggle_mute` action buttons plus `range-control` for `pipewire.audio.set_volume`. Other actions and controls are rejected.
 
 Instances are inserted before the retained template marker. Source keys and document generations provide identity. A property update preserves the item subtree. Insertions, removals, and deterministic moves are incremental.
 
-The current limits are 32 repeats per document, 4,096 items per repeat, 64 registered descendants per template, depth 32, 4,096 cloned nodes per repeat, and 16,384 cloned nodes per document. A document may contain at most 16 `pipewire.nodes` repeats.
+The current limits are 32 repeats per document, 4,096 items per repeat, 64 registered descendants per template, depth 32, 4,096 cloned nodes per repeat, and 16,384 cloned nodes per document. A document may contain at most 16 `pipewire.nodes` repeats, 16 PipeWire audio controls per item, and 8 range controls per item.
 
 ## See also
 
 - [Device collection](../HTMShell.Services.UPower/DeviceCollection.md)
 - [Power profile holds](../HTMShell.Services.UPower/PowerProfileHold.md)
 - [PipeWire nodes](../HTMShell.Services.PipeWire/Node.md)
+- [PipeWire audio controls](../HTMShell.Services.PipeWire/AudioControls.md)

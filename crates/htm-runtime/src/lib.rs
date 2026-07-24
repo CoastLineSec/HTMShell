@@ -30,10 +30,13 @@ pub use clock::{
 };
 pub use collection::{
     FormattedValue, ItemBindingKey, MAX_CLONED_NODES_PER_DOCUMENT, MAX_CLONED_NODES_PER_REPEAT,
-    MAX_ITEMS_PER_REPEAT, MAX_PIPEWIRE_BINDINGS_PER_ITEM, MAX_PIPEWIRE_NODES_PER_PROCESS,
+    MAX_ITEMS_PER_REPEAT, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT,
+    MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM, MAX_PIPEWIRE_BINDINGS_PER_ITEM,
+    MAX_PIPEWIRE_NODES_PER_PROCESS, MAX_PIPEWIRE_PERCEPTUAL_VOLUME,
     MAX_PIPEWIRE_PROPERTY_KEY_BYTES, MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT,
     MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS, MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM,
     MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_POWER_PROFILE_HOLDS_PER_PROCESS,
+    MAX_RANGE_CONTROLS_PER_DOCUMENT, MAX_RANGE_CONTROLS_PER_ITEM, MAX_RANGE_NUMBER_BYTES,
     MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE, MAX_REPEAT_DECLARATIONS_PER_DOCUMENT,
     MAX_REPEAT_TEMPLATE_DEPTH, MAX_UPOWER_DEVICES_PER_PROCESS, NumericValue,
     PipeWireDocumentDemand, RepeatItemSnapshot, RepeatSource, RepeatSourceSnapshot,
@@ -49,7 +52,9 @@ pub use incremental::{
 pub use live::{
     ClockMutation, LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind, LiveFrame,
     LiveFrameRect, LiveInteractionState, LiveRenderRequest, LiveRuntimeMeasurements,
-    LiveRuntimeSnapshot, MAX_LIVE_SCALE_NUMERATOR,
+    LiveRuntimeSnapshot, MAX_LIVE_SCALE_NUMERATOR, PipeWireAudioOperation, PipeWireAudioTarget,
+    PipeWireControlIdentity, PipeWireControlLocator, PipeWireControlRequest, PipeWireControlState,
+    PipeWireDesiredVolume,
 };
 pub use model::{
     Artifact, DiagnosticNode, DiagnosticReport, ExperimentOptions, ExperimentRun,

@@ -1,10 +1,11 @@
 use super::model::{
-    MAX_LINK_GROUPS, MAX_LINKS, MAX_METADATA_VALUE_BYTES, MAX_NODES, PipeWireAvailability,
-    PipeWireDefaultTarget, PipeWireDefaultsSnapshot, PipeWireDelta, PipeWireLinkGroupId,
-    PipeWireLinkGroupSnapshot, PipeWireLinkId, PipeWireLinkSnapshot, PipeWireLinkState,
-    PipeWireModelError, PipeWireNodeClassification, PipeWireNodeId, PipeWireNodeSnapshot,
-    PipeWireNodeState, PipeWireResourceCounters, PipeWireSnapshot, RawLinkInfo, RawNodeInfo,
-    bounded_text,
+    FiniteVolume, MAX_AUDIO_CHANNELS, MAX_LINK_GROUPS, MAX_LINKS, MAX_METADATA_VALUE_BYTES,
+    MAX_NODES, PipeWireAvailability, PipeWireControlCounters, PipeWireDefaultTarget,
+    PipeWireDefaultsSnapshot, PipeWireDelta, PipeWireLinkGroupId, PipeWireLinkGroupSnapshot,
+    PipeWireLinkId, PipeWireLinkSnapshot, PipeWireLinkState, PipeWireModelError,
+    PipeWireNodeAudioSnapshot, PipeWireNodeClassification, PipeWireNodeId, PipeWireNodeSnapshot,
+    PipeWireNodeState, PipeWireResourceCounters, PipeWireSnapshot, RawLinkInfo, RawNodeAudioInfo,
+    RawNodeInfo, bounded_text, perceptual_average,
 };
 use super::public::PipeWireNodeType;
 use serde::Deserialize;
@@ -26,6 +27,10 @@ struct NodeRecord {
     state_error: Option<String>,
     input_ports: u32,
     output_ports: u32,
+    audio_channels: Option<Vec<FiniteVolume>>,
+    muted: Option<bool>,
+    audio_tracked: bool,
+    writable: bool,
     ready: bool,
 }
 
@@ -111,6 +116,11 @@ impl PipeWireReconciler {
         self.current.resources = self.resources.clone();
     }
 
+    pub(crate) fn update_control_counters(&mut self, controls: &PipeWireControlCounters) {
+        self.resources.controls = controls.clone();
+        self.current.resources.controls = controls.clone();
+    }
+
     pub(crate) fn record_diagnostics(&mut self, count: usize) {
         self.resources.diagnostics_contained = self
             .resources
@@ -158,8 +168,17 @@ impl PipeWireReconciler {
                             state_error: None,
                             input_ports: 0,
                             output_ports: 0,
+                            audio_channels: None,
+                            muted: None,
+                            audio_tracked: false,
+                            writable: false,
                             ready: false,
                         });
+                }
+                PipeWireDelta::NodePermissions { raw_id, writable } => {
+                    if let Some(node) = self.nodes.get_mut(&raw_id) {
+                        node.writable = writable;
+                    }
                 }
                 PipeWireDelta::NodeInfo(info) => self.apply_node_info(info)?,
                 PipeWireDelta::NodeTracking { raw_id, tracked } => {
@@ -173,6 +192,16 @@ impl PipeWireReconciler {
                         node.input_ports = 0;
                         node.output_ports = 0;
                         node.ready = false;
+                    }
+                }
+                PipeWireDelta::NodeAudioInfo(info) => self.apply_node_audio_info(info)?,
+                PipeWireDelta::NodeAudioTracking { raw_id, tracked } => {
+                    if let Some(node) = self.nodes.get_mut(&raw_id) {
+                        node.audio_tracked = tracked;
+                        if !tracked {
+                            node.audio_channels = None;
+                            node.muted = None;
+                        }
                     }
                 }
                 PipeWireDelta::NodeRemoved(raw_id) => {
@@ -263,6 +292,37 @@ impl PipeWireReconciler {
         link.state = info.state;
         link.raw_state = info.raw_state;
         link.ready = true;
+    }
+
+    fn apply_node_audio_info(&mut self, info: RawNodeAudioInfo) -> Result<(), PipeWireModelError> {
+        let Some(node) = self.nodes.get_mut(&info.raw_id) else {
+            return Ok(());
+        };
+        if let Some(channels) = info.channel_volumes {
+            if channels.len() > MAX_AUDIO_CHANNELS {
+                return Err(PipeWireModelError::ResourceLimit(format!(
+                    "node {} audio channel count exceeds {MAX_AUDIO_CHANNELS}",
+                    info.raw_id
+                )));
+            }
+            let channels = channels
+                .into_iter()
+                .map(|value| {
+                    FiniteVolume::new(value.cbrt()).ok_or_else(|| {
+                        PipeWireModelError::InvalidData(format!(
+                            "node {} has an invalid channel volume",
+                            info.raw_id
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            node.audio_channels = Some(channels);
+        }
+        if let Some(muted) = info.muted {
+            node.muted = Some(muted);
+        }
+        node.audio_tracked = true;
+        Ok(())
     }
 
     fn apply_metadata(
@@ -411,6 +471,20 @@ impl PipeWireReconciler {
             output_ports: node.output_ports,
             properties: properties.clone(),
             audio_capable: classification.audio,
+            audio: if classification.audio && node.audio_tracked {
+                let channels = node.audio_channels.clone().unwrap_or_default();
+                let average_volume = perceptual_average(&channels);
+                PipeWireNodeAudioSnapshot {
+                    ready: average_volume.is_some() && node.muted.is_some(),
+                    can_set_volume: node.writable && average_volume.is_some(),
+                    can_set_mute: node.writable && node.muted.is_some(),
+                    channels,
+                    average_volume,
+                    muted: node.muted,
+                }
+            } else {
+                PipeWireNodeAudioSnapshot::default()
+            },
             ready: node.ready,
         })
     }
@@ -683,6 +757,51 @@ mod tests {
                 .resources
                 .duplicate_publications_suppressed
                 > 0
+        );
+    }
+
+    #[test]
+    fn repeated_audio_updates_preserve_identity_and_suppress_duplicates() {
+        let mut reconciler = PipeWireReconciler::default();
+        reconciler.begin_generation(4).unwrap();
+        let mut initial = add_node(9, "stream", "Stream/Output/Audio");
+        initial.extend([
+            PipeWireDelta::NodePermissions {
+                raw_id: 9,
+                writable: true,
+            },
+            PipeWireDelta::NodeAudioTracking {
+                raw_id: 9,
+                tracked: true,
+            },
+        ]);
+        let first = reconciler.apply(initial).unwrap().unwrap();
+        let identity = first.nodes[0].id;
+        for index in 0..1_000 {
+            let linear = if index % 2 == 0 { 0.125 } else { 1.0 };
+            reconciler
+                .apply([PipeWireDelta::NodeAudioInfo(RawNodeAudioInfo {
+                    raw_id: 9,
+                    channel_volumes: Some(vec![linear, linear]),
+                    muted: Some(index % 2 == 0),
+                })])
+                .unwrap();
+            assert_eq!(reconciler.current().nodes[0].id, identity);
+        }
+        let duplicate = PipeWireDelta::NodeAudioInfo(RawNodeAudioInfo {
+            raw_id: 9,
+            channel_volumes: Some(vec![1.0, 1.0]),
+            muted: Some(false),
+        });
+        for _ in 0..500 {
+            assert!(reconciler.apply([duplicate.clone()]).unwrap().is_none());
+        }
+        assert!(
+            reconciler
+                .current()
+                .resources
+                .duplicate_publications_suppressed
+                >= 500
         );
     }
 

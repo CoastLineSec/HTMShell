@@ -38,6 +38,18 @@
         <span id="actual-output"
               data-htm-element="state-text"
               data-htm-bind="pipewire.default_sink.description"></span>
+        <div id="actual-output-audio"
+             class="audio-summary"
+             data-htm-element="state-token"
+             data-htm-bind="pipewire.default_sink.audio_status">
+          <data id="actual-output-volume"
+                data-htm-element="state-value"
+                data-htm-bind="pipewire.default_sink.volume"
+                data-htm-format="percent"></data>
+          <span id="actual-output-mute"
+                data-htm-element="state-token"
+                data-htm-bind="pipewire.default_sink.mute_state"></span>
+        </div>
       </div>
       <div>
         <span>Configured output</span>
@@ -50,6 +62,18 @@
         <span id="actual-input"
               data-htm-element="state-text"
               data-htm-bind="pipewire.default_source.description"></span>
+        <div id="actual-input-audio"
+             class="audio-summary"
+             data-htm-element="state-token"
+             data-htm-bind="pipewire.default_source.audio_status">
+          <data id="actual-input-volume"
+                data-htm-element="state-value"
+                data-htm-bind="pipewire.default_source.volume"
+                data-htm-format="percent"></data>
+          <span id="actual-input-mute"
+                data-htm-element="state-token"
+                data-htm-bind="pipewire.default_source.mute_state"></span>
+        </div>
       </div>
       <div>
         <span>Configured input</span>
@@ -57,6 +81,45 @@
               data-htm-element="state-text"
               data-htm-bind="pipewire.configured_source.description"></span>
       </div>
+    </section>
+
+    <section class="default-controls">
+      <article>
+        <h2>Default output</h2>
+        <input id="default-output-range"
+               type="range"
+               data-htm-element="range-control"
+               data-htm-bind="pipewire.default_sink.volume"
+               data-htm-action="pipewire.audio.set_volume"
+               data-htm-target="pipewire.default_sink"
+               data-htm-enabled-bind="pipewire.default_sink.can_set_volume"
+               min="0"
+               max="1"
+               step="0.01">
+        <button id="default-output-toggle"
+                data-htm-element="action-button"
+                data-htm-action="pipewire.audio.toggle_mute"
+                data-htm-target="pipewire.default_sink"
+                data-htm-enabled-bind="pipewire.default_sink.can_set_mute">Toggle mute</button>
+      </article>
+      <article>
+        <h2>Default input</h2>
+        <input id="default-input-range"
+               type="range"
+               data-htm-element="range-control"
+               data-htm-bind="pipewire.default_source.volume"
+               data-htm-action="pipewire.audio.set_volume"
+               data-htm-target="pipewire.default_source"
+               data-htm-enabled-bind="pipewire.default_source.can_set_volume"
+               min="0"
+               max="1"
+               step="0.01">
+        <button id="default-input-toggle"
+                data-htm-element="action-button"
+                data-htm-action="pipewire.audio.toggle_mute"
+                data-htm-target="pipewire.default_source"
+                data-htm-enabled-bind="pipewire.default_source.can_set_mute">Toggle mute</button>
+      </article>
     </section>
 
     <section>
@@ -120,6 +183,33 @@
                         data-htm-bind="item.property"
                         data-htm-property-key="media.title"></span></dd>
             </dl>
+            <div class="node-audio"
+                 data-htm-element="state-token"
+                 data-htm-local-id="audio-status"
+                 data-htm-bind="item.audio_status">
+              <div class="audio-reading">
+                <data data-htm-element="state-value"
+                      data-htm-local-id="volume"
+                      data-htm-bind="item.volume"
+                      data-htm-format="percent"></data>
+                <span data-htm-element="state-token"
+                      data-htm-local-id="mute-state"
+                      data-htm-bind="item.mute_state"></span>
+              </div>
+              <input type="range"
+                     data-htm-element="range-control"
+                     data-htm-local-id="volume-control"
+                     data-htm-bind="item.volume"
+                     data-htm-action="pipewire.audio.set_volume"
+                     data-htm-enabled-bind="item.can_set_volume"
+                     min="0"
+                     max="1"
+                     step="0.01">
+              <button data-htm-element="action-button"
+                      data-htm-local-id="mute-control"
+                      data-htm-action="pipewire.audio.toggle_mute"
+                      data-htm-enabled-bind="item.can_set_mute">Toggle mute</button>
+            </div>
             <footer>
               <span data-htm-element="state-token"
                     data-htm-local-id="default-role"

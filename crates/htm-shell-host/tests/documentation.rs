@@ -1,6 +1,8 @@
 use htm_runtime::{
     CLOCK_FORMAT_CONVERSIONS, CLOCK_FORMAT_FLAGS, CLOCK_PUBLIC_ATTRIBUTES, ClockFormat,
-    ItemBindingKey, RepeatSource, ShellAction, StateBindingKey, StateToken, StateValueFormat,
+    ItemBindingKey, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM,
+    MAX_PIPEWIRE_PERCEPTUAL_VOLUME, MAX_RANGE_CONTROLS_PER_DOCUMENT, MAX_RANGE_CONTROLS_PER_ITEM,
+    RepeatSource, ShellAction, StateBindingKey, StateToken, StateValueFormat,
     built_in_registry_names,
 };
 use htm_shell_host::{
@@ -174,6 +176,7 @@ fn public_documentation_style_is_safe_and_page_shape_is_stable() {
 fn typed_public_names_are_covered_by_the_reference() {
     let root = workspace_root();
     let reference = read_joined(&markdown_files(&root.join("docs/types")));
+    assert_eq!(built_in_registry_names().len(), 7);
 
     for name in built_in_registry_names() {
         assert!(
@@ -229,6 +232,11 @@ fn typed_public_names_are_covered_by_the_reference() {
         "data-htm-format",
         "data-htm-enabled-bind",
         "data-htm-property-key",
+        "data-htm-state",
+        "min",
+        "max",
+        "step",
+        "disabled",
         "value",
     ] {
         assert!(
@@ -236,6 +244,40 @@ fn typed_public_names_are_covered_by_the_reference() {
             "power declaration attribute is undocumented: {attribute}"
         );
     }
+
+    for (limit, label) in [
+        (
+            MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT,
+            "PipeWire audio controls per document",
+        ),
+        (
+            MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM,
+            "PipeWire audio controls per repeated item",
+        ),
+        (
+            MAX_RANGE_CONTROLS_PER_DOCUMENT,
+            "range controls per document",
+        ),
+        (
+            MAX_RANGE_CONTROLS_PER_ITEM,
+            "range controls per repeated item",
+        ),
+    ] {
+        assert!(
+            reference.contains(&limit.to_string()),
+            "{label} limit is undocumented: {limit}"
+        );
+    }
+    assert!(
+        reference.contains(&format!(
+            "runtime maximum is `{MAX_PIPEWIRE_PERCEPTUAL_VOLUME:.1}`"
+        )),
+        "PipeWire amplification maximum is undocumented"
+    );
+    assert!(
+        reference.contains("clip or distort"),
+        "PipeWire amplification warning is undocumented"
+    );
     for device_type in UPowerDeviceType::ALL {
         assert!(
             documented_name(&reference, device_type.token().as_str()),
@@ -327,6 +369,40 @@ fn documented_manifests_validate_without_wayland() {
         assert_eq!(manifest.parse_count(), 1);
         assert_eq!(manifest.manifest().version, 1);
         assert_eq!(manifest.manifest().surfaces.len(), 2);
+    }
+}
+
+#[test]
+fn audio_example_uses_only_the_typed_control_surface() {
+    let root = workspace_root();
+    let panel = fs::read_to_string(root.join("examples/audio-inspector/panel.html")).unwrap();
+    let overlay = fs::read_to_string(root.join("examples/audio-inspector/overlay.html")).unwrap();
+    let style = fs::read_to_string(root.join("examples/audio-inspector/style.css")).unwrap();
+    let example = format!("{panel}\n{overlay}\n{style}");
+    for name in [
+        "range-control",
+        "pipewire.audio.set_volume",
+        "pipewire.audio.toggle_mute",
+        "pipewire.default_sink",
+        "pipewire.default_source",
+        "item.volume",
+        "item.mute_state",
+        "item.audio_status",
+        "pending",
+        "failed",
+    ] {
+        assert!(example.contains(name), "audio example omits `{name}`");
+    }
+    for forbidden in [
+        "pipewire.configured_sink\"",
+        "pipewire.configured_source\"",
+        "pipewire.links",
+        "pipewire.peaks",
+    ] {
+        assert!(
+            !overlay.contains(forbidden),
+            "audio example uses forbidden control surface `{forbidden}`"
+        );
     }
 }
 

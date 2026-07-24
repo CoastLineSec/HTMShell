@@ -12,6 +12,12 @@ pub const MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM: usize = 32;
 pub const MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT: usize = 64;
 pub const MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS: usize = 256;
 pub const MAX_PIPEWIRE_PROPERTY_KEY_BYTES: usize = 128;
+pub const MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT: usize = 128;
+pub const MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM: usize = 16;
+pub const MAX_RANGE_CONTROLS_PER_DOCUMENT: usize = 64;
+pub const MAX_RANGE_CONTROLS_PER_ITEM: usize = 8;
+pub const MAX_RANGE_NUMBER_BYTES: usize = 32;
+pub const MAX_PIPEWIRE_PERCEPTUAL_VOLUME: f64 = 2.0;
 pub const MAX_ITEMS_PER_REPEAT: usize = MAX_PIPEWIRE_NODES_PER_PROCESS;
 pub const MAX_CLONED_NODES_PER_REPEAT: usize = 4_096;
 pub const MAX_CLONED_NODES_PER_DOCUMENT: usize = 16_384;
@@ -92,10 +98,15 @@ pub enum ItemBindingKey {
     DefaultRole,
     ConfiguredRole,
     Property,
+    AudioStatus,
+    Volume,
+    MuteState,
+    CanSetVolume,
+    CanSetMute,
 }
 
 impl ItemBindingKey {
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 41] = [
         Self::Ready,
         Self::Type,
         Self::PowerSupply,
@@ -132,6 +143,11 @@ impl ItemBindingKey {
         Self::DefaultRole,
         Self::ConfiguredRole,
         Self::Property,
+        Self::AudioStatus,
+        Self::Volume,
+        Self::MuteState,
+        Self::CanSetVolume,
+        Self::CanSetMute,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -172,6 +188,11 @@ impl ItemBindingKey {
             Self::DefaultRole => "item.default_role",
             Self::ConfiguredRole => "item.configured_role",
             Self::Property => "item.property",
+            Self::AudioStatus => "item.audio_status",
+            Self::Volume => "item.volume",
+            Self::MuteState => "item.mute_state",
+            Self::CanSetVolume => "item.can_set_volume",
+            Self::CanSetMute => "item.can_set_mute",
         }
     }
 
@@ -219,6 +240,11 @@ impl ItemBindingKey {
                     | Self::DefaultRole
                     | Self::ConfiguredRole
                     | Self::Property
+                    | Self::AudioStatus
+                    | Self::Volume
+                    | Self::MuteState
+                    | Self::CanSetVolume
+                    | Self::CanSetMute
             ),
         }
     }
@@ -254,6 +280,10 @@ impl ItemBindingKey {
                 | Self::DefaultRole
                 | Self::ConfiguredRole
                 | Self::Property
+                | Self::AudioStatus
+                | Self::MuteState
+                | Self::CanSetVolume
+                | Self::CanSetMute
         )
     }
 
@@ -279,6 +309,10 @@ impl ItemBindingKey {
                 | Self::DefaultRole
                 | Self::ConfiguredRole
                 | Self::Property
+                | Self::AudioStatus
+                | Self::MuteState
+                | Self::CanSetVolume
+                | Self::CanSetMute
         )
     }
 
@@ -293,6 +327,7 @@ impl ItemBindingKey {
                 | Self::Percentage
                 | Self::HealthPercentage
                 | Self::RawId
+                | Self::Volume
         )
     }
 }
@@ -368,6 +403,15 @@ impl NumericValue {
         }
     }
 
+    pub fn as_f64(self) -> Option<f64> {
+        match self {
+            Self::Unknown => None,
+            Self::Integer(value) => Some(value as f64),
+            Self::Decimal(value) if value.is_finite() => Some(value),
+            Self::Decimal(_) => None,
+        }
+    }
+
     pub fn format(self, format: StateValueFormat) -> Result<FormattedValue, ValueFormatError> {
         match self {
             Self::Unknown => Ok(FormattedValue {
@@ -378,6 +422,32 @@ impl NumericValue {
             Self::Decimal(value) if value.is_finite() => format_number(value, None, format),
             Self::Decimal(_) => Err(ValueFormatError::NonFinite),
         }
+    }
+
+    pub fn format_volume(
+        self,
+        format: StateValueFormat,
+    ) -> Result<FormattedValue, ValueFormatError> {
+        if format != StateValueFormat::Percent {
+            return self.format(format);
+        }
+        let value = match self {
+            Self::Unknown => {
+                return Ok(FormattedValue {
+                    display: "—".into(),
+                    value: None,
+                });
+            }
+            Self::Integer(value) => value as f64,
+            Self::Decimal(value) => value,
+        };
+        if !value.is_finite() || value < 0.0 {
+            return Err(ValueFormatError::OutOfRange);
+        }
+        Ok(FormattedValue {
+            display: format!("{:.0}%", value * 100.0),
+            value: Some(canonical_decimal(value)),
+        })
     }
 }
 
@@ -481,6 +551,8 @@ pub struct PipeWireDocumentDemand {
     pub nodes: bool,
     pub node_details: bool,
     pub defaults: bool,
+    pub audio_state: bool,
+    pub audio_writes: bool,
     pub property_keys: std::collections::BTreeSet<String>,
 }
 
@@ -490,6 +562,8 @@ impl PipeWireDocumentDemand {
             && !self.nodes
             && !self.node_details
             && !self.defaults
+            && !self.audio_state
+            && !self.audio_writes
             && self.property_keys.is_empty()
     }
 
@@ -498,6 +572,8 @@ impl PipeWireDocumentDemand {
         self.nodes |= other.nodes;
         self.node_details |= other.node_details;
         self.defaults |= other.defaults;
+        self.audio_state |= other.audio_state;
+        self.audio_writes |= other.audio_writes;
         self.property_keys
             .extend(other.property_keys.iter().cloned());
     }

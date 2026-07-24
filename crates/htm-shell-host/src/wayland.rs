@@ -1952,12 +1952,20 @@ impl State {
         if !surface.desired_mapped {
             return;
         }
-        match surface
+        let result = surface
             .runtime
             .as_mut()
-            .map(|runtime| runtime.pointer_move(x, y))
-        {
-            Some(Ok(true)) => surface.scheduler.mark_dirty(),
+            .map(|runtime| runtime.pointer_move(x, y));
+        match result {
+            Some(Ok(true)) => {
+                surface.scheduler.mark_dirty();
+                let action = surface.runtime.as_mut().and_then(LiveDocument::take_action);
+                if let Some(action) = action
+                    && let Err(error) = self.handle_action(owner, action)
+                {
+                    self.fail(format!("live range action rejected: {error}"));
+                }
+            }
             Some(Ok(false)) | None => {}
             Some(Err(error)) => {
                 self.fail(format!("pointer motion rejected: {error}"));
@@ -1983,29 +1991,27 @@ impl State {
         match result {
             Some(Ok(true)) => {
                 self.surfaces[index].scheduler.mark_dirty();
-                if !pressed {
-                    let action = self.surfaces[index]
-                        .runtime
-                        .as_mut()
-                        .and_then(LiveDocument::take_action);
-                    if let Some(action) = action {
-                        self.surfaces[index].summary.action_count =
-                            self.surfaces[index].summary.action_count.saturating_add(1);
-                        if let Some(release_started) = release_started {
-                            self.surfaces[index]
-                                .summary
-                                .last_pointer_release_to_action_dispatch_us =
-                                elapsed_us(release_started);
-                        }
-                        let dispatch_started = Instant::now();
-                        if let Err(error) = self.handle_action(owner, action) {
-                            self.fail(format!("live action rejected: {error}"));
-                        } else if let Some(index) = self.surface_index_by_owner(owner) {
-                            self.surfaces[index]
-                                .summary
-                                .last_action_dispatch_to_state_mutation_us =
-                                elapsed_us(dispatch_started);
-                        }
+                let action = self.surfaces[index]
+                    .runtime
+                    .as_mut()
+                    .and_then(LiveDocument::take_action);
+                if let Some(action) = action {
+                    self.surfaces[index].summary.action_count =
+                        self.surfaces[index].summary.action_count.saturating_add(1);
+                    if let Some(release_started) = release_started {
+                        self.surfaces[index]
+                            .summary
+                            .last_pointer_release_to_action_dispatch_us =
+                            elapsed_us(release_started);
+                    }
+                    let dispatch_started = Instant::now();
+                    if let Err(error) = self.handle_action(owner, action) {
+                        self.fail(format!("live action rejected: {error}"));
+                    } else if let Some(index) = self.surface_index_by_owner(owner) {
+                        self.surfaces[index]
+                            .summary
+                            .last_action_dispatch_to_state_mutation_us =
+                            elapsed_us(dispatch_started);
                     }
                 }
             }
@@ -2022,6 +2028,13 @@ impl State {
             LiveAction::ClockEnable(_) | LiveAction::ClockDisable(_) | LiveAction::ClockToggle(_)
         ) {
             self.handle_clock_action(owner, action)?;
+            if matches!(self.options, SessionOptions::Manifest(_)) {
+                self.manifest_actions = self.manifest_actions.saturating_add(1);
+            }
+            return Ok(());
+        }
+        if matches!(action, LiveAction::PipeWireAudio(_)) {
+            self.handle_pipewire_audio_action(owner, action)?;
             if matches!(self.options, SessionOptions::Manifest(_)) {
                 self.manifest_actions = self.manifest_actions.saturating_add(1);
             }
@@ -2083,7 +2096,8 @@ impl State {
             | LiveAction::ClockToggle(_)
             | LiveAction::PowerProfileSetPowerSaver
             | LiveAction::PowerProfileSetBalanced
-            | LiveAction::PowerProfileSetPerformance => unreachable!("handled above"),
+            | LiveAction::PowerProfileSetPerformance
+            | LiveAction::PipeWireAudio(_) => unreachable!("handled above"),
         }
         Ok(())
     }
@@ -2115,6 +2129,70 @@ impl State {
             .request_profile(profile)
             .map_err(ShellHostError::Wayland)?;
         Ok(())
+    }
+
+    fn handle_pipewire_audio_action(
+        &mut self,
+        owner: u64,
+        action: LiveAction,
+    ) -> Result<(), ShellHostError> {
+        let index = self
+            .surface_index_by_owner(owner)
+            .ok_or_else(|| ShellHostError::Wayland(format!("surface instance {owner} is stale")))?;
+        if !self.surfaces[index].desired_mapped {
+            return Err(ShellHostError::Wayland(
+                "unmapped surface cannot dispatch a PipeWire audio action".into(),
+            ));
+        }
+        let LiveAction::PipeWireAudio(request) = action else {
+            return Err(ShellHostError::Wayland(
+                "non-PipeWire action entered PipeWire audio dispatch".into(),
+            ));
+        };
+        if let Err(error) = self.pipewire.request_control(request.clone()) {
+            let state = if error.contains("unavailable")
+                || error.contains("unresolved")
+                || error.contains("stale")
+                || error.contains("no longer present")
+            {
+                htm_runtime::PipeWireControlState::Unavailable
+            } else {
+                htm_runtime::PipeWireControlState::Failed
+            };
+            if let Some(runtime) = self.surfaces[index].runtime.as_mut() {
+                let _ = runtime.apply_pipewire_control_state(&request.control, state);
+                self.surfaces[index].scheduler.mark_dirty();
+            }
+            self.fanout_current_pipewire_snapshot();
+            eprintln!("htmshell-live: PipeWire audio request was contained: {error}");
+            return Ok(());
+        }
+        self.fanout_pipewire_control_outcomes();
+        Ok(())
+    }
+
+    fn fanout_pipewire_control_outcomes(&mut self) {
+        let mut restore_authoritative_values = false;
+        for outcome in self.pipewire.take_control_outcomes() {
+            restore_authoritative_values |= matches!(
+                outcome.state,
+                htm_runtime::PipeWireControlState::Failed
+                    | htm_runtime::PipeWireControlState::Unavailable
+            );
+            for surface in &mut self.surfaces {
+                let Some(runtime) = surface.runtime.as_mut() else {
+                    continue;
+                };
+                match runtime.apply_pipewire_control_state(&outcome.control, outcome.state) {
+                    Ok(true) if surface.desired_mapped => surface.scheduler.mark_dirty(),
+                    Ok(_) => {}
+                    Err(_) => {}
+                }
+            }
+        }
+        if restore_authoritative_values {
+            self.fanout_current_pipewire_snapshot();
+        }
     }
 
     fn handle_clock_action(
@@ -2228,7 +2306,8 @@ impl State {
             | LiveAction::ClockToggle(_)
             | LiveAction::PowerProfileSetPowerSaver
             | LiveAction::PowerProfileSetBalanced
-            | LiveAction::PowerProfileSetPerformance => {
+            | LiveAction::PowerProfileSetPerformance
+            | LiveAction::PipeWireAudio(_) => {
                 unreachable!("handled before manifest dispatch")
             }
         }
@@ -3110,6 +3189,7 @@ fn wait_for_event_sources(
     state: &mut State,
 ) -> Result<(), ShellHostError> {
     if state.pipewire.reconnect_if_due(Instant::now()) {
+        state.fanout_pipewire_control_outcomes();
         state.fanout_current_pipewire_snapshot();
     }
     if state.battery.needs_immediate_dispatch() {
@@ -3244,12 +3324,16 @@ fn wait_for_event_sources(
             Ok(false) => false,
             Err(error) => state.pipewire.handle_poll_error(error),
         };
+        state.fanout_pipewire_control_outcomes();
         if changed {
             state.fanout_current_pipewire_snapshot();
         }
     }
     if state.pipewire.reconnect_if_due(Instant::now()) {
+        state.fanout_pipewire_control_outcomes();
         state.fanout_current_pipewire_snapshot();
+    } else {
+        state.fanout_pipewire_control_outcomes();
     }
     Ok(())
 }
@@ -3436,7 +3520,8 @@ fn validate_manifest_action_source(
         }
         LiveAction::PowerProfileSetPowerSaver
         | LiveAction::PowerProfileSetBalanced
-        | LiveAction::PowerProfileSetPerformance => Ok(()),
+        | LiveAction::PowerProfileSetPerformance
+        | LiveAction::PipeWireAudio(_) => Ok(()),
     }
 }
 

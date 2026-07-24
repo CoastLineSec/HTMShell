@@ -1,53 +1,124 @@
-# PipeWire nodes
+# PipeWire audio
 
-HTMShell can present a read-only view of the current PipeWire nodes and default audio relationships. The source starts when a live document uses PipeWire state and is shared by every output.
+HTMShell presents PipeWire nodes, default audio relationships, volume, mute state, and typed audio controls. One process connection serves every output.
 
 ## Service state
 
-Use `pipewire.availability` to distinguish `unavailable`, `synchronizing`, and `ready`. `pipewire.ready` is `true` only after initial registry synchronization. `pipewire.node_count` contains the number of published nodes.
+`pipewire.availability` is `unavailable`, `synchronizing`, or `ready`. `pipewire.ready` becomes true after initial graph synchronization. `pipewire.node_count` is the number of published nodes.
 
-```html
-<span id="pipewire-state"
-      data-htm-element="state-token"
-      data-htm-bind="pipewire.availability"></span>
+PipeWire absence does not stop the shell. Reconnection clears the old generation before publishing fresh node identities.
 
-<data id="node-count"
-      data-htm-element="state-value"
-      data-htm-bind="pipewire.node_count"></data>
-```
-
-PipeWire absence does not stop the shell. A reconnect clears the old node generation, returns to `synchronizing`, and publishes fresh identities.
-
-## Node list
+## Audio nodes
 
 Use the `pipewire.nodes` repeat source:
 
 ```html
-<template id="node-row"
+<template id="audio-nodes"
           data-htm-element="repeat"
           data-htm-source="pipewire.nodes">
-  <div class="node">
+  <article>
     <span data-htm-element="state-text"
           data-htm-local-id="description"
           data-htm-bind="item.description"></span>
+    <data data-htm-element="state-value"
+          data-htm-local-id="volume"
+          data-htm-bind="item.volume"
+          data-htm-format="percent"></data>
     <span data-htm-element="state-token"
-          data-htm-local-id="type"
-          data-htm-bind="item.node_type"></span>
-  </div>
+          data-htm-local-id="mute"
+          data-htm-bind="item.mute_state"></span>
+  </article>
 </template>
 ```
 
-Each item keeps its identity while its properties or order change. `item.raw_id` is a session-local diagnostic number. It is not stable after a reconnect and cannot be used as a DOM ID or action target.
+`item.audio_status` is `unsupported`, `unavailable`, or `ready`. An unsupported node is not audio capable. An unavailable audio node has not supplied complete authoritative audio parameters.
 
-Node projections distinguish audio, video, streams, sinks, sources, direction, node type, and node state. Missing text uses the standard unavailable marker. See the [Node reference](../types/HTMShell.Services.PipeWire/Node.md).
+`item.volume` is a perceptual average where `1.0` is ordinary 100 percent volume. Values above `1.0` are preserved. `item.mute_state` is `muted`, `unmuted`, or `unavailable`.
 
-## Defaults
+`item.can_set_volume` and `item.can_set_mute` describe write capability. Readable state does not imply permission to control the node.
 
-Actual defaults describe the nodes selected by current session policy. Configured defaults describe stored preferences. They can differ.
+Application streams, sinks, sources, and virtual audio nodes use the same bindings.
 
-Each relationship has `unavailable`, `unresolved`, or `available` status. Missing WirePlumber default metadata does not make the PipeWire graph unavailable.
+## Item-local controls
 
-## Exact properties
+Controls inside `pipewire.nodes` target the current keyed item:
+
+```html
+<input type="range"
+       data-htm-element="range-control"
+       data-htm-local-id="volume-control"
+       data-htm-bind="item.volume"
+       data-htm-action="pipewire.audio.set_volume"
+       data-htm-enabled-bind="item.can_set_volume"
+       min="0"
+       max="1"
+       step="0.01">
+
+<button data-htm-element="action-button"
+        data-htm-local-id="mute-control"
+        data-htm-action="pipewire.audio.toggle_mute"
+        data-htm-enabled-bind="item.can_set_mute">
+  Toggle mute
+</button>
+```
+
+The mute actions are `pipewire.audio.mute`, `pipewire.audio.unmute`, and `pipewire.audio.toggle_mute`. They do not accept a target inside the node repeat. The keyed item identity is captured for dispatch. Raw PipeWire IDs are never targets.
+
+## Default controls
+
+Actual default sink and source controls are allowed outside a repeat:
+
+```html
+<input id="output-volume"
+       type="range"
+       data-htm-element="range-control"
+       data-htm-bind="pipewire.default_sink.volume"
+       data-htm-action="pipewire.audio.set_volume"
+       data-htm-target="pipewire.default_sink"
+       data-htm-enabled-bind="pipewire.default_sink.can_set_volume"
+       min="0"
+       max="1"
+       step="0.01">
+
+<button id="output-mute"
+        data-htm-element="action-button"
+        data-htm-action="pipewire.audio.toggle_mute"
+        data-htm-target="pipewire.default_sink"
+        data-htm-enabled-bind="pipewire.default_sink.can_set_mute">
+  Toggle default output
+</button>
+```
+
+`pipewire.default_source` is the other writable target. Configured defaults expose read-only audio state but cannot be targeted.
+
+## Volume behavior
+
+The range defaults are `min="0"`, `max="1"`, and `step="0.01"`. The runtime maximum is `2.0`. A value above `1.0` is allowed only when the author explicitly sets a larger `max`.
+
+Amplification can clip or distort. The runtime never enables it through an omitted bound and never rewrites an externally amplified value merely because a control has a lower visual maximum.
+
+Average-volume writes preserve the current channel balance. Channel values remain internal in this release.
+
+## Confirmation and failures
+
+PipeWire state is authoritative. A range thumb can follow the pointer locally, but bound volume changes only after PipeWire reports the new value.
+
+Each control owns `data-htm-state`:
+
+- `idle`: controllable with no outstanding request
+- `pending`: waiting for authoritative confirmation
+- `failed`: the latest request failed or timed out
+- `unavailable`: the target is missing, stale, unsupported, or not writable
+
+Pointer motion retains only the latest desired volume. Writes are bounded to one active volume operation and one active mute operation per node. Denial, timeout, node removal, document replacement, and reconnect cannot confirm stale controls.
+
+Queued volume writes are spaced by at least 16 milliseconds.
+
+External volume and mute changes update idle controls. A failed range returns to the latest authoritative value.
+
+## Defaults and exact properties
+
+Actual defaults describe current session policy. Configured defaults describe stored preferences. Each relationship can be `unavailable`, `unresolved`, or `available`.
 
 Inside `pipewire.nodes`, `item.property` reads one static key:
 
@@ -58,12 +129,27 @@ Inside `pipewire.nodes`, `item.property` reads one static key:
       data-htm-property-key="application.name"></span>
 ```
 
-Common keys include `application.name`, `application.icon-name`, `media.name`, `media.title`, and `media.artist`. A PipeWire node may omit any key. Use `state-token` with the same binding and key to style `available` and `unavailable`.
+Common keys include `application.name`, `application.icon-name`, `media.name`, `media.title`, and `media.artist`. Presence is not guaranteed.
 
-## Limits and current scope
+## Demand and limits
 
-A document may declare 16 `pipewire.nodes` repeats. A repeated item may contain up to 64 PipeWire bindings and 32 property lookups. A document may request 64 unique property keys, with 256 unique keys process-wide. Property keys are limited to 128 bytes.
+Documents activate only the PipeWire state they consume. Audio parameter subscriptions and write coordinators are shared process-wide. Removing the final audio consumer releases audio demand. Closed retained overlays may update without receiving a frame.
 
-The integration is read-only. Volume, mute, channels, default selection, links, peaks, and stream movement are not exposed.
+Limits include:
 
-See the tracked [audio inspector example](../../examples/audio-inspector/shell.json).
+- 16 `pipewire.nodes` repeats per document
+- 64 registered PipeWire bindings per repeated item
+- 32 property lookups per item
+- 128 PipeWire audio controls per document
+- 16 PipeWire audio controls per repeated item
+- 64 range controls per document
+- 8 range controls per repeated item
+- 4,096 node write coordinators, bounded by the graph limit
+- one pending mute intent and one pending volume intent per node
+- a two-second confirmation timeout
+
+## Current limitations
+
+Public channels, per-channel controls, preferred-default writes, links, link groups, peak monitoring, and stream movement are not available.
+
+See the tracked [audio inspector dashboard](../../examples/audio-inspector/shell.json).

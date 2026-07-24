@@ -18,6 +18,7 @@ Validated behavior declarations on ordinary HTML.
 - [`clock-text`](HTMShell.Elements/clock-text.md)
 - [`state-value`](HTMShell.Elements/state-value.md)
 - [`repeat`](HTMShell.Elements/repeat.md)
+- [`range-control`](HTMShell.Elements/range-control.md)
 
 ## `HTMShell.State`
 
@@ -35,6 +36,7 @@ Typed actions accepted from built-in buttons.
 - [`Overlay`](HTMShell.Actions/Overlay.md)
 - [`Clock`](HTMShell.Actions/Clock.md)
 - [`PowerProfile`](HTMShell.Actions/PowerProfile.md)
+- [`PipeWireAudio`](HTMShell.Actions/PipeWireAudio.md)
 
 ## `HTMShell.Services.Clock`
 
@@ -53,7 +55,7 @@ Process-scoped UPower devices and power-profile state.
 
 ## `HTMShell.Services.PipeWire`
 
-Process-scoped read-only PipeWire node state.
+Process-scoped PipeWire node and audio state.
 
 - [`PipeWire`](HTMShell.Services.PipeWire/PipeWire.md)
 - [`Node`](HTMShell.Services.PipeWire/Node.md)
@@ -61,3 +63,6 @@ Process-scoped read-only PipeWire node state.
 - [`NodeState`](HTMShell.Services.PipeWire/NodeState.md)
 - [`Defaults`](HTMShell.Services.PipeWire/Defaults.md)
 - [`Properties`](HTMShell.Services.PipeWire/Properties.md)
+- [`AudioNode`](HTMShell.Services.PipeWire/AudioNode.md)
+- [`AudioControls`](HTMShell.Services.PipeWire/AudioControls.md)
+- [`Volume`](HTMShell.Services.PipeWire/Volume.md)

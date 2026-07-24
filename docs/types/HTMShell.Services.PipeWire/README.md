@@ -1,6 +1,6 @@
 # `HTMShell.Services.PipeWire`
 
-Process-scoped read-only PipeWire state.
+Process-scoped PipeWire node state and typed audio controls.
 
 ## Types
 
@@ -10,5 +10,8 @@ Process-scoped read-only PipeWire state.
 - [`NodeState`](NodeState.md): runtime node state tokens
 - [`Defaults`](Defaults.md): actual and configured audio defaults
 - [`Properties`](Properties.md): bounded exact-key lookup
+- [`AudioNode`](AudioNode.md): volume, mute, and control capability
+- [`AudioControls`](AudioControls.md): typed item-local and actual-default controls
+- [`Volume`](Volume.md): perceptual average and amplification bounds
 
-The module does not expose volume, mute, channels, links, peaks, or writable controls.
+The module does not expose public channels, links, peak monitoring, preferred-default writes, or stream movement.

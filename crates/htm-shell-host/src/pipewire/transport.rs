@@ -1,7 +1,8 @@
 use super::model::{
-    MAX_LINKS, MAX_METADATA_VALUE_BYTES, MAX_NODE_PROPERTIES, MAX_NODE_TEXT_BYTES, MAX_NODES,
-    MAX_PROPERTY_KEY_BYTES, MAX_PROPERTY_VALUE_BYTES, MAX_STAGED_DELTAS, PipeWireDelta,
-    PipeWireLinkState, PipeWireNodeState, PipeWireResourceCounters, RawLinkInfo, RawNodeInfo,
+    MAX_AUDIO_CHANNELS, MAX_LINKS, MAX_METADATA_VALUE_BYTES, MAX_NODE_PROPERTIES,
+    MAX_NODE_TEXT_BYTES, MAX_NODES, MAX_PROPERTY_KEY_BYTES, MAX_PROPERTY_VALUE_BYTES,
+    MAX_STAGED_DELTAS, PipeWireDelta, PipeWireLinkState, PipeWireNodeState,
+    PipeWireResourceCounters, RawLinkInfo, RawNodeAudioInfo, RawNodeInfo,
 };
 use super::public::PipeWireDemand;
 use pipewire::context::ContextRc;
@@ -10,13 +11,19 @@ use pipewire::link::{Link, LinkListener};
 use pipewire::main_loop::MainLoopRc;
 use pipewire::metadata::{Metadata, MetadataListener};
 use pipewire::node::{Node, NodeListener};
+use pipewire::permissions::PermissionFlags;
 use pipewire::properties::PropertiesBox;
 use pipewire::registry::{GlobalObject, RegistryRc};
+use pipewire::spa::param::ParamType;
+use pipewire::spa::pod::deserialize::PodDeserializer;
+use pipewire::spa::pod::serialize::PodSerializer;
+use pipewire::spa::pod::{Object, Pod, Property, Value, ValueArray};
 use pipewire::spa::utils::dict::DictRef;
 use pipewire::types::ObjectType;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::CStr;
+use std::io::Cursor;
 use std::os::fd::AsRawFd;
 use std::rc::Rc;
 
@@ -71,6 +78,7 @@ struct BoundMetadata {
 struct KnownNode {
     global: Rc<GlobalObject<PropertiesBox>>,
     properties: BTreeMap<String, String>,
+    writable: bool,
 }
 
 #[derive(Clone)]
@@ -145,9 +153,16 @@ impl PipeWireTransport {
             .error({
                 let staging = staging.clone();
                 move |id, sequence, result, message| {
-                    staging.borrow_mut().push(PipeWireDelta::CoreError(format!(
-                        "core object {id} sequence {sequence} failed with {result}: {message}"
-                    )));
+                    let message = format!(
+                        "PipeWire object {id} sequence {sequence} failed with {result}: {message}"
+                    );
+                    if id == PW_ID_CORE {
+                        staging.borrow_mut().push(PipeWireDelta::CoreError(message));
+                    } else {
+                        staging
+                            .borrow_mut()
+                            .push(PipeWireDelta::Diagnostic(message));
+                    }
                 }
             })
             .register();
@@ -242,6 +257,9 @@ impl PipeWireTransport {
 
     pub(crate) fn set_demand(&mut self, demand: PipeWireDemand) {
         let previous = self.demand.replace(demand.clone());
+        let previous_needs_node_proxy =
+            previous.node_details || previous.audio_state || previous.audio_writes;
+        let needs_node_proxy = demand.node_details || demand.audio_state || demand.audio_writes;
 
         if previous.nodes != demand.nodes {
             let known = self
@@ -257,6 +275,12 @@ impl PipeWireTransport {
                         raw_id: node.global.id,
                         properties: node.properties,
                     });
+                    self.staging
+                        .borrow_mut()
+                        .push(PipeWireDelta::NodePermissions {
+                            raw_id: node.global.id,
+                            writable: node.writable,
+                        });
                 }
             } else {
                 for node in known {
@@ -267,8 +291,8 @@ impl PipeWireTransport {
             }
         }
 
-        if previous.node_details != demand.node_details {
-            if demand.node_details {
+        if previous_needs_node_proxy != needs_node_proxy {
+            if needs_node_proxy {
                 let known = self
                     .objects
                     .borrow()
@@ -277,7 +301,13 @@ impl PipeWireTransport {
                     .map(|node| node.global.clone())
                     .collect::<Vec<_>>();
                 for global in known {
-                    bind_node_proxy(&self._registry, &global, &self.objects, &self.staging);
+                    bind_node_proxy(
+                        &self._registry,
+                        &global,
+                        &self.objects,
+                        &self.staging,
+                        demand.audio_state || demand.audio_writes,
+                    );
                 }
             } else {
                 let ids = self
@@ -293,6 +323,34 @@ impl PipeWireTransport {
                         raw_id,
                         tracked: false,
                     });
+                    self.staging
+                        .borrow_mut()
+                        .push(PipeWireDelta::NodeAudioTracking {
+                            raw_id,
+                            tracked: false,
+                        });
+                }
+            }
+        }
+
+        let previous_audio = previous.audio_state || previous.audio_writes;
+        let audio = demand.audio_state || demand.audio_writes;
+        if previous_audio != audio {
+            let objects = self.objects.borrow();
+            for (raw_id, bound) in &objects.nodes {
+                if audio {
+                    bound._proxy.subscribe_params(&[ParamType::Props]);
+                    bound
+                        ._proxy
+                        .enum_params(0, Some(ParamType::Props), 0, u32::MAX);
+                } else {
+                    bound._proxy.subscribe_params(&[]);
+                    self.staging
+                        .borrow_mut()
+                        .push(PipeWireDelta::NodeAudioTracking {
+                            raw_id: *raw_id,
+                            tracked: false,
+                        });
                 }
             }
         }
@@ -392,6 +450,69 @@ impl PipeWireTransport {
         self.objects.borrow().update_counters(&mut resources);
         resources
     }
+
+    pub(crate) fn set_node_mute(&self, raw_id: u32, muted: bool) -> Result<(), String> {
+        self.set_node_properties(
+            raw_id,
+            vec![Property::new(
+                pipewire::spa::sys::SPA_PROP_mute,
+                Value::Bool(muted),
+            )],
+        )
+    }
+
+    pub(crate) fn set_node_channel_volumes(
+        &self,
+        raw_id: u32,
+        volumes: Vec<f32>,
+    ) -> Result<(), String> {
+        if volumes.is_empty()
+            || volumes.len() > MAX_AUDIO_CHANNELS
+            || volumes
+                .iter()
+                .any(|volume| !volume.is_finite() || *volume < 0.0)
+        {
+            return Err("invalid PipeWire channel-volume vector".into());
+        }
+        self.set_node_properties(
+            raw_id,
+            vec![Property::new(
+                pipewire::spa::sys::SPA_PROP_channelVolumes,
+                Value::ValueArray(ValueArray::Float(volumes)),
+            )],
+        )
+    }
+
+    fn set_node_properties(&self, raw_id: u32, properties: Vec<Property>) -> Result<(), String> {
+        let objects = self.objects.borrow();
+        let known = objects
+            .known_nodes
+            .get(&raw_id)
+            .ok_or_else(|| format!("PipeWire node {raw_id} is no longer present"))?;
+        if !known.writable {
+            return Err(format!("PipeWire node {raw_id} is not writable"));
+        }
+        let node = objects
+            .nodes
+            .get(&raw_id)
+            .ok_or_else(|| format!("PipeWire node {raw_id} is not bound"))?;
+        let bytes = serialize_node_properties(properties)?;
+        let pod = Pod::from_bytes(&bytes)
+            .ok_or_else(|| "serialized PipeWire property pod is invalid".to_owned())?;
+        node._proxy.set_param(ParamType::Props, 0, pod);
+        Ok(())
+    }
+}
+
+fn serialize_node_properties(properties: Vec<Property>) -> Result<Vec<u8>, String> {
+    let value = Value::Object(Object {
+        type_: pipewire::spa::sys::SPA_TYPE_OBJECT_Props,
+        id: pipewire::spa::sys::SPA_PARAM_Props,
+        properties,
+    });
+    PodSerializer::serialize(Cursor::new(Vec::new()), &value)
+        .map_err(|error| format!("serialize PipeWire node properties: {error:?}"))
+        .map(|serialized| serialized.0.into_inner())
 }
 
 fn register_node(
@@ -430,6 +551,9 @@ fn register_node(
         KnownNode {
             global: global.clone(),
             properties: properties.clone(),
+            writable: global
+                .permissions
+                .contains(PermissionFlags::W | PermissionFlags::X),
         },
     );
     if demand.borrow().nodes {
@@ -437,9 +561,21 @@ fn register_node(
             raw_id: global.id,
             properties,
         });
+        staging.borrow_mut().push(PipeWireDelta::NodePermissions {
+            raw_id: global.id,
+            writable: global
+                .permissions
+                .contains(PermissionFlags::W | PermissionFlags::X),
+        });
     }
-    if demand.borrow().node_details {
-        bind_node_proxy(registry, &global, objects, staging);
+    if demand.borrow().node_details || demand.borrow().audio_state || demand.borrow().audio_writes {
+        bind_node_proxy(
+            registry,
+            &global,
+            objects,
+            staging,
+            demand.borrow().audio_state || demand.borrow().audio_writes,
+        );
     }
 }
 
@@ -448,6 +584,7 @@ fn bind_node_proxy(
     global: &GlobalObject<PropertiesBox>,
     objects: &Rc<RefCell<BoundObjects>>,
     staging: &Rc<RefCell<CallbackStaging>>,
+    audio: bool,
 ) {
     if objects.borrow().nodes.contains_key(&global.id) {
         return;
@@ -472,6 +609,7 @@ fn bind_node_proxy(
     };
     let raw_id = global.id;
     let node_staging = staging.clone();
+    let audio_staging = staging.clone();
     let listener = node
         .add_listener_local()
         .info(move |info| {
@@ -519,6 +657,29 @@ fn bind_node_proxy(
                     .push(PipeWireDelta::SourceError(error)),
             }
         })
+        .param(move |_sequence, param_type, _index, _next, parameter| {
+            if param_type != ParamType::Props {
+                return;
+            }
+            let Some(parameter) = parameter else {
+                audio_staging
+                    .borrow_mut()
+                    .push(PipeWireDelta::NodeAudioTracking {
+                        raw_id,
+                        tracked: false,
+                    });
+                return;
+            };
+            match parse_audio_properties(raw_id, parameter) {
+                Ok(Some(info)) => audio_staging
+                    .borrow_mut()
+                    .push(PipeWireDelta::NodeAudioInfo(info)),
+                Ok(None) => {}
+                Err(message) => audio_staging
+                    .borrow_mut()
+                    .push(PipeWireDelta::Diagnostic(message)),
+            }
+        })
         .register();
     objects.borrow_mut().nodes.insert(
         global.id,
@@ -527,6 +688,12 @@ fn bind_node_proxy(
             _proxy: node,
         },
     );
+    if audio {
+        let objects = objects.borrow();
+        let node = &objects.nodes[&global.id]._proxy;
+        node.subscribe_params(&[ParamType::Props]);
+        node.enum_params(0, Some(ParamType::Props), 0, u32::MAX);
+    }
 }
 
 fn register_link(
@@ -768,6 +935,57 @@ fn bounded_optional(value: Option<&str>, maximum: usize) -> Result<Option<String
         .transpose()
 }
 
+fn parse_audio_properties(
+    raw_id: u32,
+    parameter: &Pod,
+) -> Result<Option<RawNodeAudioInfo>, String> {
+    let (_, value) = PodDeserializer::deserialize_any_from(parameter.as_bytes())
+        .map_err(|_| format!("node {raw_id} returned malformed audio properties"))?;
+    let Value::Object(object) = value else {
+        return Err(format!(
+            "node {raw_id} returned non-object audio properties"
+        ));
+    };
+    if object.id != pipewire::spa::sys::SPA_PARAM_Props {
+        return Ok(None);
+    }
+    let mut muted = None;
+    let mut channel_volumes = None;
+    for property in object.properties {
+        match (property.key, property.value) {
+            (pipewire::spa::sys::SPA_PROP_mute, Value::Bool(value)) => muted = Some(value),
+            (
+                pipewire::spa::sys::SPA_PROP_channelVolumes,
+                Value::ValueArray(ValueArray::Float(values)),
+            ) => {
+                if values.len() > MAX_AUDIO_CHANNELS
+                    || values
+                        .iter()
+                        .any(|value| !value.is_finite() || *value < 0.0)
+                {
+                    return Err(format!("node {raw_id} returned invalid channel volumes"));
+                }
+                channel_volumes = Some(values);
+            }
+            (pipewire::spa::sys::SPA_PROP_mute, _)
+            | (pipewire::spa::sys::SPA_PROP_channelVolumes, _) => {
+                return Err(format!(
+                    "node {raw_id} returned an invalid audio property type"
+                ));
+            }
+            _ => {}
+        }
+    }
+    if muted.is_none() && channel_volumes.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(RawNodeAudioInfo {
+        raw_id,
+        channel_volumes,
+        muted,
+    }))
+}
+
 fn parse_id(value: Option<&String>) -> Option<u32> {
     value
         .and_then(|value| value.parse().ok())
@@ -833,5 +1051,33 @@ mod tests {
     #[test]
     fn dispatch_iteration_bound_is_finite() {
         assert_eq!(MAX_PIPEWIRE_ITERATIONS_PER_DISPATCH, 8);
+    }
+
+    #[test]
+    fn exact_mute_and_channel_volume_pods_round_trip_through_the_transport_parser() {
+        let bytes = serialize_node_properties(vec![
+            Property::new(pipewire::spa::sys::SPA_PROP_mute, Value::Bool(true)),
+            Property::new(
+                pipewire::spa::sys::SPA_PROP_channelVolumes,
+                Value::ValueArray(ValueArray::Float(vec![1.0, 0.125])),
+            ),
+        ])
+        .unwrap();
+        let pod = Pod::from_bytes(&bytes).unwrap();
+        let info = parse_audio_properties(42, pod).unwrap().unwrap();
+        assert_eq!(info.raw_id, 42);
+        assert_eq!(info.muted, Some(true));
+        assert_eq!(info.channel_volumes, Some(vec![1.0, 0.125]));
+    }
+
+    #[test]
+    fn malformed_audio_parameters_are_contained() {
+        let bytes = serialize_node_properties(vec![Property::new(
+            pipewire::spa::sys::SPA_PROP_channelVolumes,
+            Value::ValueArray(ValueArray::Float(vec![f32::NAN])),
+        )])
+        .unwrap();
+        let pod = Pod::from_bytes(&bytes).unwrap();
+        assert!(parse_audio_properties(7, pod).is_err());
     }
 }

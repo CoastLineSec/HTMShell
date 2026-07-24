@@ -31,12 +31,12 @@ Formats are:
 | Format | Display |
 | --- | --- |
 | `raw` | Canonical number without a unit |
-| `percent` | Rounded whole number plus `%` |
+| `percent` | Rounded whole percentage plus `%` |
 | `energy` | One decimal place plus `Wh` |
 | `power` | One decimal place plus `W` |
 | `duration` | Compact seconds, minutes, hours, or days |
 
-The binding determines which formats are valid. Negative durations, nonfinite numbers, and out-of-domain percentages are rejected.
+The binding determines which formats are valid. PipeWire volume treats `1.0` as 100 percent and preserves amplification above that value. Negative durations, nonfinite numbers, and out-of-domain battery percentages are rejected.
 
 ## See also
 
