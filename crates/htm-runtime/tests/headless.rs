@@ -344,6 +344,34 @@ fn diagnostics_and_png_are_repeatable_in_one_environment() {
 }
 
 #[test]
+fn retained_renderer_matches_the_tracked_basic_shell_pixels() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/basic-shell");
+    let run = run_package_with_options(
+        &root,
+        ExperimentOptions {
+            render_png: true,
+            run_interaction: true,
+            output_directory: None,
+            ..ExperimentOptions::default()
+        },
+    )
+    .expect("retained renderer should render the tracked fixture");
+    for artifact in &run.artifacts {
+        let expected = std::fs::read(
+            root.join("output")
+                .join(format!("{}.png", artifact.phase.filename())),
+        )
+        .expect("tracked baseline PNG");
+        assert_eq!(
+            artifact.png.as_deref(),
+            Some(expected.as_slice()),
+            "{} retained pixels changed",
+            artifact.phase.filename()
+        );
+    }
+}
+
+#[test]
 fn invalid_dimensions_never_serialize_nonfinite_geometry() {
     let fixture = TempFixture::new(
         &basic_document("<div id=bad>finite fallback</div>"),

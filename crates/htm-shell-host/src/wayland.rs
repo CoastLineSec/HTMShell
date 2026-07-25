@@ -1936,11 +1936,15 @@ impl State {
             | ScheduleDecision::WaitForBuffer => return Ok(()),
             ScheduleDecision::Render => {}
         }
-        let frame = surface_state
+        let Some(frame) = surface_state
             .runtime
             .as_mut()
             .expect("initialized above")
-            .render_for(render_request)?;
+            .render_pending_for(render_request, owner, surface_state.role_generation)?
+        else {
+            surface_state.scheduler.mark_clean();
+            return Ok(());
+        };
         let Some((_id, buffer, conversion_us)) = surface_state
             .pool
             .acquire_and_write(&frame.premultiplied_rgba)?

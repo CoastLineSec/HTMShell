@@ -1,4 +1,4 @@
-use crate::adapter::{elapsed_ms, render_rgba_scaled, resolve_resources, validate_document_limits};
+use crate::adapter::{elapsed_ms, resolve_resources, validate_document_limits};
 use crate::builtin::{
     BindingUpdate, BuiltInElementIndex, BuiltInElementKind, BuiltInElementSummary,
     BuiltInSurfaceKind, ClockDeclaration, DATETIME_ATTRIBUTE, ElementDeclaration,
@@ -9,6 +9,7 @@ use crate::builtin::{
 };
 use crate::identity::IdentityRegistry;
 use crate::model::{DiagnosticMessage, LogicalRect, ViewportSpec};
+use crate::render::{CpuRenderSession, DamageRegion, FrameReason, FrameReasonSet, RenderSurfaceId};
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
 use crate::{
     ExperimentalDocumentIdentity, ExperimentalNodeIdentity, MAX_CLONED_NODES_PER_DOCUMENT,
@@ -493,6 +494,7 @@ pub struct LiveRuntimeMeasurements {
 pub struct LiveDocument {
     document: HtmlDocument,
     identities: IdentityRegistry,
+    render_session: CpuRenderSession,
     audit: Arc<ResourceAudit>,
     package_root: PathBuf,
     source: PathBuf,
@@ -973,6 +975,7 @@ impl LiveDocument {
         let mut live = Self {
             document,
             identities,
+            render_session: CpuRenderSession::default(),
             audit,
             package_root,
             source,
@@ -1165,6 +1168,47 @@ impl LiveDocument {
     }
 
     pub fn render_for(&mut self, request: LiveRenderRequest) -> Result<LiveFrame, RuntimeError> {
+        self.render_internal(
+            request,
+            RenderSurfaceId {
+                instance: self.document_identity.serial,
+                generation: 1,
+            },
+            true,
+        )?
+        .ok_or_else(|| {
+            RuntimeError::InvalidPackage(
+                "forced retained rendering did not produce a frame plan".into(),
+            )
+        })
+    }
+
+    /// Renders only when the retained visual state or target context changed.
+    ///
+    /// The live host supplies its generation-safe surface identity. A duplicate
+    /// logical publication returns `None` and therefore cannot schedule a frame.
+    pub fn render_pending_for(
+        &mut self,
+        request: LiveRenderRequest,
+        surface_instance: u64,
+        surface_generation: u64,
+    ) -> Result<Option<LiveFrame>, RuntimeError> {
+        self.render_internal(
+            request,
+            RenderSurfaceId {
+                instance: surface_instance,
+                generation: surface_generation,
+            },
+            false,
+        )
+    }
+
+    fn render_internal(
+        &mut self,
+        request: LiveRenderRequest,
+        surface: RenderSurfaceId,
+        force: bool,
+    ) -> Result<Option<LiveFrame>, RuntimeError> {
         if request.logical_width != self.viewport.logical_width
             || request.logical_height != self.viewport.logical_height
         {
@@ -1187,14 +1231,27 @@ impl LiveDocument {
             ));
         }
         let render_started = Instant::now();
-        let premultiplied_rgba = render_rgba_scaled(
+        let mut reasons = FrameReasonSet::new();
+        if force {
+            reasons.insert(FrameReason::ExplicitInvalidation);
+        }
+        let Some(frame) = self.render_session.render_document(
             &mut self.document,
-            request.logical_width,
-            request.logical_height,
+            &self.identities,
+            self.document_identity,
+            self.viewport,
+            surface,
             request.buffer_width,
             request.buffer_height,
-            request.scale_factor(),
-        );
+            request.scale_numerator,
+            request.scale_denominator,
+            reasons,
+            force,
+        )?
+        else {
+            return Ok(None);
+        };
+        let premultiplied_rgba = frame.pixels;
         let expected = pixel_len(request.buffer_width, request.buffer_height)?;
         if premultiplied_rgba.len() != expected {
             return Err(RuntimeError::InvalidPackage(format!(
@@ -1209,23 +1266,54 @@ impl LiveDocument {
         let action = self.bounds_for(self.kind.primary_action_selector())?;
         validate_rect(&card)?;
         validate_rect(&action)?;
-        Ok(LiveFrame {
-            logical_width: request.logical_width,
-            logical_height: request.logical_height,
-            buffer_width: request.buffer_width,
-            buffer_height: request.buffer_height,
-            premultiplied_rgba,
-            damage_estimate: LogicalRect {
+        let damage_estimate = match &frame.plan.damage {
+            DamageRegion::Empty => LogicalRect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            },
+            DamageRegion::Full => LogicalRect {
                 x: 0.0,
                 y: 0.0,
                 width: request.logical_width as f32,
                 height: request.logical_height as f32,
             },
+            DamageRegion::Rects(rects) => rects
+                .iter()
+                .cloned()
+                .reduce(|left, right| {
+                    let x1 = left.x.min(right.x);
+                    let y1 = left.y.min(right.y);
+                    let x2 = (left.x + left.width).max(right.x + right.width);
+                    let y2 = (left.y + left.height).max(right.y + right.height);
+                    LogicalRect {
+                        x: x1,
+                        y: y1,
+                        width: x2 - x1,
+                        height: y2 - y1,
+                    }
+                })
+                .unwrap_or(LogicalRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                }),
+        };
+        debug_assert!(frame.full_raster);
+        Ok(Some(LiveFrame {
+            logical_width: request.logical_width,
+            logical_height: request.logical_height,
+            buffer_width: request.buffer_width,
+            buffer_height: request.buffer_height,
+            premultiplied_rgba,
+            damage_estimate,
             input_regions: vec![card.clone()],
             interactive_region: action,
             generation: self.frame_generation,
             render_ms,
-        })
+        }))
     }
 
     pub fn snapshot(&self) -> Result<LiveRuntimeSnapshot, RuntimeError> {
@@ -4930,6 +5018,28 @@ mod tests {
             .iter()
             .map(|(key, item)| (key.clone(), item.root))
             .collect();
+        let request = LiveRenderRequest::new(800, 600, LIVE_SCALE_DENOMINATOR).unwrap();
+        overlay
+            .render_pending_for(request, 91, 1)
+            .unwrap()
+            .expect("first retained repeat frame");
+        let scene_ids: BTreeMap<_, _> = identities
+            .iter()
+            .map(|(key, identity)| {
+                (
+                    key.clone(),
+                    overlay
+                        .render_session
+                        .current_scene()
+                        .unwrap()
+                        .nodes
+                        .iter()
+                        .find(|node| node.id.dom == Some(*identity))
+                        .unwrap()
+                        .id,
+                )
+            })
+            .collect();
 
         let second = RepeatSourceSnapshot {
             source: RepeatSource::UPowerDevices,
@@ -4945,6 +5055,25 @@ mod tests {
         assert_eq!(updated.identity_reuses, 2);
         for (key, identity) in identities {
             assert_eq!(overlay.repeats["device-row"].items[&key].root, identity);
+        }
+        overlay
+            .render_pending_for(request, 91, 1)
+            .unwrap()
+            .expect("keyed move retained frame");
+        for (key, id) in scene_ids {
+            let root = overlay.repeats["device-row"].items[&key].root;
+            assert_eq!(
+                overlay
+                    .render_session
+                    .current_scene()
+                    .unwrap()
+                    .nodes
+                    .iter()
+                    .find(|node| node.id.dom == Some(root))
+                    .unwrap()
+                    .id,
+                id
+            );
         }
         let third = RepeatSourceSnapshot {
             source: RepeatSource::UPowerDevices,
@@ -6170,6 +6299,15 @@ mod tests {
             assert!(pixel[1] <= pixel[3]);
             assert!(pixel[2] <= pixel[3]);
         }
+        assert!(
+            live.render_pending_for(
+                LiveRenderRequest::new(640, 480, LIVE_SCALE_DENOMINATOR).unwrap(),
+                live.document_identity.serial,
+                1,
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]

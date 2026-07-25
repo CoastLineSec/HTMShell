@@ -1,23 +1,22 @@
+use crate::ExperimentalDocumentIdentity;
 use crate::error::RuntimeError;
+use crate::identity::IdentityRegistry;
 use crate::model::{
     Artifact, CornerRadii, DiagnosticMessage, DiagnosticNode, DiagnosticReport, ExperimentOptions,
     ExperimentRun, FontRecord, ImageDiagnostic, InteractionEvidence, LogicalRect,
-    OverflowDiagnostic, Phase, RunMeasurements, TextDiagnostic,
+    OverflowDiagnostic, Phase, RunMeasurements, TextDiagnostic, ViewportSpec,
 };
+use crate::render::{CpuRenderSession, FrameReason, FrameReasonSet, RenderSurfaceId};
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
 use crate::{BLITZ_REVISION, DIAGNOSTIC_SCHEMA_VERSION};
-use anyrender::{PaintScene, Scene, render_to_buffer};
-use anyrender_vello_cpu::VelloCpuImageRenderer;
 use blitz_dom::node::ImageData;
 use blitz_dom::{Document, DocumentConfig, Node, StyleThreading};
 use blitz_html::{HtmlDocument, HtmlProvider};
-use blitz_paint::paint_scene;
 use blitz_traits::events::{
     BlitzPointerEvent, BlitzPointerId, MouseEventButton, MouseEventButtons, Point, PointerCoords,
     PointerDetails, UiEvent,
 };
 use blitz_traits::shell::{ColorScheme, Viewport};
-use kurbo::Affine;
 use skrifa::string::StringId;
 use skrifa::{FontRef, MetadataProvider};
 use std::collections::{BTreeMap, BTreeSet};
@@ -127,11 +126,24 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
     let initial_resolve_started = Instant::now();
     resolve_resources(&mut document, &audit, 0.0, &mut messages);
     let initial_resolve_ms = elapsed_ms(initial_resolve_started);
+    let identities = IdentityRegistry::from_document(&document);
+    let document_identity = ExperimentalDocumentIdentity { serial: 1 };
+    let mut render_session = CpuRenderSession::default();
 
     let initial_paint_started = Instant::now();
     let initial_png = options
         .render_png
-        .then(|| render_png(&mut document, physical_width, physical_height))
+        .then(|| {
+            render_png_retained(
+                &mut render_session,
+                &mut document,
+                &identities,
+                document_identity,
+                options.viewport,
+                physical_width,
+                physical_height,
+            )
+        })
         .transpose()?;
     let initial_paint_ms = elapsed_ms(initial_paint_started);
 
@@ -200,7 +212,17 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
         let hover_paint_started = Instant::now();
         let hover_png = options
             .render_png
-            .then(|| render_png(&mut document, physical_width, physical_height))
+            .then(|| {
+                render_png_retained(
+                    &mut render_session,
+                    &mut document,
+                    &identities,
+                    document_identity,
+                    options.viewport,
+                    physical_width,
+                    physical_height,
+                )
+            })
             .transpose()?;
         measurements.hover_paint_ms = Some(elapsed_ms(hover_paint_started));
         artifacts.push(make_artifact(Phase::Hover, hover_report, hover_png)?);
@@ -242,7 +264,17 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
         let active_paint_started = Instant::now();
         let active_png = options
             .render_png
-            .then(|| render_png(&mut document, physical_width, physical_height))
+            .then(|| {
+                render_png_retained(
+                    &mut render_session,
+                    &mut document,
+                    &identities,
+                    document_identity,
+                    options.viewport,
+                    physical_width,
+                    physical_height,
+                )
+            })
             .transpose()?;
         measurements.active_paint_ms = Some(elapsed_ms(active_paint_started));
         artifacts.push(make_artifact(Phase::Active, active_report, active_png)?);
@@ -370,51 +402,42 @@ pub(crate) fn resolve_resources(
     });
 }
 
-pub(crate) fn render_png(
+#[allow(clippy::too_many_arguments)]
+fn render_png_retained(
+    session: &mut CpuRenderSession,
     document: &mut HtmlDocument,
-    width: u32,
-    height: u32,
+    identities: &IdentityRegistry,
+    document_identity: ExperimentalDocumentIdentity,
+    viewport: ViewportSpec,
+    physical_width: u32,
+    physical_height: u32,
 ) -> Result<Vec<u8>, RuntimeError> {
-    let rgba = render_rgba(document, width, height);
-    encode_png(&rgba, width, height)
-}
-
-pub(crate) fn render_rgba(document: &mut HtmlDocument, width: u32, height: u32) -> Vec<u8> {
-    let scale = document.viewport().scale_f64();
-    render_to_buffer::<VelloCpuImageRenderer, _>(
-        |scene| paint_scene(scene, document, scale, width, height, 0, 0),
-        width,
-        height,
-    )
-}
-
-pub(crate) fn render_rgba_scaled(
-    document: &mut HtmlDocument,
-    logical_width: u32,
-    logical_height: u32,
-    buffer_width: u32,
-    buffer_height: u32,
-    scale: f64,
-) -> Vec<u8> {
-    if logical_width == buffer_width && logical_height == buffer_height && scale == 1.0 {
-        return render_rgba(document, buffer_width, buffer_height);
-    }
-
-    let mut logical_scene = Scene::new();
-    paint_scene(
-        &mut logical_scene,
-        document,
-        1.0,
-        logical_width,
-        logical_height,
-        0,
-        0,
-    );
-    render_to_buffer::<VelloCpuImageRenderer, _>(
-        |scene| scene.append_scene(logical_scene, Affine::scale(scale)),
-        buffer_width,
-        buffer_height,
-    )
+    let scale_numerator = (f64::from(viewport.scale_factor) * 120.0).round() as u32;
+    let mut reasons = FrameReasonSet::new();
+    reasons.insert(FrameReason::ExplicitInvalidation);
+    let frame = session
+        .render_document(
+            document,
+            identities,
+            document_identity,
+            viewport,
+            RenderSurfaceId {
+                instance: 1,
+                generation: 1,
+            },
+            physical_width,
+            physical_height,
+            scale_numerator,
+            120,
+            reasons,
+            true,
+        )?
+        .ok_or_else(|| {
+            RuntimeError::InvalidPackage(
+                "forced headless retained rendering did not produce a frame".into(),
+            )
+        })?;
+    encode_png(&frame.pixels, physical_width, physical_height)
 }
 
 pub(crate) fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, RuntimeError> {
@@ -470,7 +493,7 @@ fn build_report(
         schema_version: DIAGNOSTIC_SCHEMA_VERSION,
         phase,
         viewport,
-        renderer: "AnyRender + Vello CPU (RGBA buffer)".into(),
+        renderer: "HTMShell retained scene + AnyRender Vello CPU reference rasterizer".into(),
         blitz_revision: BLITZ_REVISION,
         document_source: source.display().to_string(),
         node_count: document.tree().len(),
@@ -485,7 +508,7 @@ fn build_report(
             "Detailed Stylo CSS parse errors are not exposed by the selected convenience API."
                 .into(),
             "Exact restyled-node and recomputed-layout-node counters are not exposed.".into(),
-            "blitz-paint rebuilds an AnyRender scene for each exported phase.".into(),
+            "The CPU reference rasterizer rebuilds one backend-private AnyRender recording for each accepted retained-scene revision.".into(),
             "Networking, navigation, scripting, media playback, and embedded documents are disabled."
                 .into(),
         ],
@@ -660,7 +683,7 @@ pub(crate) fn image_diagnostic(node: &Node) -> Option<ImageDiagnostic> {
     })
 }
 
-fn collect_fonts(document: &HtmlDocument) -> Vec<FontRecord> {
+pub(crate) fn collect_fonts(document: &HtmlDocument) -> Vec<FontRecord> {
     let mut fonts = BTreeSet::new();
     for (_, node) in document.tree().iter() {
         let Some(layout) = node

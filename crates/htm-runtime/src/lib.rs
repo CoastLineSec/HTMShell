@@ -10,6 +10,10 @@ mod incremental;
 mod live;
 mod model;
 mod mutation;
+// R1 intentionally defines recovery and backend-neutral states that the CPU
+// reference backend does not exercise in every production path.
+#[allow(dead_code, unused_imports)]
+mod render;
 mod resource;
 mod scene;
 mod stylesheet;

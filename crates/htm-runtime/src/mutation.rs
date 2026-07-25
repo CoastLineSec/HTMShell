@@ -1,7 +1,7 @@
 use crate::RuntimeError;
 use crate::adapter::{
-    count_damaged_nodes, count_dirty_descendants, elapsed_ms, encode_png, render_rgba,
-    resolve_resources, validate_document_limits,
+    count_damaged_nodes, count_dirty_descendants, elapsed_ms, encode_png, resolve_resources,
+    validate_document_limits,
 };
 use crate::identity::IdentityRegistry;
 use crate::incremental::{
@@ -10,6 +10,7 @@ use crate::incremental::{
     SlotReuseEvidence, StylesheetReloadAttempt,
 };
 use crate::model::{DiagnosticMessage, ViewportSpec};
+use crate::render::{CpuRenderSession, FrameReason, FrameReasonSet, RenderSurfaceId};
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
 use crate::scene::{build_scene_snapshot, diff_scenes};
 use crate::stylesheet::{load_candidate_css, prepare_author_stylesheet, replace_author_stylesheet};
@@ -83,6 +84,7 @@ fn run_inner(package: &Path) -> Result<IncrementalExperimentRun, RuntimeError> {
     resolve_resources(&mut document, &audit, 0.0, &mut resource_messages);
     let initial_resolve_ms = elapsed_ms(initial_resolve_started);
     let mut identities = IdentityRegistry::from_document(&document);
+    let mut render_session = CpuRenderSession::default();
     let initial_node_count = identities.live_identities(&document)?.len();
 
     let mut artifacts = Vec::new();
@@ -91,6 +93,7 @@ fn run_inner(package: &Path) -> Result<IncrementalExperimentRun, RuntimeError> {
     capture_accepted_phase(
         &mut document,
         &identities,
+        &mut render_session,
         MutationPhase::Initial,
         parse_ms,
         Some(initial_resolve_ms),
@@ -133,6 +136,7 @@ fn run_inner(package: &Path) -> Result<IncrementalExperimentRun, RuntimeError> {
     capture_accepted_phase(
         &mut document,
         &identities,
+        &mut render_session,
         MutationPhase::TextMutation,
         operation_ms,
         Some(resolve_ms),
@@ -164,6 +168,7 @@ fn run_inner(package: &Path) -> Result<IncrementalExperimentRun, RuntimeError> {
     capture_accepted_phase(
         &mut document,
         &identities,
+        &mut render_session,
         MutationPhase::ClassMutation,
         operation_ms,
         Some(resolve_ms),
@@ -187,6 +192,7 @@ fn run_inner(package: &Path) -> Result<IncrementalExperimentRun, RuntimeError> {
     capture_accepted_phase(
         &mut document,
         &identities,
+        &mut render_session,
         MutationPhase::ListAppend,
         operation_ms,
         Some(resolve_ms),
@@ -222,6 +228,7 @@ fn run_inner(package: &Path) -> Result<IncrementalExperimentRun, RuntimeError> {
     capture_accepted_phase(
         &mut document,
         &identities,
+        &mut render_session,
         MutationPhase::ListRemoval,
         operation_ms,
         Some(resolve_ms),
@@ -297,6 +304,7 @@ fn run_inner(package: &Path) -> Result<IncrementalExperimentRun, RuntimeError> {
     capture_accepted_phase(
         &mut document,
         &identities,
+        &mut render_session,
         MutationPhase::SlotReuse,
         operation_ms,
         Some(resolve_ms),
@@ -325,6 +333,7 @@ fn run_inner(package: &Path) -> Result<IncrementalExperimentRun, RuntimeError> {
     capture_accepted_phase(
         &mut document,
         &identities,
+        &mut render_session,
         MutationPhase::StylesheetReplacement,
         replacement_ms,
         Some(resolve_ms),
@@ -528,6 +537,7 @@ fn run_inner(package: &Path) -> Result<IncrementalExperimentRun, RuntimeError> {
 fn capture_accepted_phase(
     document: &mut HtmlDocument,
     identities: &IdentityRegistry,
+    render_session: &mut CpuRenderSession,
     phase: MutationPhase,
     operation_ms: f64,
     resolve_ms: Option<f64>,
@@ -558,7 +568,31 @@ fn capture_accepted_phase(
     let diff_json = diff.as_ref().map(pretty_json).transpose()?;
 
     let paint_started = Instant::now();
-    let rgba = render_rgba(document, viewport.logical_width, viewport.logical_height);
+    let mut reasons = FrameReasonSet::new();
+    reasons.insert(FrameReason::DocumentMutation);
+    let frame = render_session
+        .render_document(
+            document,
+            identities,
+            DOCUMENT_IDENTITY,
+            viewport,
+            RenderSurfaceId {
+                instance: 1,
+                generation: 1,
+            },
+            viewport.logical_width,
+            viewport.logical_height,
+            120,
+            120,
+            reasons,
+            true,
+        )?
+        .ok_or_else(|| {
+            RuntimeError::InvalidPackage(
+                "forced mutation rendering did not produce a retained frame".into(),
+            )
+        })?;
+    let rgba = frame.pixels;
     let paint_ms = elapsed_ms(paint_started);
     let png_started = Instant::now();
     let png = encode_png(&rgba, viewport.logical_width, viewport.logical_height)?;
@@ -759,11 +793,31 @@ fn run_scale_fixture(
     let diff_ms = elapsed_ms(diff_started);
     let diff_json = pretty_json(&diff)?;
     let paint_started = Instant::now();
-    let _rgba = render_rgba(
-        &mut document,
-        viewport.logical_width,
-        viewport.logical_height,
-    );
+    let mut render_session = CpuRenderSession::default();
+    let mut reasons = FrameReasonSet::new();
+    reasons.insert(FrameReason::ExplicitInvalidation);
+    let _frame = render_session
+        .render_document(
+            &mut document,
+            &identities,
+            DOCUMENT_IDENTITY,
+            viewport,
+            RenderSurfaceId {
+                instance: requested_nodes as u64,
+                generation: 1,
+            },
+            viewport.logical_width,
+            viewport.logical_height,
+            120,
+            120,
+            reasons,
+            true,
+        )?
+        .ok_or_else(|| {
+            RuntimeError::InvalidPackage(
+                "forced scale-fixture rendering did not produce a retained frame".into(),
+            )
+        })?;
     let full_paint_ms = elapsed_ms(paint_started);
 
     Ok(ScaleBaseline {
@@ -956,7 +1010,7 @@ fn write_measurement_summary(
         note: "Feasibility timings are volatile and are not a benchmark or deterministic artifact.",
         document_parse_count,
         document_identity_preserved,
-        full_anyrender_reconstruction: "Every accepted painted phase invokes blitz_paint::paint_scene and rebuilds the AnyRender scene.",
+        full_anyrender_reconstruction: "Every accepted retained-scene revision currently prepares one backend-private AnyRender recording for full CPU rasterization.",
         unavailable_exact_counters: [
             "nodes_restyled",
             "taffy_nodes_recomputed",
