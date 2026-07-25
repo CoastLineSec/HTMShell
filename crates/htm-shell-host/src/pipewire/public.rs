@@ -4,6 +4,7 @@ use super::model::{
 };
 use htm_runtime::{
     ContextualRepeatSnapshot, ItemBindingKey, NumericValue, PipeWireDocumentDemand,
+    PipeWirePeakDeclarationDemand, PipeWirePeakMonitorIdentity, PipeWirePeakTarget,
     RepeatItemSnapshot, RepeatSource, RepeatSourceSnapshot, StateBindingKey, StateToken,
 };
 use std::collections::BTreeMap;
@@ -38,6 +39,10 @@ pub(crate) struct PipeWireDemand {
     pub configured_default_writes: bool,
     pub preferred_sink_writes: bool,
     pub preferred_source_writes: bool,
+    pub peak_monitor_declarations: bool,
+    pub peak_maximum_projection: bool,
+    pub peak_channel_projection: bool,
+    pub peak_declarations: BTreeMap<PipeWirePeakMonitorIdentity, PipeWirePeakTarget>,
     pub property_keys: std::collections::BTreeSet<String>,
 }
 
@@ -64,6 +69,9 @@ impl PipeWireDemand {
         self.configured_default_writes |= demand.configured_default_writes;
         self.preferred_sink_writes |= demand.preferred_sink_writes;
         self.preferred_source_writes |= demand.preferred_source_writes;
+        self.peak_monitor_declarations |= demand.peak_monitor_declarations;
+        self.peak_maximum_projection |= demand.peak_maximum_projection;
+        self.peak_channel_projection |= demand.peak_channel_projection;
         self.links |= demand.link_collection
             || demand.link_group_collection
             || demand.node_link_tracking
@@ -74,6 +82,16 @@ impl PipeWireDemand {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.documents == 0
+    }
+
+    pub(crate) fn add_peak_declarations(
+        &mut self,
+        declarations: impl IntoIterator<Item = PipeWirePeakDeclarationDemand>,
+    ) {
+        for declaration in declarations {
+            self.peak_declarations
+                .insert(declaration.monitor, declaration.target);
+        }
     }
 }
 
@@ -395,6 +413,7 @@ struct DefaultKeys {
     mute_state: StateBindingKey,
     can_set_volume: StateBindingKey,
     can_set_mute: StateBindingKey,
+    can_monitor_peaks: Option<StateBindingKey>,
     can_clear: Option<StateBindingKey>,
 }
 
@@ -411,6 +430,7 @@ impl DefaultKeys {
         mute_state: StateBindingKey::PipeWireDefaultSinkMuteState,
         can_set_volume: StateBindingKey::PipeWireDefaultSinkCanSetVolume,
         can_set_mute: StateBindingKey::PipeWireDefaultSinkCanSetMute,
+        can_monitor_peaks: Some(StateBindingKey::PipeWireDefaultSinkCanMonitorPeaks),
         can_clear: None,
     };
     const ACTUAL_SOURCE: Self = Self {
@@ -425,6 +445,7 @@ impl DefaultKeys {
         mute_state: StateBindingKey::PipeWireDefaultSourceMuteState,
         can_set_volume: StateBindingKey::PipeWireDefaultSourceCanSetVolume,
         can_set_mute: StateBindingKey::PipeWireDefaultSourceCanSetMute,
+        can_monitor_peaks: Some(StateBindingKey::PipeWireDefaultSourceCanMonitorPeaks),
         can_clear: None,
     };
     const CONFIGURED_SINK: Self = Self {
@@ -439,6 +460,7 @@ impl DefaultKeys {
         mute_state: StateBindingKey::PipeWireConfiguredSinkMuteState,
         can_set_volume: StateBindingKey::PipeWireConfiguredSinkCanSetVolume,
         can_set_mute: StateBindingKey::PipeWireConfiguredSinkCanSetMute,
+        can_monitor_peaks: None,
         can_clear: Some(StateBindingKey::PipeWireConfiguredSinkCanClear),
     };
     const CONFIGURED_SOURCE: Self = Self {
@@ -453,6 +475,7 @@ impl DefaultKeys {
         mute_state: StateBindingKey::PipeWireConfiguredSourceMuteState,
         can_set_volume: StateBindingKey::PipeWireConfiguredSourceCanSetVolume,
         can_set_mute: StateBindingKey::PipeWireConfiguredSourceCanSetMute,
+        can_monitor_peaks: None,
         can_clear: Some(StateBindingKey::PipeWireConfiguredSourceCanClear),
     };
 }
@@ -521,6 +544,12 @@ fn project_default(
         (keys.can_set_volume, can_set_volume),
         (keys.can_set_mute, can_set_mute),
     ] {
+        projections.text.push((key, bool_text(value)));
+        projections.tokens.push((key, bool_token(value)));
+        projections.booleans.push((key, Some(value)));
+    }
+    if let Some(key) = keys.can_monitor_peaks {
+        let value = node.is_some_and(|node| can_monitor_peaks(snapshot, node));
         projections.text.push((key, bool_text(value)));
         projections.tokens.push((key, bool_token(value)));
         projections.booleans.push((key, Some(value)));
@@ -612,6 +641,10 @@ fn project_node(
             bool_text(can_set_preferred_source),
         ),
         (
+            ItemBindingKey::CanMonitorPeaks,
+            bool_text(can_monitor_peaks(snapshot, node)),
+        ),
+        (
             ItemBindingKey::ChannelStatus,
             channel_status(node).text().into(),
         ),
@@ -686,6 +719,12 @@ fn project_node(
         (
             ItemBindingKey::CanSetPreferredSource,
             bool_token(can_set_preferred_source).as_str().into(),
+        ),
+        (
+            ItemBindingKey::CanMonitorPeaks,
+            bool_token(can_monitor_peaks(snapshot, node))
+                .as_str()
+                .into(),
         ),
         (
             ItemBindingKey::ChannelStatus,
@@ -1321,6 +1360,14 @@ fn audio_status(node: &PipeWireNodeSnapshot) -> AudioStatus {
     } else {
         AudioStatus::Unavailable
     }
+}
+
+pub(crate) fn can_monitor_peaks(snapshot: &PipeWireSnapshot, node: &PipeWireNodeSnapshot) -> bool {
+    snapshot.ready
+        && node.ready
+        && node.audio_capable
+        && !node.classification.monitor
+        && node.raw_global_id != u32::MAX
 }
 
 fn channel_status(node: &PipeWireNodeSnapshot) -> AudioStatus {

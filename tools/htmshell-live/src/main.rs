@@ -705,6 +705,7 @@ fn run_two_surface(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     let mut exit_after_automatic_cycles = false;
     let mut exit_after_overlay_close = false;
     let mut open_overlay_on_start = false;
+    let mut exit_after_peak_publications = None;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--panel-height" => {
@@ -722,6 +723,13 @@ fn run_two_surface(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
             "--exit-after-automatic-cycles" => exit_after_automatic_cycles = true,
             "--exit-after-overlay-close" => exit_after_overlay_close = true,
             "--open-overlay-on-start" => open_overlay_on_start = true,
+            "--exit-after-peak-publications" => {
+                exit_after_peak_publications = Some(
+                    args.next()
+                        .ok_or("--exit-after-peak-publications requires a positive integer")?
+                        .parse::<u64>()?,
+                );
+            }
             _ => return Err(format!("unknown two-surface argument: {argument}").into()),
         }
     }
@@ -734,6 +742,9 @@ fn run_two_surface(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     if open_overlay_on_start && automatic_overlay_cycles > 0 {
         return Err("--open-overlay-on-start cannot be combined with automatic cycles".into());
     }
+    if exit_after_peak_publications == Some(0) {
+        return Err("--exit-after-peak-publications must be positive".into());
+    }
     let summary = run_multi_surface_shell(MultiSurfaceHostOptions {
         package,
         panel_height,
@@ -741,6 +752,7 @@ fn run_two_surface(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
         exit_after_automatic_cycles,
         exit_after_overlay_close,
         open_overlay_on_start,
+        exit_after_peak_publications,
     })?;
     println!("multi_surface_result=success");
     println!("layer_shell_version={}", summary.layer_shell_version);
@@ -773,6 +785,23 @@ fn run_two_surface(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     println!(
         "automatic_cycles_completed={}",
         summary.automatic_cycles_completed
+    );
+    println!(
+        "pipewire_peak_streams_active={}",
+        summary.pipewire_peaks.active_streams
+    );
+    println!(
+        "pipewire_peak_stream_starts={} stops={}",
+        summary.pipewire_peaks.stream_starts, summary.pipewire_peaks.stream_stops
+    );
+    println!(
+        "pipewire_peak_callbacks={} coalesced={}",
+        summary.pipewire_peaks.process_callbacks, summary.pipewire_peaks.callbacks_coalesced
+    );
+    println!(
+        "pipewire_peak_vectors_published={} duplicates={}",
+        summary.pipewire_peaks.vectors_published,
+        summary.pipewire_peaks.duplicate_vectors_suppressed
     );
     println!("last_action={}", summary.last_action);
     Ok(())

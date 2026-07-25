@@ -11,8 +11,9 @@ use crate::power::{
 use crate::scale::{PresentationProfile, SurfaceScaleState};
 use crate::scheduler::{FrameScheduler, ScheduleDecision};
 use htm_runtime::{
-    LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind, LiveFrame,
-    MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS, RepeatSource, StateBindingKey, StateToken,
+    ItemBindingKey, LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind, LiveFrame,
+    MAX_PIPEWIRE_PEAK_DECLARATIONS_PER_TARGET, MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS,
+    PipeWirePeakTarget, RepeatSource, StateBindingKey, StateToken,
 };
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::fd::BorrowedFd;
@@ -107,6 +108,7 @@ pub struct MultiSurfaceHostOptions {
     pub exit_after_automatic_cycles: bool,
     pub exit_after_overlay_close: bool,
     pub open_overlay_on_start: bool,
+    pub exit_after_peak_publications: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +218,17 @@ pub struct SurfaceHostSummary {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct PipeWirePeakHostSummary {
+    pub active_streams: usize,
+    pub stream_starts: u64,
+    pub stream_stops: u64,
+    pub process_callbacks: u64,
+    pub callbacks_coalesced: u64,
+    pub vectors_published: u64,
+    pub duplicate_vectors_suppressed: u64,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct MultiSurfaceHostSummary {
     pub layer_shell_version: u32,
     pub output_scale: i32,
@@ -232,6 +245,7 @@ pub struct MultiSurfaceHostSummary {
     pub combined_mapped_memory_peak: usize,
     pub automatic_cycles_completed: u32,
     pub last_action: String,
+    pub pipewire_peaks: PipeWirePeakHostSummary,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1367,17 +1381,32 @@ impl State {
 
     fn aggregate_pipewire_demand(&self) -> Result<PipeWireDemand, ShellHostError> {
         let mut demand = PipeWireDemand::default();
-        for runtime in self
-            .surfaces
-            .iter()
-            .filter_map(|surface| surface.runtime.as_ref())
-        {
+        for surface in &self.surfaces {
+            let Some(runtime) = surface.runtime.as_ref() else {
+                continue;
+            };
             demand.add_document(&runtime.pipewire_demand());
+            demand.add_peak_declarations(runtime.pipewire_peak_demands(surface.mapped));
         }
         if demand.property_keys.len() > MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS {
             return Err(ShellHostError::Wayland(format!(
                 "PipeWire property-key demand exceeds {MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS} unique keys"
             )));
+        }
+        if demand.peak_declarations.len() > 4096 {
+            return Err(ShellHostError::Wayland(
+                "PipeWire peak monitor demand exceeds 4096 active declaration identities".into(),
+            ));
+        }
+        let mut peak_targets = std::collections::BTreeMap::<PipeWirePeakTarget, usize>::new();
+        for target in demand.peak_declarations.values() {
+            let count = peak_targets.entry(target.clone()).or_default();
+            *count = count.saturating_add(1);
+            if *count > MAX_PIPEWIRE_PEAK_DECLARATIONS_PER_TARGET {
+                return Err(ShellHostError::Wayland(format!(
+                    "PipeWire peak monitor demand exceeds {MAX_PIPEWIRE_PEAK_DECLARATIONS_PER_TARGET} active declarations for one target"
+                )));
+            }
         }
         Ok(demand)
     }
@@ -1401,7 +1430,63 @@ impl State {
     }
 
     fn fanout_pipewire_snapshot(&mut self, snapshot: &PipeWireSnapshot, demand: &PipeWireDemand) {
-        let projections = snapshot.public_projections(demand);
+        let mut projections = snapshot.public_projections(demand);
+        let peak_projections = self.pipewire.peak_projections();
+        for repeat in projections
+            .repeats
+            .iter_mut()
+            .filter(|repeat| repeat.source == RepeatSource::PipeWireNodes)
+        {
+            for item in &mut repeat.items {
+                let can_monitor = peak_projections.monitorable_nodes.contains(&item.key);
+                item.text.insert(
+                    ItemBindingKey::CanMonitorPeaks,
+                    if can_monitor { "true" } else { "false" }.into(),
+                );
+                item.tokens.insert(
+                    ItemBindingKey::CanMonitorPeaks,
+                    if can_monitor { "true" } else { "false" }.into(),
+                );
+            }
+        }
+        for (key, item_key) in [
+            (
+                StateBindingKey::PipeWireDefaultSinkCanMonitorPeaks,
+                peak_projections.default_sink_item_key.as_deref(),
+            ),
+            (
+                StateBindingKey::PipeWireDefaultSourceCanMonitorPeaks,
+                peak_projections.default_source_item_key.as_deref(),
+            ),
+        ] {
+            let can_monitor = item_key
+                .is_some_and(|item_key| peak_projections.monitorable_nodes.contains(item_key));
+            if let Some((_, value)) = projections
+                .text
+                .iter_mut()
+                .find(|(binding, _)| *binding == key)
+            {
+                *value = if can_monitor { "true" } else { "false" }.into();
+            }
+            if let Some((_, value)) = projections
+                .tokens
+                .iter_mut()
+                .find(|(binding, _)| *binding == key)
+            {
+                *value = if can_monitor {
+                    StateToken::True
+                } else {
+                    StateToken::False
+                };
+            }
+            if let Some((_, value)) = projections
+                .booleans
+                .iter_mut()
+                .find(|(binding, _)| *binding == key)
+            {
+                *value = Some(can_monitor);
+            }
+        }
         for surface in &mut self.surfaces {
             let Some(runtime) = surface.runtime.as_mut() else {
                 continue;
@@ -1425,6 +1510,9 @@ impl State {
                         .saturating_add(mutation.moves)
                         .saturating_add(mutation.property_updates);
                 }
+                changed = changed.saturating_add(
+                    runtime.apply_pipewire_peak_projections(&peak_projections, surface.mapped)?,
+                );
                 Ok::<usize, htm_runtime::RuntimeError>(changed)
             })();
             match result {
@@ -1683,6 +1771,7 @@ impl State {
         let Some(index) = self.surface_index_by_owner(owner) else {
             return Ok(());
         };
+        let was_mapped = self.surfaces[index].mapped;
         let manifest_shared = self
             .output_instance_index_by_owner(owner)
             .map(|group| self.output_instances[group].shared.clone());
@@ -2014,6 +2103,9 @@ impl State {
         surface_state.summary.last_attribute_mutation_us =
             milliseconds_to_microseconds(runtime_measurements.last_attribute_mutation_ms);
         surface_state.refresh_pool_summary();
+        if !was_mapped {
+            self.reconcile_pipewire_demand()?;
+        }
         Ok(())
     }
 
@@ -2108,7 +2200,9 @@ impl State {
         }
         if matches!(
             action,
-            LiveAction::PipeWireAudio(_) | LiveAction::PipeWireDefault(_)
+            LiveAction::PipeWireAudio(_)
+                | LiveAction::PipeWireDefault(_)
+                | LiveAction::PipeWirePeak(_)
         ) {
             self.handle_pipewire_action(owner, action)?;
             if matches!(self.options, SessionOptions::Manifest(_)) {
@@ -2174,7 +2268,8 @@ impl State {
             | LiveAction::PowerProfileSetBalanced
             | LiveAction::PowerProfileSetPerformance
             | LiveAction::PipeWireAudio(_)
-            | LiveAction::PipeWireDefault(_) => unreachable!("handled above"),
+            | LiveAction::PipeWireDefault(_)
+            | LiveAction::PipeWirePeak(_) => unreachable!("handled above"),
         }
         Ok(())
     }
@@ -2220,6 +2315,19 @@ impl State {
             return Err(ShellHostError::Wayland(
                 "unmapped surface cannot dispatch a PipeWire audio action".into(),
             ));
+        }
+        if let LiveAction::PipeWirePeak(request) = &action {
+            let changed = self.surfaces[index]
+                .runtime
+                .as_mut()
+                .ok_or_else(|| ShellHostError::Wayland("PipeWire runtime is missing".into()))?
+                .apply_pipewire_peak_action(request)?;
+            if changed {
+                self.surfaces[index].scheduler.mark_dirty();
+            }
+            self.reconcile_pipewire_demand()?;
+            self.fanout_current_pipewire_snapshot();
+            return Ok(());
         }
         let (control, result) = match action {
             LiveAction::PipeWireAudio(request) => {
@@ -2395,7 +2503,8 @@ impl State {
             | LiveAction::PowerProfileSetBalanced
             | LiveAction::PowerProfileSetPerformance
             | LiveAction::PipeWireAudio(_)
-            | LiveAction::PipeWireDefault(_) => {
+            | LiveAction::PipeWireDefault(_)
+            | LiveAction::PipeWirePeak(_) => {
                 unreachable!("handled before manifest dispatch")
             }
         }
@@ -2501,7 +2610,8 @@ impl State {
             self.surfaces[index].scheduler.mark_dirty();
         }
         self.refresh_manifest_surface_bindings(overlay_owner)?;
-        self.update_manifest_panel(panel_owner, true, &last_action)
+        self.update_manifest_panel(panel_owner, true, &last_action)?;
+        self.reconcile_pipewire_demand()
     }
 
     fn close_manifest_overlay(
@@ -2555,7 +2665,8 @@ impl State {
         }
         self.destroy_transient_surface_role(overlay_owner);
         self.refresh_manifest_surface_bindings(overlay_owner)?;
-        self.update_manifest_panel(panel_owner, false, &last_action)
+        self.update_manifest_panel(panel_owner, false, &last_action)?;
+        self.reconcile_pipewire_demand()
     }
 
     fn update_manifest_panel(
@@ -2647,7 +2758,7 @@ impl State {
             self.surfaces[index].scheduler.mark_dirty();
         }
         self.update_panel_document()?;
-        Ok(())
+        self.reconcile_pipewire_demand()
     }
 
     fn close_overlay(&mut self, action: &str) -> Result<(), ShellHostError> {
@@ -2694,7 +2805,7 @@ impl State {
             surface.refresh_pool_summary();
         }
         self.update_panel_document()?;
-        Ok(())
+        self.reconcile_pipewire_demand()
     }
 
     fn update_panel_document(&mut self) -> Result<(), ShellHostError> {
@@ -2882,6 +2993,18 @@ impl State {
         Ok(())
     }
 
+    fn maybe_stop_after_peak_publications(&mut self) {
+        let target = match &self.options {
+            SessionOptions::Multi(options) => options.exit_after_peak_publications,
+            SessionOptions::Single(_) | SessionOptions::Manifest(_) => None,
+        };
+        if target.is_some_and(|target| {
+            self.pipewire.resource_counters().peak_vectors_published >= target
+        }) {
+            self.running = false;
+        }
+    }
+
     fn fail(&mut self, message: String) {
         if self.failure.is_none() {
             self.failure = Some(message);
@@ -3049,6 +3172,7 @@ impl State {
             .surface_index(SurfaceKind::Overlay)
             .map(|index| self.surfaces[index].summary.clone())
             .unwrap_or_default();
+        let resources = self.pipewire.resource_counters();
         MultiSurfaceHostSummary {
             layer_shell_version: self.layer_shell_version,
             output_scale: self.legacy_output_scale(),
@@ -3065,6 +3189,15 @@ impl State {
             combined_mapped_memory_peak: self.combined_mapped_memory_peak,
             automatic_cycles_completed: self.auto_cycles_completed,
             last_action: self.shared.last_action.clone(),
+            pipewire_peaks: PipeWirePeakHostSummary {
+                active_streams: resources.peak_stream_count,
+                stream_starts: resources.peak_stream_starts,
+                stream_stops: resources.peak_stream_stops,
+                process_callbacks: resources.peak_process_callbacks,
+                callbacks_coalesced: resources.peak_callbacks_coalesced,
+                vectors_published: resources.peak_vectors_published,
+                duplicate_vectors_suppressed: resources.peak_duplicate_vectors_suppressed,
+            },
         }
     }
 
@@ -3269,6 +3402,7 @@ fn run_session(options: SessionOptions) -> Result<State, ShellHostError> {
         {}
         state.maybe_render_all(&qh)?;
         state.reconcile_pipewire_demand()?;
+        state.maybe_stop_after_peak_publications();
         connection.flush().map_err(ShellHostError::wayland)?;
         state.maybe_reopen_automatic_overlay();
         state.maybe_render_all(&qh)?;
@@ -3648,7 +3782,8 @@ fn validate_manifest_action_source(
         | LiveAction::PowerProfileSetBalanced
         | LiveAction::PowerProfileSetPerformance
         | LiveAction::PipeWireAudio(_)
-        | LiveAction::PipeWireDefault(_) => Ok(()),
+        | LiveAction::PipeWireDefault(_)
+        | LiveAction::PipeWirePeak(_) => Ok(()),
     }
 }
 

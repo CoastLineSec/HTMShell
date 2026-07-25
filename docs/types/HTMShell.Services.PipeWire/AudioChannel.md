@@ -78,8 +78,13 @@ Volume and mute updates preserve identity. A count, order, position, fallback,
 node, or parameter-generation change replaces the channel layout. `item.index`
 is diagnostic and cannot target a control.
 
+Peak channels reuse the same complete position token and name inventory, but
+have independent stream and layout generations. They are not joined to volume
+channels by index.
+
 ## See also
 
 - [`Channels`](Channels.md)
 - [`ChannelControls`](ChannelControls.md)
 - [`Volume`](Volume.md)
+- [`PeakChannel`](PeakChannel.md)

@@ -9,5 +9,6 @@ The `HTMShell.Actions` module lists typed actions accepted by [`action-button`](
 - [`PowerProfile`](PowerProfile.md): Select a process power profile.
 - [`PipeWireAudio`](PipeWireAudio.md): Control mute and average volume on one audio node.
 - [`PipeWireDefaults`](PipeWireDefaults.md): Select or clear configured audio defaults.
+- [`PipeWirePeaks`](PipeWirePeaks.md): Enable, disable, or toggle one explicit peak monitor.
 
 Actions are validated against their source surface during document initialization and again at dispatch.

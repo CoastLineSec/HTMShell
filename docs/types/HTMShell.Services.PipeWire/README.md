@@ -22,6 +22,9 @@ Process-scoped PipeWire graph state and typed audio controls.
 - [`LinkState`](LinkState.md): complete link state tokens
 - [`Relations`](Relations.md): typed source, target, and peer projections
 - [`NodeLinks`](NodeLinks.md): contextual node connection tracking
+- [`PeakMonitoring`](PeakMonitoring.md): explicit shared stream and publication model
+- [`PeakMonitor`](PeakMonitor.md): monitor-local state and lifecycle
+- [`PeakChannel`](PeakChannel.md): ordered per-channel scalar peaks
 
 The module does not expose channel mute, channel-map writes, link mutation,
-peak monitoring, stream movement, or spatial graph rendering.
+stream movement, recording, spectra, peak history, or spatial graph rendering.

@@ -57,6 +57,7 @@ Exactly one contextual repeat level is supported:
 | `item.channels` | `pipewire.nodes` |
 | `item.link_groups` | `pipewire.nodes` |
 | `item.links` | `pipewire.link_groups` |
+| `peak.channels` | nearest `peak-monitor` |
 
 For example, `item.channels` is valid only inside the single root of a
 `pipewire.nodes` template:
@@ -84,6 +85,11 @@ and channel `range-control`. Graph contextual clones allow only ordinary HTML,
 The inner `item.*` shadows the outer item in all contextual collections. No
 parent traversal exists. `item.channels` and `item.link_groups` may be sibling
 repeats in one node template, but no contextual repeat may contain another.
+
+`peak.channels` uses a monitor-local scope rather than an outer `item.*`
+scope. Its inner `item.*` is one negotiated peak channel. It permits only
+ordinary HTML, `state-text`, `state-token`, and `state-value`; actions,
+controls, clocks, monitors, and another repeat are rejected.
 
 Volume-only updates retain channel clone identity; a layout-generation change
 replaces it. Link-state and relation-label updates retain graph clone identity.
@@ -119,3 +125,4 @@ apply.
 - [PipeWire links](../HTMShell.Services.PipeWire/Link.md)
 - [PipeWire link groups](../HTMShell.Services.PipeWire/LinkGroup.md)
 - [PipeWire node connections](../HTMShell.Services.PipeWire/NodeLinks.md)
+- [PipeWire peak channels](../HTMShell.Services.PipeWire/PeakChannel.md)

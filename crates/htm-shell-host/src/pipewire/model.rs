@@ -159,6 +159,89 @@ impl FiniteVolume {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FinitePeak(u32);
+
+impl FinitePeak {
+    const ZERO: Self = Self(0);
+
+    pub(crate) fn new(value: f32) -> Option<Self> {
+        (value.is_finite() && value >= 0.0).then(|| Self(value.to_bits()))
+    }
+
+    pub(crate) fn get(self) -> f32 {
+        f32::from_bits(self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FinitePeakVector {
+    values: [FinitePeak; MAX_AUDIO_CHANNELS],
+    len: usize,
+}
+
+impl FinitePeakVector {
+    #[cfg(test)]
+    pub(crate) fn from_perceptual(peaks: &[f32]) -> Option<Self> {
+        if peaks.is_empty() || peaks.len() > MAX_AUDIO_CHANNELS {
+            return None;
+        }
+        let mut values = [FinitePeak::ZERO; MAX_AUDIO_CHANNELS];
+        for (slot, value) in values.iter_mut().zip(peaks) {
+            *slot = FinitePeak::new(*value)?;
+        }
+        Some(Self {
+            values,
+            len: peaks.len(),
+        })
+    }
+
+    pub(crate) fn from_maxima(maxima: &[f32]) -> Option<Self> {
+        if maxima.is_empty() || maxima.len() > MAX_AUDIO_CHANNELS {
+            return None;
+        }
+        let mut values = [FinitePeak::ZERO; MAX_AUDIO_CHANNELS];
+        for (slot, value) in values.iter_mut().zip(maxima) {
+            *slot = FinitePeak::new(value.cbrt())?;
+        }
+        Some(Self {
+            values,
+            len: maxima.len(),
+        })
+    }
+
+    pub(crate) fn as_slice(&self) -> &[FinitePeak] {
+        &self.values[..self.len]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PipeWirePeakEvent {
+    Starting {
+        raw_id: u32,
+        stream_generation: u64,
+    },
+    Format {
+        raw_id: u32,
+        stream_generation: u64,
+        layout_generation: u64,
+        positions: Vec<u32>,
+    },
+    Failed {
+        raw_id: u32,
+        stream_generation: u64,
+        denied: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PipeWirePeakSamples {
+    pub raw_id: u32,
+    pub stream_generation: u64,
+    pub layout_generation: u64,
+    pub peaks: FinitePeakVector,
+}
+
 impl Serialize for FiniteVolume {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -554,6 +637,13 @@ pub struct PipeWireResourceCounters {
     pub duplicate_publications_suppressed: u64,
     pub reconnect_attempts: u64,
     pub diagnostics_contained: u64,
+    pub peak_stream_count: usize,
+    pub peak_stream_starts: u64,
+    pub peak_stream_stops: u64,
+    pub peak_process_callbacks: u64,
+    pub peak_callbacks_coalesced: u64,
+    pub peak_vectors_published: u64,
+    pub peak_duplicate_vectors_suppressed: u64,
     pub controls: PipeWireControlCounters,
 }
 

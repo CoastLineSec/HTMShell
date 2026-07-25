@@ -49,6 +49,10 @@ demand. All documents share the existing default metadata proxy and one
 bounded coordinator per role. Removing the final role consumer releases that
 role's pending presentation state while independent read demand can remain.
 
+Peak monitor declarations add a separate explicit demand class. Only enabled
+declarations on mapped surfaces activate it. They share one stream per target
+node and do not create audio-write, default-write, or link-write demand.
+
 ## Lifecycle
 
 PipeWire absence is valid. On disconnect, the current graph and defaults are
@@ -69,4 +73,7 @@ session-local node or link IDs cannot alias old items.
 - [`LinkGroup`](LinkGroup.md)
 - [`Relations`](Relations.md)
 - [`NodeLinks`](NodeLinks.md)
+- [`PeakMonitoring`](PeakMonitoring.md)
+- [`PeakMonitor`](PeakMonitor.md)
+- [`PeakChannel`](PeakChannel.md)
 - [PipeWire audio and routing guide](../../guide/audio.md)

@@ -24,6 +24,16 @@ pub const MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT: usize = 128;
 pub const MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM: usize = 16;
 pub const MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_DOCUMENT: usize = 128;
 pub const MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_ITEM: usize = 8;
+pub const MAX_PIPEWIRE_PEAK_MONITORS_PER_DOCUMENT: usize = 64;
+pub const MAX_PIPEWIRE_PEAK_MONITORS_PER_ITEM: usize = 4;
+pub const MAX_PIPEWIRE_ENABLED_PEAK_MONITORS_PER_DOCUMENT: usize = 32;
+pub const MAX_PIPEWIRE_PEAK_ACTIONS_PER_MONITOR: usize = 8;
+pub const MAX_PIPEWIRE_PEAK_CHANNEL_REPEATS_PER_MONITOR: usize = 4;
+pub const MAX_PIPEWIRE_PEAK_BINDINGS_PER_MONITOR: usize = 128;
+pub const MAX_PIPEWIRE_PEAK_CHANNEL_BINDINGS_PER_ITEM: usize = 64;
+pub const MAX_PIPEWIRE_PEAK_CHANNELS_PER_STREAM: usize = 64;
+pub const MAX_PIPEWIRE_ACTIVE_PEAK_STREAMS: usize = 256;
+pub const MAX_PIPEWIRE_PEAK_DECLARATIONS_PER_TARGET: usize = 256;
 pub const MAX_RANGE_CONTROLS_PER_DOCUMENT: usize = 64;
 pub const MAX_RANGE_CONTROLS_PER_ITEM: usize = 8;
 pub const MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE: usize = 8;
@@ -174,6 +184,7 @@ pub enum ItemBindingKey {
     CanSetMute,
     CanSetPreferredSink,
     CanSetPreferredSource,
+    CanMonitorPeaks,
     ChannelCount,
     ChannelStatus,
     PositionName,
@@ -182,6 +193,7 @@ pub enum ItemBindingKey {
     Status,
     IsAuxiliary,
     IsCustom,
+    Peak,
     SourcePortId,
     TargetPortId,
     IsMonitor,
@@ -220,7 +232,7 @@ pub enum ItemBindingKey {
 }
 
 impl ItemBindingKey {
-    pub const ALL: [Self; 86] = [
+    pub const ALL: [Self; 88] = [
         Self::Ready,
         Self::Type,
         Self::PowerSupply,
@@ -264,6 +276,7 @@ impl ItemBindingKey {
         Self::CanSetMute,
         Self::CanSetPreferredSink,
         Self::CanSetPreferredSource,
+        Self::CanMonitorPeaks,
         Self::ChannelCount,
         Self::ChannelStatus,
         Self::PositionName,
@@ -272,6 +285,7 @@ impl ItemBindingKey {
         Self::Status,
         Self::IsAuxiliary,
         Self::IsCustom,
+        Self::Peak,
         Self::SourcePortId,
         Self::TargetPortId,
         Self::IsMonitor,
@@ -354,6 +368,7 @@ impl ItemBindingKey {
             Self::CanSetMute => "item.can_set_mute",
             Self::CanSetPreferredSink => "item.can_set_preferred_sink",
             Self::CanSetPreferredSource => "item.can_set_preferred_source",
+            Self::CanMonitorPeaks => "item.can_monitor_peaks",
             Self::ChannelCount => "item.channel_count",
             Self::ChannelStatus => "item.channel_status",
             Self::PositionName => "item.position_name",
@@ -362,6 +377,7 @@ impl ItemBindingKey {
             Self::Status => "item.status",
             Self::IsAuxiliary => "item.is_auxiliary",
             Self::IsCustom => "item.is_custom",
+            Self::Peak => "item.peak",
             Self::SourcePortId => "item.source_port_id",
             Self::TargetPortId => "item.target_port_id",
             Self::IsMonitor => "item.is_monitor",
@@ -451,6 +467,7 @@ impl ItemBindingKey {
                     | Self::CanSetMute
                     | Self::CanSetPreferredSink
                     | Self::CanSetPreferredSource
+                    | Self::CanMonitorPeaks
                     | Self::ChannelCount
                     | Self::ChannelStatus
                     | Self::LinkGroupCount
@@ -470,6 +487,19 @@ impl ItemBindingKey {
                 | Self::Volume
                 | Self::Status
                 | Self::CanSetVolume
+                | Self::IsAuxiliary
+                | Self::IsCustom
+        )
+    }
+
+    pub const fn supports_peak_channel(self) -> bool {
+        matches!(
+            self,
+            Self::PositionName
+                | Self::Position
+                | Self::Index
+                | Self::Peak
+                | Self::Status
                 | Self::IsAuxiliary
                 | Self::IsCustom
         )
@@ -629,6 +659,7 @@ impl ItemBindingKey {
                 | Self::CanSetMute
                 | Self::CanSetPreferredSink
                 | Self::CanSetPreferredSource
+                | Self::CanMonitorPeaks
                 | Self::ChannelStatus
                 | Self::PositionName
                 | Self::Position
@@ -693,6 +724,7 @@ impl ItemBindingKey {
                 | Self::CanSetMute
                 | Self::CanSetPreferredSink
                 | Self::CanSetPreferredSource
+                | Self::CanMonitorPeaks
                 | Self::ChannelStatus
                 | Self::Position
                 | Self::Status
@@ -728,6 +760,7 @@ impl ItemBindingKey {
                 | Self::HealthPercentage
                 | Self::RawId
                 | Self::Volume
+                | Self::Peak
                 | Self::ChannelCount
                 | Self::Index
                 | Self::SourcePortId
@@ -993,6 +1026,9 @@ pub struct PipeWireDocumentDemand {
     pub group_members: bool,
     pub node_link_tracking: bool,
     pub relation_projection: bool,
+    pub peak_monitor_declarations: bool,
+    pub peak_maximum_projection: bool,
+    pub peak_channel_projection: bool,
     pub property_keys: std::collections::BTreeSet<String>,
 }
 
@@ -1015,6 +1051,9 @@ impl PipeWireDocumentDemand {
             && !self.group_members
             && !self.node_link_tracking
             && !self.relation_projection
+            && !self.peak_monitor_declarations
+            && !self.peak_maximum_projection
+            && !self.peak_channel_projection
             && self.property_keys.is_empty()
     }
 
@@ -1036,6 +1075,9 @@ impl PipeWireDocumentDemand {
         self.group_members |= other.group_members;
         self.node_link_tracking |= other.node_link_tracking;
         self.relation_projection |= other.relation_projection;
+        self.peak_monitor_declarations |= other.peak_monitor_declarations;
+        self.peak_maximum_projection |= other.peak_maximum_projection;
+        self.peak_channel_projection |= other.peak_channel_projection;
         self.property_keys
             .extend(other.property_keys.iter().cloned());
     }

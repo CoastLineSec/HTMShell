@@ -4,9 +4,11 @@ mod reconcile;
 mod transport;
 
 use htm_runtime::{
+    ContextualRepeatSnapshot, ItemBindingKey, MAX_PIPEWIRE_ACTIVE_PEAK_STREAMS, NumericValue,
     PipeWireAudioOperation, PipeWireAudioTarget, PipeWireControlIdentity, PipeWireControlRequest,
     PipeWireControlState, PipeWireDefaultControlRequest, PipeWireDefaultRole,
-    PipeWireDefaultTarget,
+    PipeWireDefaultTarget, PipeWirePeakProjection, PipeWirePeakProjectionSet,
+    PipeWirePeakStreamState, PipeWirePeakTarget, RepeatItemSnapshot,
 };
 pub use model::PipeWireAudioChannelPosition;
 #[cfg(test)]
@@ -33,6 +35,7 @@ const DIAGNOSTIC_MAXIMUM_RUNTIME: Duration = Duration::from_secs(3);
 const DIAGNOSTIC_SETTLE_TIME: Duration = Duration::from_millis(150);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
 const VOLUME_WRITE_INTERVAL: Duration = Duration::from_millis(16);
+const PEAK_PUBLICATION_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 const MAX_DEFAULT_CONTROL_IDENTITIES: usize = 4096;
 const CONFIGURED_SINK_KEY: &str = "default.configured.audio.sink";
 const CONFIGURED_SOURCE_KEY: &str = "default.configured.audio.source";
@@ -56,6 +59,27 @@ struct PendingWrite<T> {
 struct NodeWriteCoordinator {
     mute: Option<PendingWrite<bool>>,
     volume: Option<PendingWrite<Vec<model::FiniteVolume>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeakCoordinatorState {
+    Starting,
+    Ready,
+    Failed,
+    Unavailable,
+}
+
+#[derive(Debug)]
+struct PeakCoordinator {
+    stream_generation: u64,
+    layout_generation: u64,
+    state: PeakCoordinatorState,
+    positions: Vec<u32>,
+    peaks: Vec<model::FinitePeak>,
+    dirty: bool,
+    last_publication: Instant,
+    retry_deadline: Option<Instant>,
+    backoff_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +144,10 @@ pub(crate) struct PipeWireSource {
     preferred_source_write: Option<PendingDefaultWrite>,
     control_outcomes: Vec<PipeWireControlOutcome>,
     control_counters: model::PipeWireControlCounters,
+    peaks: BTreeMap<model::PipeWireNodeId, PeakCoordinator>,
+    peak_capacity_denied: BTreeSet<model::PipeWireNodeId>,
+    next_peak_stream_generation: u64,
+    peak_publication_sequence: u64,
 }
 
 impl Default for PipeWireSource {
@@ -141,6 +169,10 @@ impl Default for PipeWireSource {
             preferred_source_write: None,
             control_outcomes: Vec::new(),
             control_counters: model::PipeWireControlCounters::default(),
+            peaks: BTreeMap::new(),
+            peak_capacity_denied: BTreeSet::new(),
+            next_peak_stream_generation: 0,
+            peak_publication_sequence: 0,
         }
     }
 }
@@ -165,6 +197,7 @@ impl PipeWireSource {
         let had_writes = self.demand.audio_writes;
         let had_sink_writes = self.demand.preferred_sink_writes;
         let had_source_writes = self.demand.preferred_source_writes;
+        let peak_demand_changed = self.demand.peak_declarations != demand.peak_declarations;
         self.demand = demand.clone();
         let has_audio = demand.audio_state || demand.audio_writes;
         if !had_audio && has_audio {
@@ -190,6 +223,12 @@ impl PipeWireSource {
             );
         }
         if demand.is_empty() {
+            if let Some(transport) = self.transport.as_mut() {
+                transport.stop_all_peak_streams();
+            }
+            self.sync_transport_resources();
+            self.peaks.clear();
+            self.peak_capacity_denied.clear();
             self.transport.take();
             self.retry_deadline = None;
             self.expected_sync = None;
@@ -205,6 +244,9 @@ impl PipeWireSource {
             transport.set_demand(demand);
             self.reconcile_callbacks(Instant::now());
         }
+        if peak_demand_changed && !self.demand.is_empty() {
+            self.reconcile_peak_demand(Instant::now());
+        }
         true
     }
 
@@ -214,6 +256,159 @@ impl PipeWireSource {
 
     pub(crate) fn snapshot(&self) -> &PipeWireSnapshot {
         self.reconciler.current()
+    }
+
+    pub(crate) fn resource_counters(&self) -> model::PipeWireResourceCounters {
+        self.transport
+            .as_ref()
+            .map(PipeWireTransport::resources)
+            .unwrap_or_else(|| self.snapshot().resources.clone())
+    }
+
+    pub(crate) fn peak_projections(&self) -> PipeWirePeakProjectionSet {
+        let snapshot = self.snapshot();
+        let mut projections = PipeWirePeakProjectionSet {
+            default_sink_item_key: snapshot.defaults.actual_sink.node.map(node_item_key),
+            default_source_item_key: snapshot.defaults.actual_source.node.map(node_item_key),
+            monitorable_nodes: snapshot
+                .nodes
+                .iter()
+                .filter(|node| {
+                    public::can_monitor_peaks(snapshot, node)
+                        && self.peaks.get(&node.id).is_none_or(|coordinator| {
+                            coordinator.state != PeakCoordinatorState::Unavailable
+                        })
+                        && !self.peak_capacity_denied.contains(&node.id)
+                })
+                .map(|node| node_item_key(node.id))
+                .collect(),
+            nodes: BTreeMap::new(),
+        };
+        for (id, coordinator) in &self.peaks {
+            let Some(node) = snapshot.nodes.iter().find(|node| node.id == *id) else {
+                continue;
+            };
+            let positions =
+                model::normalize_channel_positions(coordinator.peaks.len(), &coordinator.positions);
+            let compensate = !node.properties.contains_key("device.id")
+                && node.audio.channels.len() == coordinator.peaks.len();
+            let peaks = coordinator
+                .peaks
+                .iter()
+                .enumerate()
+                .map(|(index, peak)| {
+                    let mut value = peak.get();
+                    if compensate {
+                        let volume = node.audio.channels[index].get();
+                        if volume > 0.0 {
+                            value /= volume;
+                        }
+                    }
+                    model::FinitePeak::new(value)
+                })
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default();
+            let maximum = peaks
+                .iter()
+                .map(|peak| peak.get())
+                .fold(None::<f32>, |maximum, peak| {
+                    Some(maximum.map_or(peak, |maximum| maximum.max(peak)))
+                })
+                .map(|value| NumericValue::Decimal(f64::from(value)))
+                .unwrap_or(NumericValue::Unknown);
+            let items = peaks
+                .iter()
+                .zip(&positions)
+                .enumerate()
+                .map(|(index, (peak, position))| RepeatItemSnapshot {
+                    key: format!("{}:{index}:{}", coordinator.layout_generation, position.raw),
+                    text: BTreeMap::from([
+                        (ItemBindingKey::Position, position.token()),
+                        (ItemBindingKey::PositionName, position.name()),
+                        (ItemBindingKey::Status, "Ready".into()),
+                        (
+                            ItemBindingKey::IsAuxiliary,
+                            if position.is_auxiliary() {
+                                "true"
+                            } else {
+                                "false"
+                            }
+                            .into(),
+                        ),
+                        (
+                            ItemBindingKey::IsCustom,
+                            if position.is_custom() {
+                                "true"
+                            } else {
+                                "false"
+                            }
+                            .into(),
+                        ),
+                    ]),
+                    tokens: BTreeMap::from([
+                        (ItemBindingKey::Position, position.token()),
+                        (ItemBindingKey::Status, "ready".into()),
+                        (
+                            ItemBindingKey::IsAuxiliary,
+                            if position.is_auxiliary() {
+                                "true"
+                            } else {
+                                "false"
+                            }
+                            .into(),
+                        ),
+                        (
+                            ItemBindingKey::IsCustom,
+                            if position.is_custom() {
+                                "true"
+                            } else {
+                                "false"
+                            }
+                            .into(),
+                        ),
+                    ]),
+                    values: BTreeMap::from([
+                        (ItemBindingKey::Index, NumericValue::Integer(index as i64)),
+                        (
+                            ItemBindingKey::Peak,
+                            NumericValue::Decimal(f64::from(peak.get())),
+                        ),
+                    ]),
+                    properties: BTreeMap::new(),
+                    channels: None,
+                    links: None,
+                    link_groups: None,
+                })
+                .collect();
+            projections.nodes.insert(
+                node_item_key(*id),
+                PipeWirePeakProjection {
+                    node_item_key: node_item_key(*id),
+                    stream_generation: coordinator.stream_generation,
+                    layout_generation: coordinator.layout_generation,
+                    state: match coordinator.state {
+                        PeakCoordinatorState::Starting => PipeWirePeakStreamState::Starting,
+                        PeakCoordinatorState::Ready => PipeWirePeakStreamState::Ready,
+                        PeakCoordinatorState::Failed => PipeWirePeakStreamState::Failed,
+                        PeakCoordinatorState::Unavailable => PipeWirePeakStreamState::Unavailable,
+                    },
+                    maximum: if coordinator.state == PeakCoordinatorState::Ready {
+                        maximum
+                    } else {
+                        NumericValue::Unknown
+                    },
+                    channels: ContextualRepeatSnapshot {
+                        source_generation: coordinator.layout_generation,
+                        items: if coordinator.state == PeakCoordinatorState::Ready {
+                            items
+                        } else {
+                            Vec::new()
+                        },
+                    },
+                },
+            );
+        }
+        projections
     }
 
     pub(crate) fn raw_poll_fd(&self) -> Option<RawFd> {
@@ -251,7 +446,21 @@ impl PipeWireSource {
         .flatten()
         .map(|write| (write.started + CONTROL_TIMEOUT).saturating_duration_since(now))
         .min();
-        [retry, control, cadence, default_control]
+        let peak = self
+            .peaks
+            .values()
+            .flat_map(|coordinator| {
+                [
+                    coordinator
+                        .dirty
+                        .then(|| coordinator.last_publication + PEAK_PUBLICATION_INTERVAL),
+                    coordinator.retry_deadline,
+                ]
+            })
+            .flatten()
+            .map(|deadline| deadline.saturating_duration_since(now))
+            .min();
+        [retry, control, cadence, default_control, peak]
             .into_iter()
             .flatten()
             .min()
@@ -259,12 +468,14 @@ impl PipeWireSource {
 
     pub(crate) fn reconnect_if_due(&mut self, now: Instant) -> bool {
         let before = self.snapshot().sequence;
+        let peak_before = self.peak_publication_sequence;
         self.reconcile_pending_writes(now);
+        self.reconcile_peak_deadlines(now);
         if self.retry_deadline.is_some_and(|deadline| deadline <= now) {
             self.retry_deadline = None;
             self.attempt_connect(now, true);
         }
-        self.snapshot().sequence != before
+        self.snapshot().sequence != before || self.peak_publication_sequence != peak_before
     }
 
     pub(crate) fn handle_poll_error(&mut self, message: impl Into<String>) -> bool {
@@ -275,6 +486,7 @@ impl PipeWireSource {
 
     pub(crate) fn dispatch_ready(&mut self) -> bool {
         let before = self.snapshot().sequence;
+        let peak_before = self.peak_publication_sequence;
         let Some(transport) = self.transport.as_mut() else {
             return false;
         };
@@ -283,18 +495,27 @@ impl PipeWireSource {
             return self.snapshot().sequence != before;
         }
         self.reconcile_callbacks(Instant::now());
-        self.snapshot().sequence != before
+        self.snapshot().sequence != before || self.peak_publication_sequence != peak_before
     }
 
     pub(crate) fn reconcile_callbacks(&mut self, now: Instant) {
-        let Some(transport) = self.transport.as_mut() else {
-            return;
+        let (deltas, peak_events, peak_samples, mut resources) = {
+            let Some(transport) = self.transport.as_mut() else {
+                return;
+            };
+            let (peak_events, peak_samples) = transport.take_peak_staged();
+            (
+                transport.take_staged(),
+                peak_events,
+                peak_samples,
+                transport.resources(),
+            )
         };
-        let deltas = transport.take_staged();
-        let mut resources = transport.resources();
         resources.reconnect_attempts = self.reconnect_attempts;
         self.reconciler.update_transport_counters(&resources);
         if deltas.is_empty() {
+            self.reconcile_peak_events(peak_events, peak_samples, now);
+            self.reconcile_peak_demand(now);
             return;
         }
         let preferred_capabilities = preferred_capabilities(self.snapshot());
@@ -397,6 +618,333 @@ impl PipeWireSource {
         }
         self.reconcile_pending_writes(now);
         self.record_preferred_capability_updates(&preferred_capabilities);
+        self.reconcile_peak_events(peak_events, peak_samples, now);
+        self.reconcile_peak_demand(now);
+    }
+
+    fn reconcile_peak_demand(&mut self, now: Instant) {
+        let all_desired = self
+            .demand
+            .peak_declarations
+            .values()
+            .filter_map(|target| self.resolve_peak_target(target).ok())
+            .collect::<BTreeSet<_>>();
+        let desired = all_desired
+            .iter()
+            .take(MAX_PIPEWIRE_ACTIVE_PEAK_STREAMS)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        self.peak_capacity_denied = all_desired.difference(&desired).copied().collect();
+        let removed = self
+            .peaks
+            .keys()
+            .filter(|id| !desired.contains(id))
+            .copied()
+            .collect::<Vec<_>>();
+        for id in removed {
+            if let Some(transport) = self.transport.as_mut() {
+                transport.stop_peak_stream(id.global_id);
+            }
+            self.peaks.remove(&id);
+            self.peak_publication_sequence = self.peak_publication_sequence.saturating_add(1);
+        }
+        for id in desired {
+            let Some(node) = self
+                .snapshot()
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .cloned()
+            else {
+                continue;
+            };
+            if !public::can_monitor_peaks(self.snapshot(), &node) {
+                continue;
+            }
+            if self.peaks.contains_key(&id) {
+                continue;
+            }
+            self.next_peak_stream_generation = self.next_peak_stream_generation.saturating_add(1);
+            let stream_generation = self.next_peak_stream_generation;
+            let target = node
+                .properties
+                .get("object.serial")
+                .cloned()
+                .unwrap_or_else(|| node.raw_global_id.to_string());
+            let started = self.transport.as_mut().map_or_else(
+                || Err("PipeWire transport is unavailable".to_owned()),
+                |transport| {
+                    transport.start_peak_stream(
+                        node.raw_global_id,
+                        stream_generation,
+                        &target,
+                        node.classification.sink,
+                    )
+                },
+            );
+            let mut coordinator = PeakCoordinator {
+                stream_generation,
+                layout_generation: 0,
+                state: PeakCoordinatorState::Starting,
+                positions: Vec::new(),
+                peaks: Vec::new(),
+                dirty: false,
+                last_publication: now.checked_sub(PEAK_PUBLICATION_INTERVAL).unwrap_or(now),
+                retry_deadline: None,
+                backoff_index: 0,
+            };
+            if let Err(error) = started {
+                if transport::is_permission_denial(&error) {
+                    coordinator.state = PeakCoordinatorState::Unavailable;
+                } else {
+                    coordinator.state = PeakCoordinatorState::Failed;
+                    coordinator.retry_deadline = Some(now + RECONNECT_DELAYS[0]);
+                }
+            }
+            self.peaks.insert(id, coordinator);
+            self.peak_publication_sequence = self.peak_publication_sequence.saturating_add(1);
+        }
+    }
+
+    fn resolve_peak_target(
+        &self,
+        target: &PipeWirePeakTarget,
+    ) -> Result<model::PipeWireNodeId, String> {
+        let id = match target {
+            PipeWirePeakTarget::NodeItem {
+                source_generation,
+                item_key,
+            } => {
+                let id = parse_node_item_key(item_key)?;
+                if id.connection_generation != *source_generation {
+                    return Err("PipeWire peak node target is stale".into());
+                }
+                id
+            }
+            PipeWirePeakTarget::DefaultSink => self
+                .snapshot()
+                .defaults
+                .actual_sink
+                .node
+                .ok_or_else(|| "PipeWire default sink is unresolved".to_owned())?,
+            PipeWirePeakTarget::DefaultSource => self
+                .snapshot()
+                .defaults
+                .actual_source
+                .node
+                .ok_or_else(|| "PipeWire default source is unresolved".to_owned())?,
+        };
+        self.snapshot()
+            .nodes
+            .iter()
+            .any(|node| node.id == id)
+            .then_some(id)
+            .ok_or_else(|| "PipeWire peak target is unavailable".into())
+    }
+
+    fn reconcile_peak_events(
+        &mut self,
+        events: Vec<model::PipeWirePeakEvent>,
+        samples: Vec<model::PipeWirePeakSamples>,
+        now: Instant,
+    ) {
+        for event in events {
+            let (raw_id, stream_generation) = match &event {
+                model::PipeWirePeakEvent::Starting {
+                    raw_id,
+                    stream_generation,
+                }
+                | model::PipeWirePeakEvent::Format {
+                    raw_id,
+                    stream_generation,
+                    ..
+                }
+                | model::PipeWirePeakEvent::Failed {
+                    raw_id,
+                    stream_generation,
+                    ..
+                } => (*raw_id, *stream_generation),
+            };
+            let id = model::PipeWireNodeId {
+                connection_generation: self.snapshot().connection_generation,
+                global_id: raw_id,
+            };
+            let Some(coordinator) = self.peaks.get_mut(&id) else {
+                continue;
+            };
+            if coordinator.stream_generation != stream_generation {
+                continue;
+            }
+            match event {
+                model::PipeWirePeakEvent::Starting { .. } => {
+                    coordinator.state = PeakCoordinatorState::Starting;
+                }
+                model::PipeWirePeakEvent::Format {
+                    layout_generation,
+                    positions,
+                    ..
+                } => {
+                    coordinator.layout_generation = layout_generation;
+                    coordinator.positions = positions;
+                    coordinator.peaks.clear();
+                    coordinator.state = PeakCoordinatorState::Starting;
+                    coordinator.dirty = false;
+                    coordinator.retry_deadline = None;
+                    coordinator.backoff_index = 0;
+                    self.peak_publication_sequence =
+                        self.peak_publication_sequence.saturating_add(1);
+                }
+                model::PipeWirePeakEvent::Failed { denied, .. } => {
+                    coordinator.state = if denied {
+                        PeakCoordinatorState::Unavailable
+                    } else {
+                        PeakCoordinatorState::Failed
+                    };
+                    coordinator.peaks.clear();
+                    coordinator.dirty = false;
+                    if denied {
+                        coordinator.retry_deadline = None;
+                    } else {
+                        let index = coordinator
+                            .backoff_index
+                            .min(RECONNECT_DELAYS.len().saturating_sub(1));
+                        coordinator.retry_deadline = Some(now + RECONNECT_DELAYS[index]);
+                        coordinator.backoff_index = coordinator
+                            .backoff_index
+                            .saturating_add(1)
+                            .min(RECONNECT_DELAYS.len().saturating_sub(1));
+                    }
+                    if let Some(transport) = self.transport.as_mut() {
+                        transport.stop_peak_stream(raw_id);
+                    }
+                    self.peak_publication_sequence =
+                        self.peak_publication_sequence.saturating_add(1);
+                }
+            }
+        }
+        for sample in samples {
+            let id = model::PipeWireNodeId {
+                connection_generation: self.snapshot().connection_generation,
+                global_id: sample.raw_id,
+            };
+            let Some(coordinator) = self.peaks.get_mut(&id) else {
+                continue;
+            };
+            if coordinator.stream_generation != sample.stream_generation {
+                continue;
+            }
+            let peaks = sample.peaks.as_slice();
+            if sample.layout_generation == 0
+                || coordinator.layout_generation != sample.layout_generation
+                || peaks.len() != coordinator.positions.len()
+            {
+                continue;
+            }
+            if coordinator.peaks == peaks {
+                if let Some(transport) = self.transport.as_mut() {
+                    transport.record_peak_duplicate();
+                }
+                continue;
+            }
+            coordinator.peaks = peaks.to_vec();
+            coordinator.state = PeakCoordinatorState::Ready;
+            coordinator.retry_deadline = None;
+            coordinator.backoff_index = 0;
+            coordinator.dirty = true;
+            if now.saturating_duration_since(coordinator.last_publication)
+                >= PEAK_PUBLICATION_INTERVAL
+            {
+                coordinator.dirty = false;
+                coordinator.last_publication = now;
+                if let Some(transport) = self.transport.as_mut() {
+                    transport.record_peak_publications(1);
+                }
+                self.peak_publication_sequence = self.peak_publication_sequence.saturating_add(1);
+            }
+        }
+    }
+
+    fn reconcile_peak_deadlines(&mut self, now: Instant) {
+        let retries = self
+            .peaks
+            .iter()
+            .filter(|(_, coordinator)| {
+                coordinator
+                    .retry_deadline
+                    .is_some_and(|deadline| deadline <= now)
+            })
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in retries {
+            let Some(node) = self
+                .snapshot()
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .cloned()
+            else {
+                self.peaks.remove(&id);
+                continue;
+            };
+            let Some(coordinator) = self.peaks.get_mut(&id) else {
+                continue;
+            };
+            coordinator.retry_deadline = None;
+            self.next_peak_stream_generation = self.next_peak_stream_generation.saturating_add(1);
+            coordinator.stream_generation = self.next_peak_stream_generation;
+            coordinator.layout_generation = 0;
+            coordinator.positions.clear();
+            coordinator.peaks.clear();
+            coordinator.state = PeakCoordinatorState::Starting;
+            let target = node
+                .properties
+                .get("object.serial")
+                .cloned()
+                .unwrap_or_else(|| node.raw_global_id.to_string());
+            let result = self.transport.as_mut().map_or_else(
+                || Err("PipeWire transport is unavailable".to_owned()),
+                |transport| {
+                    transport.start_peak_stream(
+                        node.raw_global_id,
+                        coordinator.stream_generation,
+                        &target,
+                        node.classification.sink,
+                    )
+                },
+            );
+            if let Err(error) = result {
+                if transport::is_permission_denial(&error) {
+                    coordinator.state = PeakCoordinatorState::Unavailable;
+                } else {
+                    coordinator.state = PeakCoordinatorState::Failed;
+                    let index = coordinator
+                        .backoff_index
+                        .min(RECONNECT_DELAYS.len().saturating_sub(1));
+                    coordinator.retry_deadline = Some(now + RECONNECT_DELAYS[index]);
+                    coordinator.backoff_index = coordinator
+                        .backoff_index
+                        .saturating_add(1)
+                        .min(RECONNECT_DELAYS.len().saturating_sub(1));
+                }
+            }
+            self.peak_publication_sequence = self.peak_publication_sequence.saturating_add(1);
+        }
+        let mut publications = 0u64;
+        for coordinator in self.peaks.values_mut().filter(|coordinator| {
+            coordinator.dirty
+                && now.saturating_duration_since(coordinator.last_publication)
+                    >= PEAK_PUBLICATION_INTERVAL
+        }) {
+            coordinator.dirty = false;
+            coordinator.last_publication = now;
+            publications = publications.saturating_add(1);
+            self.peak_publication_sequence = self.peak_publication_sequence.saturating_add(1);
+        }
+        if publications > 0
+            && let Some(transport) = self.transport.as_mut()
+        {
+            transport.record_peak_publications(publications);
+        }
     }
 
     pub(crate) fn request_control(
@@ -739,7 +1287,13 @@ impl PipeWireSource {
         self.lifecycle = PipeWireLifecycle::Stopping;
         self.retry_deadline = None;
         self.expected_sync = None;
+        if let Some(transport) = self.transport.as_mut() {
+            transport.stop_all_peak_streams();
+        }
+        self.sync_transport_resources();
         self.transport.take();
+        self.peaks.clear();
+        self.peak_capacity_denied.clear();
         self.finish_all_controls(PipeWireControlState::Unavailable);
     }
 
@@ -753,6 +1307,9 @@ impl PipeWireSource {
             self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
         }
         self.next_generation = self.next_generation.saturating_add(1);
+        self.peaks.clear();
+        self.peak_capacity_denied.clear();
+        self.peak_publication_sequence = self.peak_publication_sequence.saturating_add(1);
         if self.next_generation == 0 {
             self.next_generation = 1;
         }
@@ -789,7 +1346,14 @@ impl PipeWireSource {
     fn disconnect(&mut self, now: Instant, _reason: String) {
         let preferred_capabilities_before = preferred_capabilities(self.snapshot());
         self.finish_all_controls(PipeWireControlState::Unavailable);
+        if let Some(transport) = self.transport.as_mut() {
+            transport.stop_all_peak_streams();
+        }
+        self.sync_transport_resources();
         self.transport.take();
+        self.peaks.clear();
+        self.peak_capacity_denied.clear();
+        self.peak_publication_sequence = self.peak_publication_sequence.saturating_add(1);
         self.expected_sync = None;
         self.synchronization = SynchronizationStage::First;
         self.lifecycle = PipeWireLifecycle::Disconnected;
@@ -806,6 +1370,15 @@ impl PipeWireSource {
         self.retry_deadline = Some(now + delay);
         self.lifecycle = PipeWireLifecycle::Reconnecting;
         self.last_publication = now;
+    }
+
+    fn sync_transport_resources(&mut self) {
+        let Some(transport) = self.transport.as_ref() else {
+            return;
+        };
+        let mut resources = transport.resources();
+        resources.reconnect_attempts = self.reconnect_attempts;
+        self.reconciler.update_transport_counters(&resources);
     }
 
     fn resolve_control_target(
@@ -1485,6 +2058,10 @@ fn parse_node_item_key(value: &str) -> Result<model::PipeWireNodeId, String> {
             .parse::<u32>()
             .map_err(|_| "PipeWire node item ID is malformed".to_owned())?,
     })
+}
+
+fn node_item_key(id: model::PipeWireNodeId) -> String {
+    format!("{}:{}", id.connection_generation, id.global_id)
 }
 
 fn channel_target_index(
@@ -2421,5 +2998,211 @@ mod tests {
             source.retry_timeout(started + Duration::from_millis(5)),
             Some(Duration::from_millis(11))
         );
+    }
+
+    #[test]
+    fn peak_projection_preserves_layout_identity_and_compensates_node_volume() {
+        let mut source = source_with_audio_node();
+        let node = PipeWireNodeId {
+            connection_generation: 1,
+            global_id: 42,
+        };
+        let now = Instant::now();
+        source.peaks.insert(
+            node,
+            PeakCoordinator {
+                stream_generation: 5,
+                layout_generation: 9,
+                state: PeakCoordinatorState::Ready,
+                positions: vec![3, 4],
+                peaks: vec![
+                    model::FinitePeak::new(0.5).unwrap(),
+                    model::FinitePeak::new(0.25).unwrap(),
+                ],
+                dirty: false,
+                last_publication: now,
+                retry_deadline: None,
+                backoff_index: 0,
+            },
+        );
+
+        let projections = source.peak_projections();
+        let projection = &projections.nodes["1:42"];
+        assert_eq!(projection.stream_generation, 5);
+        assert_eq!(projection.layout_generation, 9);
+        assert_eq!(projection.maximum, NumericValue::Decimal(0.5));
+        assert_eq!(projection.channels.items.len(), 2);
+        assert_eq!(projection.channels.items[0].key, "9:0:3");
+        assert_eq!(projection.channels.items[1].key, "9:1:4");
+        assert_eq!(
+            projection.channels.items[1].values[&ItemBindingKey::Peak],
+            NumericValue::Decimal(0.5)
+        );
+
+        source.peaks.get_mut(&node).unwrap().peaks[0] = model::FinitePeak::new(0.75).unwrap();
+        let updated = source.peak_projections();
+        assert_eq!(updated.nodes["1:42"].channels.items[0].key, "9:0:3");
+
+        source.peaks.get_mut(&node).unwrap().layout_generation = 10;
+        source.peaks.get_mut(&node).unwrap().positions.swap(0, 1);
+        let replaced = source.peak_projections();
+        assert_eq!(replaced.nodes["1:42"].channels.items[0].key, "10:0:4");
+    }
+
+    #[test]
+    fn stale_peak_events_are_rejected_and_publication_is_cadence_bounded() {
+        let mut source = source_with_audio_node();
+        let node = PipeWireNodeId {
+            connection_generation: 1,
+            global_id: 42,
+        };
+        let started = Instant::now();
+        source.peaks.insert(
+            node,
+            PeakCoordinator {
+                stream_generation: 7,
+                layout_generation: 0,
+                state: PeakCoordinatorState::Starting,
+                positions: Vec::new(),
+                peaks: Vec::new(),
+                dirty: false,
+                last_publication: started,
+                retry_deadline: None,
+                backoff_index: 0,
+            },
+        );
+
+        source.reconcile_peak_events(
+            Vec::new(),
+            vec![model::PipeWirePeakSamples {
+                raw_id: 42,
+                stream_generation: 6,
+                layout_generation: 1,
+                peaks: model::FinitePeakVector::from_perceptual(&[1.0]).unwrap(),
+            }],
+            started,
+        );
+        assert!(source.peaks[&node].peaks.is_empty());
+
+        source.reconcile_peak_events(
+            vec![model::PipeWirePeakEvent::Format {
+                raw_id: 42,
+                stream_generation: 7,
+                layout_generation: 1,
+                positions: vec![3],
+            }],
+            vec![model::PipeWirePeakSamples {
+                raw_id: 42,
+                stream_generation: 7,
+                layout_generation: 1,
+                peaks: model::FinitePeakVector::from_perceptual(&[1.0]).unwrap(),
+            }],
+            started + Duration::from_millis(1),
+        );
+        assert!(source.peaks[&node].dirty);
+        assert_eq!(
+            source.retry_timeout(started + Duration::from_millis(1)),
+            Some(Duration::from_nanos(15_666_667))
+        );
+
+        source.reconcile_peak_deadlines(started + PEAK_PUBLICATION_INTERVAL);
+        assert!(!source.peaks[&node].dirty);
+        assert_eq!(
+            source.peak_projections().nodes["1:42"].maximum,
+            NumericValue::Decimal(1.0)
+        );
+    }
+
+    #[test]
+    fn peak_permission_denial_disables_capability_without_retry() {
+        let mut source = source_with_audio_node();
+        let node = PipeWireNodeId {
+            connection_generation: 1,
+            global_id: 42,
+        };
+        source.peaks.insert(
+            node,
+            PeakCoordinator {
+                stream_generation: 11,
+                layout_generation: 0,
+                state: PeakCoordinatorState::Starting,
+                positions: Vec::new(),
+                peaks: Vec::new(),
+                dirty: false,
+                last_publication: Instant::now(),
+                retry_deadline: None,
+                backoff_index: 0,
+            },
+        );
+        source.reconcile_peak_events(
+            vec![model::PipeWirePeakEvent::Failed {
+                raw_id: 42,
+                stream_generation: 11,
+                denied: true,
+            }],
+            Vec::new(),
+            Instant::now(),
+        );
+        let coordinator = &source.peaks[&node];
+        assert_eq!(coordinator.state, PeakCoordinatorState::Unavailable);
+        assert!(coordinator.retry_deadline.is_none());
+        let projections = source.peak_projections();
+        assert!(!projections.monitorable_nodes.contains("1:42"));
+        assert_eq!(
+            projections.nodes["1:42"].state,
+            PipeWirePeakStreamState::Unavailable
+        );
+    }
+
+    #[test]
+    fn peak_retry_backoff_is_bounded_and_readiness_resets_it() {
+        let mut source = source_with_audio_node();
+        let node = PipeWireNodeId {
+            connection_generation: 1,
+            global_id: 42,
+        };
+        let started = Instant::now();
+        source.peaks.insert(
+            node,
+            PeakCoordinator {
+                stream_generation: 11,
+                layout_generation: 0,
+                state: PeakCoordinatorState::Failed,
+                positions: Vec::new(),
+                peaks: Vec::new(),
+                dirty: false,
+                last_publication: started,
+                retry_deadline: Some(started),
+                backoff_index: 0,
+            },
+        );
+
+        source.reconcile_peak_deadlines(started);
+        let first = &source.peaks[&node];
+        assert_eq!(first.retry_deadline, Some(started + RECONNECT_DELAYS[0]));
+        assert_eq!(first.backoff_index, 1);
+
+        source.reconcile_peak_deadlines(started + RECONNECT_DELAYS[0]);
+        let second = &source.peaks[&node];
+        assert_eq!(
+            second.retry_deadline,
+            Some(started + RECONNECT_DELAYS[0] + RECONNECT_DELAYS[1])
+        );
+        assert_eq!(second.backoff_index, 2);
+
+        let stream_generation = second.stream_generation;
+        source.reconcile_peak_events(
+            vec![model::PipeWirePeakEvent::Format {
+                raw_id: 42,
+                stream_generation,
+                layout_generation: 1,
+                positions: vec![3],
+            }],
+            Vec::new(),
+            started + RECONNECT_DELAYS[0],
+        );
+        let ready = &source.peaks[&node];
+        assert!(ready.retry_deadline.is_none());
+        assert_eq!(ready.backoff_index, 0);
     }
 }

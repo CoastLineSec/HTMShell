@@ -148,6 +148,155 @@
       </article>
     </section>
 
+    <section class="peak-inspector">
+      <header>
+        <div>
+          <p class="eyebrow">Explicit monitoring</p>
+          <h2>Live scalar peaks</h2>
+        </div>
+        <p>Peak monitoring retains scalar levels only. Input monitoring is
+           capture-adjacent and may activate a session capture indicator.</p>
+      </header>
+      <div class="peak-grid">
+        <section id="default-output-peaks"
+                 class="peak-card"
+                 data-htm-element="peak-monitor"
+                 data-htm-target="pipewire.default_sink"
+                 data-htm-enabled="true">
+          <header>
+            <strong>Default output</strong>
+            <span id="default-output-peak-status"
+                  data-htm-element="state-token"
+                  data-htm-bind="peak.status"></span>
+          </header>
+          <div class="peak-summary">
+            <span>Requested
+              <span id="default-output-peak-enabled"
+                    data-htm-element="state-token"
+                    data-htm-bind="peak.enabled"></span>
+            </span>
+            <span>Active
+              <span id="default-output-peak-active"
+                    data-htm-element="state-token"
+                    data-htm-bind="peak.active"></span>
+            </span>
+            <span>Maximum
+              <data id="default-output-peak-maximum"
+                    data-htm-element="state-value"
+                    data-htm-bind="peak.maximum"
+                    data-htm-format="percent"></data>
+            </span>
+            <span>Channels
+              <data id="default-output-peak-count"
+                    data-htm-element="state-value"
+                    data-htm-bind="peak.channel_count"></data>
+            </span>
+          </div>
+          <div class="peak-actions">
+            <button id="default-output-peak-enable"
+                    data-htm-element="action-button"
+                    data-htm-action="pipewire.peaks.enable">Enable</button>
+            <button id="default-output-peak-disable"
+                    data-htm-element="action-button"
+                    data-htm-action="pipewire.peaks.disable">Disable</button>
+            <button id="default-output-peak-toggle"
+                    data-htm-element="action-button"
+                    data-htm-action="pipewire.peaks.toggle">Toggle</button>
+          </div>
+          <div class="peak-channels">
+            <template data-htm-element="repeat"
+                      data-htm-source="peak.channels">
+              <div class="peak-channel"
+                   data-htm-element="state-token"
+                   data-htm-local-id="position"
+                   data-htm-bind="item.position">
+                <span data-htm-element="state-text"
+                      data-htm-local-id="name"
+                      data-htm-bind="item.position_name"></span>
+                <data data-htm-element="state-value"
+                      data-htm-local-id="index"
+                      data-htm-bind="item.index"></data>
+                <data data-htm-element="state-value"
+                      data-htm-local-id="peak"
+                      data-htm-bind="item.peak"
+                      data-htm-format="percent"></data>
+                <span class="channel-flag auxiliary"
+                      data-htm-element="state-token"
+                      data-htm-local-id="auxiliary"
+                      data-htm-bind="item.is_auxiliary"></span>
+                <span class="channel-flag custom"
+                      data-htm-element="state-token"
+                      data-htm-local-id="custom"
+                      data-htm-bind="item.is_custom"></span>
+              </div>
+            </template>
+          </div>
+        </section>
+
+        <aside id="shared-output-peaks"
+               class="peak-card compact"
+               data-htm-element="peak-monitor"
+               data-htm-target="pipewire.default_sink"
+               data-htm-enabled="true">
+          <header>
+            <strong>Shared output subscriber</strong>
+            <span id="shared-output-peak-status"
+                  data-htm-element="state-token"
+                  data-htm-bind="peak.status"></span>
+          </header>
+          <data id="shared-output-peak-maximum"
+                data-htm-element="state-value"
+                data-htm-bind="peak.maximum"
+                data-htm-format="percent"></data>
+          <button id="shared-output-peak-toggle"
+                  data-htm-element="action-button"
+                  data-htm-action="pipewire.peaks.toggle">Toggle subscriber</button>
+          <p>Both output declarations reuse one process stream.</p>
+        </aside>
+
+        <article id="default-input-peaks"
+                 class="peak-card capture-warning"
+                 data-htm-element="peak-monitor"
+                 data-htm-target="pipewire.default_source"
+                 data-htm-enabled="false">
+          <header>
+            <strong>Default input</strong>
+            <span id="default-input-peak-status"
+                  data-htm-element="state-token"
+                  data-htm-bind="peak.status"></span>
+          </header>
+          <p>Disabled by default. Enabling can be treated as microphone
+             capture by PipeWire policy.</p>
+          <div class="peak-summary">
+            <span>Requested
+              <span id="default-input-peak-enabled"
+                    data-htm-element="state-token"
+                    data-htm-bind="peak.enabled"></span>
+            </span>
+            <span>Active
+              <span id="default-input-peak-active"
+                    data-htm-element="state-token"
+                    data-htm-bind="peak.active"></span>
+            </span>
+            <span>Maximum
+              <data id="default-input-peak-maximum"
+                    data-htm-element="state-value"
+                    data-htm-bind="peak.maximum"
+                    data-htm-format="percent"></data>
+            </span>
+          </div>
+          <div class="peak-actions">
+            <button id="default-input-peak-enable"
+                    data-htm-element="action-button"
+                    data-htm-action="pipewire.peaks.enable">Enable input monitor</button>
+            <button id="default-input-peak-disable"
+                    data-htm-element="action-button"
+                    data-htm-action="pipewire.peaks.disable">Disable input monitor</button>
+          </div>
+        </article>
+      </div>
+    </section>
+
     <section>
       <h2>Discovered nodes</h2>
       <div class="node-grid">

@@ -121,6 +121,14 @@ impl PipeWireReconciler {
         self.resources.dispatch_iterations = resources.dispatch_iterations;
         self.resources.callbacks_staged = resources.callbacks_staged;
         self.resources.reconnect_attempts = resources.reconnect_attempts;
+        self.resources.peak_stream_count = resources.peak_stream_count;
+        self.resources.peak_stream_starts = resources.peak_stream_starts;
+        self.resources.peak_stream_stops = resources.peak_stream_stops;
+        self.resources.peak_process_callbacks = resources.peak_process_callbacks;
+        self.resources.peak_callbacks_coalesced = resources.peak_callbacks_coalesced;
+        self.resources.peak_vectors_published = resources.peak_vectors_published;
+        self.resources.peak_duplicate_vectors_suppressed =
+            resources.peak_duplicate_vectors_suppressed;
         self.current.resources = self.resources.clone();
     }
 

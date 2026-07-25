@@ -60,6 +60,11 @@ Top-level buttons may use `pipewire.defaults.clear_preferred_sink` with
 
 Outside a repeat, PipeWire mute actions require `pipewire.default_sink` or `pipewire.default_source` as `data-htm-target`. Raw IDs and configured defaults are rejected. `pipewire.audio.set_volume` is valid only on [`range-control`](range-control.md).
 
+Inside `peak-monitor`, `pipewire.peaks.enable`, `pipewire.peaks.disable`, and
+`pipewire.peaks.toggle` target the nearest exact monitor declaration. They
+forbid `data-htm-target` and `data-htm-enabled-bind`, and they are invalid
+inside `peak.channels`.
+
 ## See also
 
 - [Overlay actions](../HTMShell.Actions/Overlay.md)
@@ -67,4 +72,5 @@ Outside a repeat, PipeWire mute actions require `pipewire.default_sink` or `pipe
 - [Power profile actions](../HTMShell.Actions/PowerProfile.md)
 - [PipeWire audio actions](../HTMShell.Actions/PipeWireAudio.md)
 - [PipeWire default actions](../HTMShell.Actions/PipeWireDefaults.md)
+- [PipeWire peak actions](../HTMShell.Actions/PipeWirePeaks.md)
 - [State and actions guide](../../guide/state-and-actions.md)

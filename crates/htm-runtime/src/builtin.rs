@@ -8,9 +8,12 @@ use crate::{
     MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM, MAX_PIPEWIRE_BINDINGS_PER_ITEM,
     MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM, MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_DOCUMENT,
     MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM, MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_DOCUMENT,
-    MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_ITEM, MAX_PIPEWIRE_GRAPH_BINDINGS_PER_ITEM,
-    MAX_PIPEWIRE_LINK_GROUP_REPEAT_DECLARATIONS_PER_DOCUMENT,
-    MAX_PIPEWIRE_LINK_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_PIPEWIRE_PERCEPTUAL_VOLUME,
+    MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_ITEM, MAX_PIPEWIRE_ENABLED_PEAK_MONITORS_PER_DOCUMENT,
+    MAX_PIPEWIRE_GRAPH_BINDINGS_PER_ITEM, MAX_PIPEWIRE_LINK_GROUP_REPEAT_DECLARATIONS_PER_DOCUMENT,
+    MAX_PIPEWIRE_LINK_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_PIPEWIRE_PEAK_ACTIONS_PER_MONITOR,
+    MAX_PIPEWIRE_PEAK_BINDINGS_PER_MONITOR, MAX_PIPEWIRE_PEAK_CHANNEL_BINDINGS_PER_ITEM,
+    MAX_PIPEWIRE_PEAK_CHANNEL_REPEATS_PER_MONITOR, MAX_PIPEWIRE_PEAK_MONITORS_PER_DOCUMENT,
+    MAX_PIPEWIRE_PEAK_MONITORS_PER_ITEM, MAX_PIPEWIRE_PERCEPTUAL_VOLUME,
     MAX_PIPEWIRE_PROPERTY_KEY_BYTES, MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT,
     MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM, MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM,
     MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_RANGE_CONTROLS_PER_DOCUMENT,
@@ -48,6 +51,7 @@ pub enum BuiltInElementKind {
     StateValue,
     Repeat,
     RangeControl,
+    PeakMonitor,
 }
 
 impl BuiltInElementKind {
@@ -60,6 +64,7 @@ impl BuiltInElementKind {
             Self::StateValue => "state-value",
             Self::Repeat => "repeat",
             Self::RangeControl => "range-control",
+            Self::PeakMonitor => "peak-monitor",
         }
     }
 
@@ -72,6 +77,7 @@ impl BuiltInElementKind {
             "state-value" => Some(Self::StateValue),
             "repeat" => Some(Self::Repeat),
             "range-control" => Some(Self::RangeControl),
+            "peak-monitor" => Some(Self::PeakMonitor),
             _ => None,
         }
     }
@@ -140,11 +146,13 @@ pub enum StateBindingKey {
     PipeWireDefaultSinkMuteState,
     PipeWireDefaultSinkCanSetVolume,
     PipeWireDefaultSinkCanSetMute,
+    PipeWireDefaultSinkCanMonitorPeaks,
     PipeWireDefaultSourceAudioStatus,
     PipeWireDefaultSourceVolume,
     PipeWireDefaultSourceMuteState,
     PipeWireDefaultSourceCanSetVolume,
     PipeWireDefaultSourceCanSetMute,
+    PipeWireDefaultSourceCanMonitorPeaks,
     PipeWireConfiguredSinkAudioStatus,
     PipeWireConfiguredSinkVolume,
     PipeWireConfiguredSinkMuteState,
@@ -167,7 +175,7 @@ pub enum StateBindingKey {
 }
 
 impl StateBindingKey {
-    pub const ALL: [Self; 85] = [
+    pub const ALL: [Self; 87] = [
         Self::ClockTime,
         Self::UPowerAvailability,
         Self::UPowerOnBattery,
@@ -229,11 +237,13 @@ impl StateBindingKey {
         Self::PipeWireDefaultSinkMuteState,
         Self::PipeWireDefaultSinkCanSetVolume,
         Self::PipeWireDefaultSinkCanSetMute,
+        Self::PipeWireDefaultSinkCanMonitorPeaks,
         Self::PipeWireDefaultSourceAudioStatus,
         Self::PipeWireDefaultSourceVolume,
         Self::PipeWireDefaultSourceMuteState,
         Self::PipeWireDefaultSourceCanSetVolume,
         Self::PipeWireDefaultSourceCanSetMute,
+        Self::PipeWireDefaultSourceCanMonitorPeaks,
         Self::PipeWireConfiguredSinkAudioStatus,
         Self::PipeWireConfiguredSinkVolume,
         Self::PipeWireConfiguredSinkMuteState,
@@ -318,11 +328,15 @@ impl StateBindingKey {
             Self::PipeWireDefaultSinkMuteState => "pipewire.default_sink.mute_state",
             Self::PipeWireDefaultSinkCanSetVolume => "pipewire.default_sink.can_set_volume",
             Self::PipeWireDefaultSinkCanSetMute => "pipewire.default_sink.can_set_mute",
+            Self::PipeWireDefaultSinkCanMonitorPeaks => "pipewire.default_sink.can_monitor_peaks",
             Self::PipeWireDefaultSourceAudioStatus => "pipewire.default_source.audio_status",
             Self::PipeWireDefaultSourceVolume => "pipewire.default_source.volume",
             Self::PipeWireDefaultSourceMuteState => "pipewire.default_source.mute_state",
             Self::PipeWireDefaultSourceCanSetVolume => "pipewire.default_source.can_set_volume",
             Self::PipeWireDefaultSourceCanSetMute => "pipewire.default_source.can_set_mute",
+            Self::PipeWireDefaultSourceCanMonitorPeaks => {
+                "pipewire.default_source.can_monitor_peaks"
+            }
             Self::PipeWireConfiguredSinkAudioStatus => "pipewire.configured_sink.audio_status",
             Self::PipeWireConfiguredSinkVolume => "pipewire.configured_sink.volume",
             Self::PipeWireConfiguredSinkMuteState => "pipewire.configured_sink.mute_state",
@@ -410,11 +424,13 @@ impl StateBindingKey {
             | Self::PipeWireDefaultSinkMuteState
             | Self::PipeWireDefaultSinkCanSetVolume
             | Self::PipeWireDefaultSinkCanSetMute
+            | Self::PipeWireDefaultSinkCanMonitorPeaks
             | Self::PipeWireDefaultSourceAudioStatus
             | Self::PipeWireDefaultSourceVolume
             | Self::PipeWireDefaultSourceMuteState
             | Self::PipeWireDefaultSourceCanSetVolume
             | Self::PipeWireDefaultSourceCanSetMute
+            | Self::PipeWireDefaultSourceCanMonitorPeaks
             | Self::PipeWireConfiguredSinkAudioStatus
             | Self::PipeWireConfiguredSinkVolume
             | Self::PipeWireConfiguredSinkMuteState
@@ -484,10 +500,12 @@ impl StateBindingKey {
                     | Self::PipeWireDefaultSinkMuteState
                     | Self::PipeWireDefaultSinkCanSetVolume
                     | Self::PipeWireDefaultSinkCanSetMute
+                    | Self::PipeWireDefaultSinkCanMonitorPeaks
                     | Self::PipeWireDefaultSourceAudioStatus
                     | Self::PipeWireDefaultSourceMuteState
                     | Self::PipeWireDefaultSourceCanSetVolume
                     | Self::PipeWireDefaultSourceCanSetMute
+                    | Self::PipeWireDefaultSourceCanMonitorPeaks
                     | Self::PipeWireConfiguredSinkAudioStatus
                     | Self::PipeWireConfiguredSinkMuteState
                     | Self::PipeWireConfiguredSinkCanSetVolume
@@ -531,10 +549,12 @@ impl StateBindingKey {
                     | Self::PipeWireDefaultSinkMuteState
                     | Self::PipeWireDefaultSinkCanSetVolume
                     | Self::PipeWireDefaultSinkCanSetMute
+                    | Self::PipeWireDefaultSinkCanMonitorPeaks
                     | Self::PipeWireDefaultSourceAudioStatus
                     | Self::PipeWireDefaultSourceMuteState
                     | Self::PipeWireDefaultSourceCanSetVolume
                     | Self::PipeWireDefaultSourceCanSetMute
+                    | Self::PipeWireDefaultSourceCanMonitorPeaks
                     | Self::PipeWireConfiguredSinkAudioStatus
                     | Self::PipeWireConfiguredSinkMuteState
                     | Self::PipeWireConfiguredSinkCanSetVolume
@@ -578,8 +598,10 @@ impl StateBindingKey {
                     | Self::PipeWireReady
                     | Self::PipeWireDefaultSinkCanSetVolume
                     | Self::PipeWireDefaultSinkCanSetMute
+                    | Self::PipeWireDefaultSinkCanMonitorPeaks
                     | Self::PipeWireDefaultSourceCanSetVolume
                     | Self::PipeWireDefaultSourceCanSetMute
+                    | Self::PipeWireDefaultSourceCanMonitorPeaks
                     | Self::PipeWireConfiguredSinkCanSetVolume
                     | Self::PipeWireConfiguredSinkCanSetMute
                     | Self::PipeWireConfiguredSinkCanClear
@@ -684,8 +706,10 @@ impl StateBindingKey {
             | Self::PipeWireConfiguredSourceMuteState => &["unavailable", "muted", "unmuted"],
             Self::PipeWireDefaultSinkCanSetVolume
             | Self::PipeWireDefaultSinkCanSetMute
+            | Self::PipeWireDefaultSinkCanMonitorPeaks
             | Self::PipeWireDefaultSourceCanSetVolume
             | Self::PipeWireDefaultSourceCanSetMute
+            | Self::PipeWireDefaultSourceCanMonitorPeaks
             | Self::PipeWireConfiguredSinkCanSetVolume
             | Self::PipeWireConfiguredSinkCanSetMute
             | Self::PipeWireConfiguredSinkCanClear
@@ -809,11 +833,17 @@ impl std::str::FromStr for StateBindingKey {
             "pipewire.default_sink.mute_state" => Ok(Self::PipeWireDefaultSinkMuteState),
             "pipewire.default_sink.can_set_volume" => Ok(Self::PipeWireDefaultSinkCanSetVolume),
             "pipewire.default_sink.can_set_mute" => Ok(Self::PipeWireDefaultSinkCanSetMute),
+            "pipewire.default_sink.can_monitor_peaks" => {
+                Ok(Self::PipeWireDefaultSinkCanMonitorPeaks)
+            }
             "pipewire.default_source.audio_status" => Ok(Self::PipeWireDefaultSourceAudioStatus),
             "pipewire.default_source.volume" => Ok(Self::PipeWireDefaultSourceVolume),
             "pipewire.default_source.mute_state" => Ok(Self::PipeWireDefaultSourceMuteState),
             "pipewire.default_source.can_set_volume" => Ok(Self::PipeWireDefaultSourceCanSetVolume),
             "pipewire.default_source.can_set_mute" => Ok(Self::PipeWireDefaultSourceCanSetMute),
+            "pipewire.default_source.can_monitor_peaks" => {
+                Ok(Self::PipeWireDefaultSourceCanMonitorPeaks)
+            }
             "pipewire.configured_sink.audio_status" => Ok(Self::PipeWireConfiguredSinkAudioStatus),
             "pipewire.configured_sink.volume" => Ok(Self::PipeWireConfiguredSinkVolume),
             "pipewire.configured_sink.mute_state" => Ok(Self::PipeWireConfiguredSinkMuteState),
@@ -962,10 +992,11 @@ pub enum StateToken {
     Incoming,
     Outgoing,
     SelfConnection,
+    Starting,
 }
 
 impl StateToken {
-    pub const ALL: [Self; 99] = [
+    pub const ALL: [Self; 100] = [
         Self::Open,
         Self::Closed,
         Self::Scale1,
@@ -1065,6 +1096,7 @@ impl StateToken {
         Self::Incoming,
         Self::Outgoing,
         Self::SelfConnection,
+        Self::Starting,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -1168,6 +1200,7 @@ impl StateToken {
             Self::Incoming => "incoming",
             Self::Outgoing => "outgoing",
             Self::SelfConnection => "self",
+            Self::Starting => "starting",
         }
     }
 
@@ -1196,10 +1229,13 @@ pub enum ShellAction {
     PipeWireDefaultsSetPreferredSource,
     PipeWireDefaultsClearPreferredSink,
     PipeWireDefaultsClearPreferredSource,
+    PipeWirePeaksEnable,
+    PipeWirePeaksDisable,
+    PipeWirePeaksToggle,
 }
 
 impl ShellAction {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 21] = [
         Self::OverlayToggle,
         Self::OverlayClose,
         Self::OverlayActivate,
@@ -1218,6 +1254,9 @@ impl ShellAction {
         Self::PipeWireDefaultsSetPreferredSource,
         Self::PipeWireDefaultsClearPreferredSink,
         Self::PipeWireDefaultsClearPreferredSource,
+        Self::PipeWirePeaksEnable,
+        Self::PipeWirePeaksDisable,
+        Self::PipeWirePeaksToggle,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -1242,6 +1281,9 @@ impl ShellAction {
             Self::PipeWireDefaultsClearPreferredSource => {
                 "pipewire.defaults.clear_preferred_source"
             }
+            Self::PipeWirePeaksEnable => "pipewire.peaks.enable",
+            Self::PipeWirePeaksDisable => "pipewire.peaks.disable",
+            Self::PipeWirePeaksToggle => "pipewire.peaks.toggle",
         }
     }
 }
@@ -1275,6 +1317,9 @@ impl std::str::FromStr for ShellAction {
             "pipewire.defaults.clear_preferred_source" => {
                 Ok(Self::PipeWireDefaultsClearPreferredSource)
             }
+            "pipewire.peaks.enable" => Ok(Self::PipeWirePeaksEnable),
+            "pipewire.peaks.disable" => Ok(Self::PipeWirePeaksDisable),
+            "pipewire.peaks.toggle" => Ok(Self::PipeWirePeaksToggle),
             _ => Err(()),
         }
     }
@@ -1317,6 +1362,9 @@ impl BuiltInSurfaceKind {
                         | ShellAction::PipeWireDefaultsSetPreferredSource
                         | ShellAction::PipeWireDefaultsClearPreferredSink
                         | ShellAction::PipeWireDefaultsClearPreferredSource
+                        | ShellAction::PipeWirePeaksEnable
+                        | ShellAction::PipeWirePeaksDisable
+                        | ShellAction::PipeWirePeaksToggle
                 )
         )
     }
@@ -1343,6 +1391,102 @@ pub struct ElementDeclaration {
     pub value_format: Option<StateValueFormat>,
     pub repeat: Option<RepeatDeclaration>,
     pub range: Option<RangeControlDeclaration>,
+    pub peak_monitor: Option<PeakMonitorDeclaration>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PeakBindingKey {
+    Status,
+    Enabled,
+    Active,
+    CanEnable,
+    CanDisable,
+    Maximum,
+    ChannelCount,
+}
+
+impl PeakBindingKey {
+    pub const ALL: [Self; 7] = [
+        Self::Status,
+        Self::Enabled,
+        Self::Active,
+        Self::CanEnable,
+        Self::CanDisable,
+        Self::Maximum,
+        Self::ChannelCount,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Status => "peak.status",
+            Self::Enabled => "peak.enabled",
+            Self::Active => "peak.active",
+            Self::CanEnable => "peak.can_enable",
+            Self::CanDisable => "peak.can_disable",
+            Self::Maximum => "peak.maximum",
+            Self::ChannelCount => "peak.channel_count",
+        }
+    }
+
+    pub const fn supports_text(self) -> bool {
+        !matches!(self, Self::Maximum | Self::ChannelCount)
+    }
+
+    pub const fn supports_token(self) -> bool {
+        !matches!(self, Self::Maximum | Self::ChannelCount)
+    }
+
+    pub const fn supports_value(self) -> bool {
+        matches!(self, Self::Maximum | Self::ChannelCount)
+    }
+}
+
+impl std::str::FromStr for PeakBindingKey {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|key| key.as_str() == value)
+            .ok_or(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeakMonitorTarget {
+    CurrentItem,
+    DefaultSink,
+    DefaultSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeakScopedElementDeclaration {
+    pub local_id: String,
+    pub kind: BuiltInElementKind,
+    pub binding: Option<PeakBindingKey>,
+    pub action: Option<ShellAction>,
+    pub value_format: Option<StateValueFormat>,
+    pub disabled: bool,
+    pub prototype_order: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeakChannelRepeatDeclaration {
+    pub id: String,
+    pub template_prototype_order: usize,
+    pub descendants: Vec<RepeatedElementDeclaration>,
+    pub prototype_nodes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeakMonitorDeclaration {
+    pub id: String,
+    pub target: PeakMonitorTarget,
+    pub enabled: bool,
+    pub root_prototype_order: usize,
+    pub descendants: Vec<PeakScopedElementDeclaration>,
+    pub channel_repeats: Vec<PeakChannelRepeatDeclaration>,
+    pub prototype_nodes: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1422,6 +1566,7 @@ pub struct RepeatDeclaration {
     pub root_node: ExperimentalNodeIdentity,
     pub descendants: Vec<RepeatedElementDeclaration>,
     pub contextual_repeats: Vec<ContextualRepeatDeclaration>,
+    pub peak_monitors: Vec<PeakMonitorDeclaration>,
     pub prototype_nodes: usize,
 }
 
@@ -1457,7 +1602,7 @@ struct BuiltInElementDefinition {
     required_attribute: &'static str,
 }
 
-const DEFINITIONS: [BuiltInElementDefinition; 7] = [
+const DEFINITIONS: [BuiltInElementDefinition; 8] = [
     BuiltInElementDefinition {
         name: "state-text",
         allowed_tags: &["span", "p", "output"],
@@ -1492,6 +1637,11 @@ const DEFINITIONS: [BuiltInElementDefinition; 7] = [
         name: "range-control",
         allowed_tags: &["input"],
         required_attribute: BIND_ATTRIBUTE,
+    },
+    BuiltInElementDefinition {
+        name: "peak-monitor",
+        allowed_tags: &["div", "section", "article", "aside"],
+        required_attribute: ENABLED_ATTRIBUTE,
     },
 ];
 
@@ -1566,6 +1716,9 @@ impl BuiltInElementIndex {
             if repeat_ancestor(document, slot).is_some() {
                 continue;
             }
+            if peak_monitor_ancestor(document, slot).is_some() {
+                continue;
+            }
             if element.has_attr(LocalName::from(LOCAL_ID_ATTRIBUTE)) {
                 return Err(invalid_declaration(
                     &declaration_context(source, element.attr(local_name!("id"))),
@@ -1632,6 +1785,49 @@ impl BuiltInElementIndex {
                     "`datetime` and `data-htm-state` are runtime-owned",
                 ));
             }
+            if kind == BuiltInElementKind::PeakMonitor
+                && element.has_attr(LocalName::from(STATE_ATTRIBUTE))
+            {
+                return Err(invalid_declaration(
+                    &context,
+                    "`data-htm-state` is runtime-owned for `peak-monitor`",
+                ));
+            }
+            let peak_monitor = if kind == BuiltInElementKind::PeakMonitor {
+                let enabled = match required {
+                    "true" => true,
+                    "false" => false,
+                    value => {
+                        return Err(invalid_declaration(
+                            &context,
+                            format!("`data-htm-enabled` must be `true` or `false`, not `{value}`"),
+                        ));
+                    }
+                };
+                let target = element
+                    .attr(LocalName::from(TARGET_ATTRIBUTE))
+                    .ok_or_else(|| {
+                        invalid_declaration(
+                            &context,
+                            "`peak-monitor` requires `data-htm-target` outside a repeat",
+                        )
+                    })
+                    .and_then(|value| parse_peak_default_target(value, &context))?;
+                Some(analyze_peak_monitor(
+                    document,
+                    slot,
+                    &html_id,
+                    PeakMonitorAnalysis {
+                        target,
+                        enabled,
+                        repeated: false,
+                        base_prototype_order: 0,
+                    },
+                    &context,
+                )?)
+            } else {
+                None
+            };
             let (
                 binding,
                 binding_kind,
@@ -1719,6 +1915,17 @@ impl BuiltInElementIndex {
                         return Err(invalid_declaration(
                             &context,
                             "preferred-default node actions are valid only inside `pipewire.nodes`",
+                        ));
+                    }
+                    if matches!(
+                        action,
+                        ShellAction::PipeWirePeaksEnable
+                            | ShellAction::PipeWirePeaksDisable
+                            | ShellAction::PipeWirePeaksToggle
+                    ) {
+                        return Err(invalid_declaration(
+                            &context,
+                            "PipeWire peak actions are valid only inside `peak-monitor`",
                         ));
                     }
                     let target_value = element.attr(LocalName::from(TARGET_ATTRIBUTE));
@@ -2012,6 +2219,9 @@ impl BuiltInElementIndex {
                         enabled_binding,
                     )
                 }
+                BuiltInElementKind::PeakMonitor => {
+                    (None, None, None, None, None, None, None, None, None)
+                }
             };
             let instance_id = ElementInstanceId {
                 document_generation,
@@ -2031,6 +2241,7 @@ impl BuiltInElementIndex {
                 value_format,
                 repeat,
                 range,
+                peak_monitor,
             };
             let indexed = IndexedElement {
                 declaration,
@@ -2111,6 +2322,32 @@ impl BuiltInElementIndex {
             return Err(RuntimeError::LimitExceeded(format!(
                 "{source} contains {} `pipewire.nodes` repeat declarations; the per-document limit is {MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT}",
                 pipewire_repeats.len()
+            )));
+        }
+        let top_peak_monitors = elements
+            .values()
+            .filter_map(|element| element.declaration.peak_monitor.as_ref())
+            .collect::<Vec<_>>();
+        let repeated_peak_monitors = pipewire_repeats
+            .iter()
+            .flat_map(|repeat| repeat.peak_monitors.iter())
+            .collect::<Vec<_>>();
+        let peak_monitor_count = top_peak_monitors
+            .len()
+            .saturating_add(repeated_peak_monitors.len());
+        if peak_monitor_count > MAX_PIPEWIRE_PEAK_MONITORS_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{source} contains {peak_monitor_count} peak monitors; the per-document limit is {MAX_PIPEWIRE_PEAK_MONITORS_PER_DOCUMENT}"
+            )));
+        }
+        let enabled_peak_monitors = top_peak_monitors
+            .iter()
+            .chain(repeated_peak_monitors.iter())
+            .filter(|monitor| monitor.enabled)
+            .count();
+        if enabled_peak_monitors > MAX_PIPEWIRE_ENABLED_PEAK_MONITORS_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{source} contains {enabled_peak_monitors} initially enabled peak monitors; the per-document limit is {MAX_PIPEWIRE_ENABLED_PEAK_MONITORS_PER_DOCUMENT}"
             )));
         }
         let pipewire_link_repeats = elements
@@ -2342,6 +2579,13 @@ impl BuiltInElementIndex {
             .collect()
     }
 
+    pub(crate) fn peak_monitor_declarations(&self) -> Vec<PeakMonitorDeclaration> {
+        self.elements
+            .values()
+            .filter_map(|element| element.declaration.peak_monitor.clone())
+            .collect()
+    }
+
     pub(crate) fn clock_declaration(
         &self,
         identity: &ElementInstanceId,
@@ -2494,6 +2738,7 @@ pub fn built_in_registry_names() -> &'static [&'static str] {
         "state-value",
         "repeat",
         "range-control",
+        "peak-monitor",
     ]
 }
 
@@ -2532,6 +2777,7 @@ fn definition(kind: BuiltInElementKind) -> &'static BuiltInElementDefinition {
         BuiltInElementKind::StateValue => &DEFINITIONS[4],
         BuiltInElementKind::Repeat => &DEFINITIONS[5],
         BuiltInElementKind::RangeControl => &DEFINITIONS[6],
+        BuiltInElementKind::PeakMonitor => &DEFINITIONS[7],
     }
 }
 
@@ -2560,6 +2806,9 @@ fn allowed_behavior_attributes(kind: BuiltInElementKind) -> &'static [&'static s
             TARGET_ATTRIBUTE,
             ENABLED_BIND_ATTRIBUTE,
         ],
+        BuiltInElementKind::PeakMonitor => {
+            &[ELEMENT_ATTRIBUTE, TARGET_ATTRIBUTE, ENABLED_ATTRIBUTE]
+        }
     }
 }
 
@@ -2577,6 +2826,573 @@ fn repeat_ancestor(document: &HtmlDocument, slot: usize) -> Option<usize> {
         parent = node.parent;
     }
     None
+}
+
+fn peak_monitor_ancestor(document: &HtmlDocument, slot: usize) -> Option<usize> {
+    let mut parent = document.get_node(slot).and_then(|node| node.parent);
+    while let Some(candidate) = parent {
+        let node = document.get_node(candidate)?;
+        if node
+            .element_data()
+            .and_then(|element| element.attr(LocalName::from(ELEMENT_ATTRIBUTE)))
+            == Some("peak-monitor")
+        {
+            return Some(candidate);
+        }
+        parent = node.parent;
+    }
+    None
+}
+
+fn parse_peak_default_target(
+    value: &str,
+    context: &str,
+) -> Result<PeakMonitorTarget, RuntimeError> {
+    match value {
+        "pipewire.default_sink" => Ok(PeakMonitorTarget::DefaultSink),
+        "pipewire.default_source" => Ok(PeakMonitorTarget::DefaultSource),
+        _ => Err(invalid_declaration(
+            context,
+            format!(
+                "unsupported peak-monitor target `{value}`; expected `pipewire.default_sink` or `pipewire.default_source`"
+            ),
+        )),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PeakMonitorAnalysis {
+    target: PeakMonitorTarget,
+    enabled: bool,
+    repeated: bool,
+    base_prototype_order: usize,
+}
+
+fn analyze_peak_monitor(
+    document: &HtmlDocument,
+    monitor_slot: usize,
+    id: &str,
+    analysis: PeakMonitorAnalysis,
+    context: &str,
+) -> Result<PeakMonitorDeclaration, RuntimeError> {
+    let PeakMonitorAnalysis {
+        target,
+        enabled,
+        repeated,
+        base_prototype_order,
+    } = analysis;
+    let mut descendants = Vec::new();
+    let mut channel_repeats = Vec::new();
+    let mut local_ids = BTreeSet::new();
+    let mut stack = vec![(monitor_slot, 0usize)];
+    let mut prototype_order = 0usize;
+    while let Some((slot, depth)) = stack.pop() {
+        if depth > MAX_REPEAT_TEMPLATE_DEPTH {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{context}: peak monitor depth exceeds {MAX_REPEAT_TEMPLATE_DEPTH}"
+            )));
+        }
+        let node = document
+            .get_node(slot)
+            .ok_or_else(|| invalid_declaration(context, "peak monitor subtree disappeared"))?;
+        let relative_order = prototype_order;
+        prototype_order = prototype_order.saturating_add(1);
+        if slot == monitor_slot {
+            stack.extend(
+                node.children
+                    .iter()
+                    .rev()
+                    .copied()
+                    .map(|child| (child, depth.saturating_add(1))),
+            );
+            continue;
+        }
+        if let Some(element) = node.element_data() {
+            if repeated && element.has_attr(local_name!("id")) {
+                return Err(invalid_declaration(
+                    context,
+                    "normal `id` attributes are forbidden inside repeated peak monitors",
+                ));
+            }
+            if !repeated && element.has_attr(LocalName::from(LOCAL_ID_ATTRIBUTE)) {
+                return Err(invalid_declaration(
+                    context,
+                    "`data-htm-local-id` is only valid in repeated monitor clones",
+                ));
+            }
+            let kind_name = element.attr(LocalName::from(ELEMENT_ATTRIBUTE));
+            if kind_name == Some("peak-monitor") {
+                return Err(invalid_declaration(
+                    context,
+                    "nested `peak-monitor` declarations are forbidden",
+                ));
+            }
+            if kind_name == Some("repeat") {
+                if element.attr(LocalName::from(SOURCE_ATTRIBUTE)) != Some("peak.channels") {
+                    return Err(invalid_declaration(
+                        context,
+                        "only `peak.channels` may repeat inside `peak-monitor`",
+                    ));
+                }
+                if element.has_attr(LocalName::from(LOCAL_ID_ATTRIBUTE))
+                    || element.has_attr(local_name!("id"))
+                {
+                    return Err(invalid_declaration(
+                        context,
+                        "`peak.channels` declarations do not use an author ID",
+                    ));
+                }
+                if channel_repeats.len() >= MAX_PIPEWIRE_PEAK_CHANNEL_REPEATS_PER_MONITOR {
+                    return Err(RuntimeError::LimitExceeded(format!(
+                        "{context}: peak monitor exceeds {MAX_PIPEWIRE_PEAK_CHANNEL_REPEATS_PER_MONITOR} `peak.channels` repeats"
+                    )));
+                }
+                channel_repeats.push(analyze_peak_channel_repeat(
+                    document,
+                    slot,
+                    base_prototype_order.saturating_add(relative_order),
+                    channel_repeats.len(),
+                    context,
+                )?);
+                let nested_nodes = subtree_node_count(document, slot)?;
+                prototype_order = prototype_order
+                    .checked_add(nested_nodes.saturating_sub(1))
+                    .ok_or_else(|| {
+                        RuntimeError::LimitExceeded("peak channel clone count overflow".into())
+                    })?;
+                continue;
+            }
+            if let Some(kind_name) = kind_name {
+                let kind = BuiltInElementKind::parse(kind_name).ok_or_else(|| {
+                    invalid_declaration(
+                        context,
+                        format!("unknown peak-monitor built-in `{kind_name}`"),
+                    )
+                })?;
+                if !matches!(
+                    kind,
+                    BuiltInElementKind::StateText
+                        | BuiltInElementKind::StateToken
+                        | BuiltInElementKind::StateValue
+                        | BuiltInElementKind::ActionButton
+                ) {
+                    return Err(invalid_declaration(
+                        context,
+                        format!("`{}` is forbidden inside `peak-monitor`", kind.as_str()),
+                    ));
+                }
+                let definition = definition(kind);
+                let tag = element.name.local.as_ref();
+                if !definition.allowed_tags.contains(&tag) {
+                    return Err(invalid_declaration(
+                        context,
+                        format!("`{}` is not allowed on <{tag}>", kind.as_str()),
+                    ));
+                }
+                for attribute in element.attrs() {
+                    let name = attribute.name.local.as_ref();
+                    if name.starts_with("data-htm-")
+                        && name != LOCAL_ID_ATTRIBUTE
+                        && !allowed_behavior_attributes(kind).contains(&name)
+                    {
+                        return Err(invalid_declaration(
+                            context,
+                            format!("unsupported peak-monitor attribute `{name}`"),
+                        ));
+                    }
+                }
+                let local_id = if repeated {
+                    element
+                        .attr(LocalName::from(LOCAL_ID_ATTRIBUTE))
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| {
+                            invalid_declaration(
+                                context,
+                                "registered repeated monitor descendant requires `data-htm-local-id`",
+                            )
+                        })?
+                } else {
+                    element
+                        .attr(local_name!("id"))
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| {
+                            invalid_declaration(
+                                context,
+                                "registered monitor descendant requires `id`",
+                            )
+                        })?
+                };
+                if !local_ids.insert(local_id.to_owned()) {
+                    return Err(invalid_declaration(
+                        context,
+                        format!("duplicate peak-monitor descendant id `{local_id}`"),
+                    ));
+                }
+                let mut binding = None;
+                let mut action = None;
+                let mut value_format = None;
+                match kind {
+                    BuiltInElementKind::StateText
+                    | BuiltInElementKind::StateToken
+                    | BuiltInElementKind::StateValue => {
+                        let binding_value = element
+                            .attr(LocalName::from(BIND_ATTRIBUTE))
+                            .filter(|value| !value.is_empty())
+                            .ok_or_else(|| {
+                                invalid_declaration(
+                                    context,
+                                    format!("`{}` requires `data-htm-bind`", kind.as_str()),
+                                )
+                            })?;
+                        let parsed = binding_value.parse::<PeakBindingKey>().map_err(|()| {
+                            invalid_declaration(
+                                context,
+                                format!("unsupported monitor binding `{binding_value}`"),
+                            )
+                        })?;
+                        match kind {
+                            BuiltInElementKind::StateText if parsed.supports_text() => {
+                                validate_state_text_children(document, slot, context)?;
+                            }
+                            BuiltInElementKind::StateToken if parsed.supports_token() => {
+                                if element.has_attr(LocalName::from(STATE_ATTRIBUTE)) {
+                                    return Err(invalid_declaration(
+                                        context,
+                                        "`data-htm-state` is runtime-owned",
+                                    ));
+                                }
+                            }
+                            BuiltInElementKind::StateValue if parsed.supports_value() => {
+                                validate_state_text_children(document, slot, context)?;
+                                if element.has_attr(local_name!("value")) {
+                                    return Err(invalid_declaration(
+                                        context,
+                                        "`value` is runtime-owned for `state-value`",
+                                    ));
+                                }
+                                value_format = Some(parse_value_format(
+                                    element.attr(LocalName::from(FORMAT_ATTRIBUTE)),
+                                    &[StateValueFormat::Raw, StateValueFormat::Percent],
+                                    context,
+                                )?);
+                            }
+                            _ => {
+                                return Err(invalid_declaration(
+                                    context,
+                                    format!(
+                                        "monitor binding `{binding_value}` does not support `{}`",
+                                        kind.as_str()
+                                    ),
+                                ));
+                            }
+                        }
+                        binding = Some(parsed);
+                    }
+                    BuiltInElementKind::ActionButton => {
+                        if element.has_attr(LocalName::from(TARGET_ATTRIBUTE))
+                            || element.has_attr(LocalName::from(ENABLED_BIND_ATTRIBUTE))
+                        {
+                            return Err(invalid_declaration(
+                                context,
+                                "peak monitor actions forbid explicit targets and enabled bindings",
+                            ));
+                        }
+                        let parsed = element
+                            .attr(LocalName::from(ACTION_ATTRIBUTE))
+                            .and_then(|value| value.parse::<ShellAction>().ok())
+                            .filter(|action| {
+                                matches!(
+                                    action,
+                                    ShellAction::PipeWirePeaksEnable
+                                        | ShellAction::PipeWirePeaksDisable
+                                        | ShellAction::PipeWirePeaksToggle
+                                )
+                            })
+                            .ok_or_else(|| {
+                                invalid_declaration(
+                                    context,
+                                    "only PipeWire peak enable, disable, and toggle actions are allowed inside `peak-monitor`",
+                                )
+                            })?;
+                        if element.has_attr(LocalName::from(STATE_ATTRIBUTE)) {
+                            return Err(invalid_declaration(
+                                context,
+                                "`data-htm-state` is runtime-owned for peak controls",
+                            ));
+                        }
+                        action = Some(parsed);
+                    }
+                    _ => unreachable!("peak monitor descendant kind was filtered"),
+                }
+                descendants.push(PeakScopedElementDeclaration {
+                    local_id: local_id.to_owned(),
+                    kind,
+                    binding,
+                    action,
+                    value_format,
+                    disabled: element.has_attr(local_name!("disabled")),
+                    prototype_order: base_prototype_order.saturating_add(relative_order),
+                });
+                if descendants.len() > MAX_PIPEWIRE_PEAK_BINDINGS_PER_MONITOR {
+                    return Err(RuntimeError::LimitExceeded(format!(
+                        "{context}: peak monitor exceeds {MAX_PIPEWIRE_PEAK_BINDINGS_PER_MONITOR} registered descendants"
+                    )));
+                }
+                let actions = descendants
+                    .iter()
+                    .filter(|descendant| descendant.action.is_some())
+                    .count();
+                if actions > MAX_PIPEWIRE_PEAK_ACTIONS_PER_MONITOR {
+                    return Err(RuntimeError::LimitExceeded(format!(
+                        "{context}: peak monitor exceeds {MAX_PIPEWIRE_PEAK_ACTIONS_PER_MONITOR} action buttons"
+                    )));
+                }
+            } else {
+                for attribute in element.attrs() {
+                    if attribute.name.local.as_ref().starts_with("data-htm-")
+                        && attribute.name.local.as_ref() != LOCAL_ID_ATTRIBUTE
+                    {
+                        return Err(invalid_declaration(
+                            context,
+                            format!(
+                                "unsupported peak-monitor subtree attribute `{}`",
+                                attribute.name.local
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        stack.extend(
+            node.children
+                .iter()
+                .rev()
+                .copied()
+                .map(|child| (child, depth.saturating_add(1))),
+        );
+    }
+    Ok(PeakMonitorDeclaration {
+        id: id.to_owned(),
+        target,
+        enabled,
+        root_prototype_order: base_prototype_order,
+        descendants,
+        channel_repeats,
+        prototype_nodes: prototype_order,
+    })
+}
+
+fn analyze_peak_channel_repeat(
+    document: &HtmlDocument,
+    template_slot: usize,
+    template_prototype_order: usize,
+    ordinal: usize,
+    context: &str,
+) -> Result<PeakChannelRepeatDeclaration, RuntimeError> {
+    let template = document
+        .get_node(template_slot)
+        .ok_or_else(|| invalid_declaration(context, "peak channel template disappeared"))?;
+    let element = template
+        .element_data()
+        .ok_or_else(|| invalid_declaration(context, "peak channel repeat must be a template"))?;
+    for attribute in element.attrs() {
+        let name = attribute.name.local.as_ref();
+        if name.starts_with("data-htm-") && !matches!(name, ELEMENT_ATTRIBUTE | SOURCE_ATTRIBUTE) {
+            return Err(invalid_declaration(
+                context,
+                format!("unsupported peak-channel repeat attribute `{name}`"),
+            ));
+        }
+    }
+    let roots = template
+        .children
+        .iter()
+        .filter_map(|slot| {
+            document
+                .get_node(*slot)
+                .and_then(|node| matches!(node.data, NodeData::Element(_)).then_some(*slot))
+        })
+        .collect::<Vec<_>>();
+    if roots.len() != 1 {
+        return Err(invalid_declaration(
+            context,
+            "peak channel repeat must contain exactly one root element",
+        ));
+    }
+    let mut descendants = Vec::new();
+    let mut local_ids = BTreeSet::new();
+    let mut stack = vec![(roots[0], 1usize)];
+    let mut prototype_order = 0usize;
+    while let Some((slot, depth)) = stack.pop() {
+        if depth > MAX_REPEAT_TEMPLATE_DEPTH {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{context}: peak channel template depth exceeds {MAX_REPEAT_TEMPLATE_DEPTH}"
+            )));
+        }
+        let node = document
+            .get_node(slot)
+            .ok_or_else(|| invalid_declaration(context, "peak channel subtree disappeared"))?;
+        let order = prototype_order;
+        prototype_order = prototype_order.saturating_add(1);
+        if let Some(element) = node.element_data() {
+            if element.has_attr(local_name!("id")) {
+                return Err(invalid_declaration(
+                    context,
+                    "normal `id` attributes are forbidden inside `peak.channels`",
+                ));
+            }
+            let local_id = element.attr(LocalName::from(LOCAL_ID_ATTRIBUTE));
+            if let Some(kind_name) = element.attr(LocalName::from(ELEMENT_ATTRIBUTE)) {
+                let kind = BuiltInElementKind::parse(kind_name).ok_or_else(|| {
+                    invalid_declaration(
+                        context,
+                        format!("unknown peak-channel built-in `{kind_name}`"),
+                    )
+                })?;
+                if !matches!(
+                    kind,
+                    BuiltInElementKind::StateText
+                        | BuiltInElementKind::StateToken
+                        | BuiltInElementKind::StateValue
+                ) {
+                    return Err(invalid_declaration(
+                        context,
+                        format!("`{}` is forbidden inside `peak.channels`", kind.as_str()),
+                    ));
+                }
+                let tag = element.name.local.as_ref();
+                if !definition(kind).allowed_tags.contains(&tag) {
+                    return Err(invalid_declaration(
+                        context,
+                        format!("`{}` is not allowed on <{tag}>", kind.as_str()),
+                    ));
+                }
+                let local_id = local_id.filter(|value| !value.is_empty()).ok_or_else(|| {
+                    invalid_declaration(
+                        context,
+                        "registered peak-channel descendant requires `data-htm-local-id`",
+                    )
+                })?;
+                if !local_ids.insert(local_id.to_owned()) {
+                    return Err(invalid_declaration(
+                        context,
+                        format!("duplicate peak-channel local id `{local_id}`"),
+                    ));
+                }
+                let binding_value = element
+                    .attr(LocalName::from(BIND_ATTRIBUTE))
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        invalid_declaration(
+                            context,
+                            format!("`{}` requires `data-htm-bind`", kind.as_str()),
+                        )
+                    })?;
+                let binding = binding_value.parse::<ItemBindingKey>().map_err(|()| {
+                    invalid_declaration(
+                        context,
+                        format!("unsupported peak-channel binding `{binding_value}`"),
+                    )
+                })?;
+                if !binding.supports_peak_channel() {
+                    return Err(invalid_declaration(
+                        context,
+                        format!("`{binding_value}` is not valid inside `peak.channels`"),
+                    ));
+                }
+                let value_format = match kind {
+                    BuiltInElementKind::StateText if binding.supports_text() => {
+                        validate_state_text_children(document, slot, context)?;
+                        None
+                    }
+                    BuiltInElementKind::StateToken if binding.supports_token() => {
+                        if element.has_attr(LocalName::from(STATE_ATTRIBUTE)) {
+                            return Err(invalid_declaration(
+                                context,
+                                "`data-htm-state` is runtime-owned",
+                            ));
+                        }
+                        None
+                    }
+                    BuiltInElementKind::StateValue if binding.supports_value() => {
+                        validate_state_text_children(document, slot, context)?;
+                        if element.has_attr(local_name!("value")) {
+                            return Err(invalid_declaration(
+                                context,
+                                "`value` is runtime-owned for `state-value`",
+                            ));
+                        }
+                        Some(parse_value_format(
+                            element.attr(LocalName::from(FORMAT_ATTRIBUTE)),
+                            &[StateValueFormat::Raw, StateValueFormat::Percent],
+                            context,
+                        )?)
+                    }
+                    _ => {
+                        return Err(invalid_declaration(
+                            context,
+                            format!(
+                                "peak-channel binding `{binding_value}` does not support `{}`",
+                                kind.as_str()
+                            ),
+                        ));
+                    }
+                };
+                descendants.push(RepeatedElementDeclaration {
+                    local_id: local_id.to_owned(),
+                    kind,
+                    binding: Some(binding),
+                    action: None,
+                    enabled_binding: None,
+                    range: None,
+                    disabled: false,
+                    property_key: None,
+                    value_format,
+                    prototype_order: order,
+                });
+                if descendants.len() > MAX_PIPEWIRE_PEAK_CHANNEL_BINDINGS_PER_ITEM {
+                    return Err(RuntimeError::LimitExceeded(format!(
+                        "{context}: peak channel template exceeds {MAX_PIPEWIRE_PEAK_CHANNEL_BINDINGS_PER_ITEM} bindings"
+                    )));
+                }
+            } else {
+                if let Some(local_id) = local_id
+                    && (local_id.is_empty() || !local_ids.insert(local_id.to_owned()))
+                {
+                    return Err(invalid_declaration(
+                        context,
+                        "static peak-channel local IDs must be nonempty and unique",
+                    ));
+                }
+                for attribute in element.attrs() {
+                    if attribute.name.local.as_ref().starts_with("data-htm-")
+                        && attribute.name.local.as_ref() != LOCAL_ID_ATTRIBUTE
+                    {
+                        return Err(invalid_declaration(
+                            context,
+                            format!(
+                                "unsupported peak-channel subtree attribute `{}`",
+                                attribute.name.local
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        stack.extend(
+            node.children
+                .iter()
+                .rev()
+                .copied()
+                .map(|child| (child, depth.saturating_add(1))),
+        );
+    }
+    Ok(PeakChannelRepeatDeclaration {
+        id: format!("peak-channels-{ordinal}"),
+        template_prototype_order,
+        descendants,
+        prototype_nodes: prototype_order,
+    })
 }
 
 fn analyze_repeat(
@@ -2626,6 +3442,7 @@ fn analyze_repeat(
     let root = roots[0];
     let mut descendants = Vec::new();
     let mut contextual_repeats = Vec::new();
+    let mut peak_monitors = Vec::new();
     let mut local_ids = BTreeSet::new();
     let mut stack = vec![(root, 1usize)];
     let mut prototype_order = 0usize;
@@ -2680,6 +3497,107 @@ fn analyze_repeat(
                             format!("unknown repeated built-in element `{kind_name}`"),
                         )
                     })?;
+                    if kind == BuiltInElementKind::PeakMonitor {
+                        let definition = definition(kind);
+                        let tag = element.name.local.as_ref();
+                        if !definition.allowed_tags.contains(&tag) {
+                            return Err(invalid_declaration(
+                                context,
+                                format!(
+                                    "`{}` requires one of [{}], not <{tag}>",
+                                    definition.name,
+                                    definition.allowed_tags.join(", ")
+                                ),
+                            ));
+                        }
+                        for attribute in element.attrs() {
+                            let name = attribute.name.local.as_ref();
+                            if name.starts_with("data-htm-")
+                                && name != LOCAL_ID_ATTRIBUTE
+                                && !allowed_behavior_attributes(kind).contains(&name)
+                            {
+                                return Err(invalid_declaration(
+                                    context,
+                                    format!("unsupported repeated peak-monitor attribute `{name}`"),
+                                ));
+                            }
+                        }
+                        if source != RepeatSource::PipeWireNodes {
+                            return Err(invalid_declaration(
+                                context,
+                                "`peak-monitor` is valid only inside `pipewire.nodes`",
+                            ));
+                        }
+                        if element.has_attr(LocalName::from(TARGET_ATTRIBUTE)) {
+                            return Err(invalid_declaration(
+                                context,
+                                "item-local `peak-monitor` forbids `data-htm-target`",
+                            ));
+                        }
+                        if element.has_attr(LocalName::from(STATE_ATTRIBUTE)) {
+                            return Err(invalid_declaration(
+                                context,
+                                "`data-htm-state` is runtime-owned for `peak-monitor`",
+                            ));
+                        }
+                        let local_id =
+                            local_id.filter(|value| !value.is_empty()).ok_or_else(|| {
+                                invalid_declaration(
+                                    context,
+                                    "repeated `peak-monitor` requires `data-htm-local-id`",
+                                )
+                            })?;
+                        if !local_ids.insert(local_id.to_owned()) {
+                            return Err(invalid_declaration(
+                                context,
+                                format!("duplicate repeat local id `{local_id}`"),
+                            ));
+                        }
+                        let enabled = match element.attr(LocalName::from(ENABLED_ATTRIBUTE)) {
+                            Some("true") => true,
+                            Some("false") => false,
+                            Some(value) => {
+                                return Err(invalid_declaration(
+                                    context,
+                                    format!(
+                                        "`data-htm-enabled` must be `true` or `false`, not `{value}`"
+                                    ),
+                                ));
+                            }
+                            None => {
+                                return Err(invalid_declaration(
+                                    context,
+                                    "`peak-monitor` requires `data-htm-enabled`",
+                                ));
+                            }
+                        };
+                        if peak_monitors.len() >= MAX_PIPEWIRE_PEAK_MONITORS_PER_ITEM {
+                            return Err(RuntimeError::LimitExceeded(format!(
+                                "{context}: node template exceeds {MAX_PIPEWIRE_PEAK_MONITORS_PER_ITEM} peak monitors"
+                            )));
+                        }
+                        peak_monitors.push(analyze_peak_monitor(
+                            document,
+                            slot,
+                            local_id,
+                            PeakMonitorAnalysis {
+                                target: PeakMonitorTarget::CurrentItem,
+                                enabled,
+                                repeated: true,
+                                base_prototype_order: order,
+                            },
+                            context,
+                        )?);
+                        let nested_nodes = subtree_node_count(document, slot)?;
+                        prototype_order = prototype_order
+                            .checked_add(nested_nodes.saturating_sub(1))
+                            .ok_or_else(|| {
+                                RuntimeError::LimitExceeded(
+                                    "peak monitor clone count overflow".into(),
+                                )
+                            })?;
+                        continue;
+                    }
                     if kind == BuiltInElementKind::Repeat {
                         let contextual_source = element
                             .attr(LocalName::from(SOURCE_ATTRIBUTE))
@@ -3037,7 +3955,9 @@ fn analyze_repeat(
                                 context,
                             )?);
                         }
-                        BuiltInElementKind::ClockText | BuiltInElementKind::Repeat => {
+                        BuiltInElementKind::ClockText
+                        | BuiltInElementKind::Repeat
+                        | BuiltInElementKind::PeakMonitor => {
                             unreachable!("repeat child kind was rejected above")
                         }
                     }
@@ -3144,6 +4064,7 @@ fn analyze_repeat(
         root_node: identities.identity_for_slot(document, root)?,
         descendants,
         contextual_repeats,
+        peak_monitors,
         prototype_nodes: prototype_order,
     })
 }
@@ -3544,7 +4465,9 @@ fn item_value_formats(binding: ItemBindingKey) -> &'static [StateValueFormat] {
         | ItemBindingKey::RepresentativeLinkRawId
         | ItemBindingKey::LinkGroupCount
         | ItemBindingKey::PeerRawId => &[StateValueFormat::Raw],
-        ItemBindingKey::Volume => &[StateValueFormat::Raw, StateValueFormat::Percent],
+        ItemBindingKey::Volume | ItemBindingKey::Peak => {
+            &[StateValueFormat::Raw, StateValueFormat::Percent]
+        }
         _ => &[],
     }
 }
@@ -3766,15 +4689,16 @@ mod tests {
                 "state-value",
                 "repeat",
                 "range-control",
+                "peak-monitor",
             ]
         );
         assert!(validate_definitions(&DEFINITIONS).is_ok());
         let duplicate = [DEFINITIONS[0], DEFINITIONS[0]];
         assert!(validate_definitions(&duplicate).is_err());
-        assert_eq!(StateBindingKey::ALL.len(), 85);
+        assert_eq!(StateBindingKey::ALL.len(), 87);
         assert!(StateBindingKey::ALL.contains(&StateBindingKey::UPowerOnBattery));
         assert!(StateBindingKey::ALL.contains(&StateBindingKey::PowerProfileCurrent));
-        assert_eq!(ShellAction::ALL.len(), 18);
+        assert_eq!(ShellAction::ALL.len(), 21);
         assert!(ShellAction::ALL.contains(&ShellAction::PowerProfileSetPerformance));
         for key in StateBindingKey::ALL {
             assert_eq!(key.as_str().parse::<StateBindingKey>(), Ok(key));
@@ -3813,7 +4737,7 @@ mod tests {
         assert!(StateBindingKey::SurfaceScaleProfile.supports(StateValueKind::Token));
         assert!(!StateBindingKey::SurfaceScaleProfile.supports(StateValueKind::Text));
         assert!(!StateBindingKey::ClockTime.supports(StateValueKind::Token));
-        assert_eq!(StateToken::ALL.len(), 99);
+        assert_eq!(StateToken::ALL.len(), 100);
         assert!(StateToken::ALL.contains(&StateToken::BluetoothGeneric));
         assert!(StateToken::ALL.contains(&StateToken::HighTemperature));
         assert!(StateToken::Open.valid_for(StateBindingKey::OverlayStatus));
@@ -3905,7 +4829,132 @@ mod tests {
             index.element("clock-a").unwrap().kind,
             BuiltInElementKind::StateText
         );
-        assert_eq!(built_in_registry_names().len(), 7);
+        assert_eq!(built_in_registry_names().len(), 8);
+    }
+
+    #[test]
+    fn peak_monitors_are_explicit_typed_and_context_bounded() {
+        let index = discover(
+            r#"
+            <section id="sink-peaks" data-htm-element="peak-monitor"
+              data-htm-target="pipewire.default_sink" data-htm-enabled="true">
+              <span id="status" data-htm-element="state-token"
+                data-htm-bind="peak.status"></span>
+              <data id="maximum" data-htm-element="state-value"
+                data-htm-bind="peak.maximum" data-htm-format="percent"></data>
+              <button id="toggle" data-htm-element="action-button"
+                data-htm-action="pipewire.peaks.toggle">Toggle</button>
+              <template data-htm-element="repeat" data-htm-source="peak.channels">
+                <div data-htm-local-id="row">
+                  <span data-htm-element="state-text" data-htm-local-id="name"
+                    data-htm-bind="item.position_name"></span>
+                  <data data-htm-element="state-value" data-htm-local-id="peak"
+                    data-htm-bind="item.peak" data-htm-format="percent"></data>
+                </div>
+              </template>
+            </section>
+            <template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes">
+              <article data-htm-local-id="node">
+                <aside data-htm-element="peak-monitor" data-htm-local-id="monitor"
+                  data-htm-enabled="false">
+                  <span data-htm-element="state-text" data-htm-local-id="active"
+                    data-htm-bind="peak.active"></span>
+                </aside>
+              </article>
+            </template>
+            "#,
+            BuiltInSurfaceKind::Overlay,
+        )
+        .unwrap();
+
+        let top = index.peak_monitor_declarations();
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].id, "sink-peaks");
+        assert_eq!(top[0].target, PeakMonitorTarget::DefaultSink);
+        assert!(top[0].enabled);
+        assert_eq!(top[0].channel_repeats.len(), 1);
+        assert_eq!(top[0].channel_repeats[0].descendants.len(), 2);
+        assert_eq!(top[0].descendants[0].binding, Some(PeakBindingKey::Status));
+        assert_eq!(
+            top[0].descendants[2].action,
+            Some(ShellAction::PipeWirePeaksToggle)
+        );
+
+        let node_repeat = index
+            .repeat_declarations()
+            .into_iter()
+            .find(|repeat| repeat.source == RepeatSource::PipeWireNodes)
+            .unwrap();
+        assert_eq!(node_repeat.peak_monitors.len(), 1);
+        assert_eq!(
+            node_repeat.peak_monitors[0].target,
+            PeakMonitorTarget::CurrentItem
+        );
+        assert!(!node_repeat.peak_monitors[0].enabled);
+    }
+
+    #[test]
+    fn invalid_peak_monitor_authoring_is_rejected_atomically() {
+        for invalid in [
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink"></section>"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink" data-htm-enabled="yes"></section>"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink" data-htm-enabled="{{ enabled }}"></section>"#,
+            r#"<input id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink" data-htm-enabled="true">"#,
+            r#"<button id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink" data-htm-enabled="true"></button>"#,
+            r#"<br id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink" data-htm-enabled="true">"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-enabled="true"></section>"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.configured_sink" data-htm-enabled="true"></section>"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.configured_source" data-htm-enabled="true"></section>"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="42" data-htm-enabled="true"></section>"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="alsa_output.card" data-htm-enabled="true"></section>"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="sink-card" data-htm-enabled="true"></section>"#,
+            r##"<section id="m" data-htm-element="peak-monitor" data-htm-target="#sink" data-htm-enabled="true"></section>"##,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target=".sink" data-htm-enabled="true"></section>"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="{{ target }}" data-htm-enabled="true"></section>"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink" data-htm-enabled="true"><aside data-htm-element="peak-monitor" data-htm-enabled="false"></aside></section>"#,
+            r#"<span id="s" data-htm-element="state-token" data-htm-bind="peak.status"></span>"#,
+            r#"<template id="p" data-htm-element="repeat" data-htm-source="peak.channels"><div></div></template>"#,
+            r#"<button id="a" data-htm-element="action-button" data-htm-action="pipewire.peaks.toggle">Toggle</button>"#,
+            r#"<input id="a" type="range" data-htm-element="range-control" data-htm-bind="item.volume" data-htm-action="pipewire.peaks.toggle">"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink" data-htm-enabled="true"><button id="a" data-htm-element="action-button" data-htm-action="pipewire.peaks.toggle" data-htm-target="pipewire.default_sink">Toggle</button></section>"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink" data-htm-enabled="true"><button id="a" data-htm-element="action-button" data-htm-action="pipewire.peaks.unknown">Toggle</button></section>"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink" data-htm-enabled="true"><template data-htm-element="repeat" data-htm-source="peak.channels"><div data-htm-local-id="row"><button data-htm-element="action-button" data-htm-local-id="a" data-htm-action="pipewire.peaks.toggle">Toggle</button></div></template></section>"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink" data-htm-enabled="true"><template data-htm-element="repeat" data-htm-source="peak.channels"><div data-htm-local-id="row"><input type="range" data-htm-element="range-control" data-htm-local-id="range" data-htm-bind="item.peak" data-htm-action="pipewire.audio.set_volume"></div></template></section>"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink" data-htm-enabled="true"><template data-htm-element="repeat" data-htm-source="peak.channels"><div id="row"></div></template></section>"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink" data-htm-enabled="true"><template data-htm-element="repeat" data-htm-source="peak.channels"><div data-htm-local-id="row"><span data-htm-element="state-text" data-htm-local-id="volume" data-htm-bind="item.volume"></span></div></template></section>"#,
+            r#"<section id="m" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink" data-htm-enabled="true"><template data-htm-element="repeat" data-htm-source="peak.channels"><div data-htm-local-id="row"><template data-htm-element="repeat" data-htm-source="peak.channels"><div data-htm-local-id="nested"></div></template></div></template></section>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><article data-htm-local-id="node"><section data-htm-element="peak-monitor" data-htm-local-id="m" data-htm-enabled="true" data-htm-target="pipewire.default_sink"></section></article></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><article data-htm-local-id="node"><input data-htm-element="peak-monitor" data-htm-local-id="m" data-htm-enabled="true"></article></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><article data-htm-local-id="node"><section data-htm-element="peak-monitor" data-htm-local-id="m" data-htm-enabled="true" data-htm-action="pipewire.peaks.toggle"></section></article></template>"#,
+            r#"<template id="channels" data-htm-element="repeat" data-htm-source="upower.devices"><article data-htm-local-id="device"><section data-htm-element="peak-monitor" data-htm-local-id="m" data-htm-enabled="true"></section></article></template>"#,
+            r#"<template id="holds" data-htm-element="repeat" data-htm-source="power_profile.holds"><article data-htm-local-id="hold"><section data-htm-element="peak-monitor" data-htm-local-id="m" data-htm-enabled="true"></section></article></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><article data-htm-local-id="node"><template data-htm-element="repeat" data-htm-source="item.channels"><div data-htm-local-id="channel"><section data-htm-element="peak-monitor" data-htm-local-id="m" data-htm-enabled="true"></section></div></template></article></template>"#,
+            r#"<template id="links" data-htm-element="repeat" data-htm-source="pipewire.links"><article data-htm-local-id="link"><section data-htm-element="peak-monitor" data-htm-local-id="m" data-htm-enabled="true"></section></article></template>"#,
+            r#"<template id="groups" data-htm-element="repeat" data-htm-source="pipewire.link_groups"><article data-htm-local-id="group"><section data-htm-element="peak-monitor" data-htm-local-id="m" data-htm-enabled="true"></section></article></template>"#,
+        ] {
+            assert!(
+                discover(invalid, BuiltInSurfaceKind::Overlay).is_err(),
+                "{invalid}"
+            );
+        }
+
+        let excessive = (0..=MAX_PIPEWIRE_PEAK_MONITORS_PER_DOCUMENT)
+            .map(|index| {
+                format!(
+                    r#"<section id="m-{index}" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink" data-htm-enabled="false"></section>"#
+                )
+            })
+            .collect::<String>();
+        assert!(discover(&excessive, BuiltInSurfaceKind::Overlay).is_err());
+
+        let excessive_enabled = (0..=MAX_PIPEWIRE_ENABLED_PEAK_MONITORS_PER_DOCUMENT)
+            .map(|index| {
+                format!(
+                    r#"<section id="m-{index}" data-htm-element="peak-monitor" data-htm-target="pipewire.default_sink" data-htm-enabled="true"></section>"#
+                )
+            })
+            .collect::<String>();
+        assert!(discover(&excessive_enabled, BuiltInSurfaceKind::Overlay).is_err());
     }
 
     #[test]

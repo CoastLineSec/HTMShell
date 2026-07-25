@@ -54,6 +54,11 @@ binding. They are independent from `item.is_sink` and `item.is_source` because
 metadata can be readable but not writable. See
 [`DefaultControls`](DefaultControls.md).
 
+`item.can_monitor_peaks` is a typed Boolean-equivalent capability. It is true
+only for a current monitorable node while PipeWire is ready. It is independent
+from audio read and write capability. An item-local `peak-monitor` uses the
+current generation-safe node as its implicit target.
+
 ## Identity and ordering
 
 Identity combines the connection generation and node global ID. Updates and keyed moves preserve the repeated subtree. Removal invalidates it.
@@ -68,3 +73,4 @@ Nodes are ordered by normalized type, media class, description, name, then raw I
 - [`Channels`](Channels.md)
 - [`NodeLinks`](NodeLinks.md)
 - [`DefaultControls`](DefaultControls.md)
+- [`PeakMonitor`](PeakMonitor.md)

@@ -76,6 +76,11 @@ are audio-control targets. Configured relationship audio values are read-only.
 Preferred-default actions update configured metadata separately; they never
 target these relationship objects or optimistically change actual defaults.
 
+Actual relationships expose `pipewire.default_sink.can_monitor_peaks` and
+`pipewire.default_source.can_monitor_peaks`. An explicit `peak-monitor` may
+target either actual relationship. Configured sink and source relationships
+cannot be monitoring targets.
+
 An actual default is the current session-policy result. A configured default
 is a stored preference. The two may differ, and changing the configured value
 does not guarantee that existing streams move.
@@ -86,3 +91,4 @@ does not guarantee that existing streams move.
 - [`AudioNode`](AudioNode.md)
 - [`AudioControls`](AudioControls.md)
 - [`DefaultControls`](DefaultControls.md)
+- [`PeakMonitor`](PeakMonitor.md)

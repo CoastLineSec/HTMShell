@@ -1,10 +1,11 @@
 use super::model::{
-    MAX_AUDIO_CHANNELS, MAX_LINKS, MAX_METADATA_VALUE_BYTES, MAX_NODE_PROPERTIES,
+    FinitePeakVector, MAX_AUDIO_CHANNELS, MAX_LINKS, MAX_METADATA_VALUE_BYTES, MAX_NODE_PROPERTIES,
     MAX_NODE_TEXT_BYTES, MAX_NODES, MAX_PROPERTY_KEY_BYTES, MAX_PROPERTY_VALUE_BYTES,
-    MAX_STAGED_DELTAS, PipeWireDelta, PipeWireLinkState, PipeWireNodeState,
-    PipeWireResourceCounters, RawLinkInfo, RawNodeAudioInfo, RawNodeInfo,
+    MAX_STAGED_DELTAS, PipeWireDelta, PipeWireLinkState, PipeWireNodeState, PipeWirePeakEvent,
+    PipeWirePeakSamples, PipeWireResourceCounters, RawLinkInfo, RawNodeAudioInfo, RawNodeInfo,
 };
 use super::public::PipeWireDemand;
+use htm_runtime::MAX_PIPEWIRE_ACTIVE_PEAK_STREAMS;
 use pipewire::context::ContextRc;
 use pipewire::core::{CoreRc, PW_ID_CORE};
 use pipewire::link::{Link, LinkListener};
@@ -15,13 +16,17 @@ use pipewire::permissions::PermissionFlags;
 use pipewire::properties::PropertiesBox;
 use pipewire::registry::{GlobalObject, RegistryRc};
 use pipewire::spa::param::ParamType;
+use pipewire::spa::param::audio::{AudioFormat, AudioInfoRaw, AudioInfoRawFlags};
 use pipewire::spa::pod::deserialize::PodDeserializer;
 use pipewire::spa::pod::serialize::PodSerializer;
 use pipewire::spa::pod::{Object, Pod, Property, Value, ValueArray};
+use pipewire::spa::utils::Direction;
 use pipewire::spa::utils::dict::DictRef;
+use pipewire::stream::{StreamFlags, StreamListener, StreamRc, StreamState};
 use pipewire::types::ObjectType;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::convert::TryInto;
 use std::ffi::CStr;
 use std::io::Cursor;
 use std::os::fd::AsRawFd;
@@ -113,6 +118,104 @@ struct BoundMetadata {
     proxy: Metadata,
 }
 
+#[derive(Debug)]
+struct PeakCallbackStaging {
+    events: Vec<PipeWirePeakEvent>,
+    latest: Vec<(u32, PipeWirePeakSamples)>,
+    callbacks: u64,
+    coalesced: u64,
+}
+
+impl Default for PeakCallbackStaging {
+    fn default() -> Self {
+        Self {
+            events: Vec::new(),
+            latest: Vec::with_capacity(MAX_PIPEWIRE_ACTIVE_PEAK_STREAMS),
+            callbacks: 0,
+            coalesced: 0,
+        }
+    }
+}
+
+impl PeakCallbackStaging {
+    fn push_event(&mut self, event: PipeWirePeakEvent) {
+        if self.events.len() < MAX_STAGED_DELTAS {
+            self.events.push(event);
+        }
+    }
+
+    fn push_samples(&mut self, raw_id: u32, samples: PipeWirePeakSamples) {
+        self.callbacks = self.callbacks.saturating_add(1);
+        if let Some((_, current)) = self.latest.iter_mut().find(|(id, _)| *id == raw_id) {
+            *current = samples;
+            self.coalesced = self.coalesced.saturating_add(1);
+        } else if self.latest.len() < MAX_PIPEWIRE_ACTIVE_PEAK_STREAMS {
+            self.latest.push((raw_id, samples));
+        }
+    }
+
+    fn take(&mut self) -> (Vec<PipeWirePeakEvent>, Vec<PipeWirePeakSamples>) {
+        (
+            std::mem::take(&mut self.events),
+            self.latest.drain(..).map(|(_, samples)| samples).collect(),
+        )
+    }
+}
+
+struct PeakStreamUserData {
+    raw_id: u32,
+    stream_generation: u64,
+    layout_generation: u64,
+    format: AudioInfoRaw,
+    staging: Rc<RefCell<PeakCallbackStaging>>,
+}
+
+struct BoundPeakStream {
+    _listener: StreamListener<PeakStreamUserData>,
+    _stream: StreamRc,
+}
+
+fn calculate_interleaved_peaks(
+    bytes: &[u8],
+    offset: usize,
+    size: usize,
+    stride: i32,
+    channels: usize,
+) -> Option<FinitePeakVector> {
+    if channels == 0 || channels > MAX_AUDIO_CHANNELS {
+        return None;
+    }
+    let expected_stride = channels.checked_mul(std::mem::size_of::<f32>())?;
+    if stride > 0 && usize::try_from(stride).ok()? != expected_stride {
+        return None;
+    }
+    let end = offset.checked_add(size)?;
+    if end > bytes.len() || !size.is_multiple_of(std::mem::size_of::<f32>()) {
+        return None;
+    }
+    let samples = &bytes[offset..end];
+    let sample_count = samples.len() / std::mem::size_of::<f32>();
+    if sample_count == 0 || !sample_count.is_multiple_of(channels) {
+        return None;
+    }
+    let mut maxima = [0.0f32; MAX_AUDIO_CHANNELS];
+    for (index, sample) in samples.chunks_exact(4).enumerate() {
+        let value = f32::from_le_bytes(sample.try_into().expect("four-byte chunk"));
+        if value.is_finite() {
+            let channel = index % channels;
+            maxima[channel] = maxima[channel].max(value.abs());
+        }
+    }
+    FinitePeakVector::from_maxima(&maxima[..channels])
+}
+
+pub(crate) fn is_permission_denial(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("permission")
+        || message.contains("access denied")
+        || message.contains("not permitted")
+}
+
 #[derive(Clone)]
 struct KnownNode {
     global: Rc<GlobalObject<PropertiesBox>>,
@@ -157,6 +260,8 @@ pub(crate) struct PipeWireTransport {
     _context: ContextRc,
     main_loop: MainLoopRc,
     staging: Rc<RefCell<CallbackStaging>>,
+    peak_staging: Rc<RefCell<PeakCallbackStaging>>,
+    peak_streams: HashMap<u32, BoundPeakStream>,
     demand: Rc<RefCell<PipeWireDemand>>,
     resources: PipeWireResourceCounters,
 }
@@ -177,6 +282,7 @@ impl PipeWireTransport {
             .get_registry_rc()
             .map_err(|error| format!("get PipeWire registry: {error}"))?;
         let staging = Rc::new(RefCell::new(CallbackStaging::default()));
+        let peak_staging = Rc::new(RefCell::new(PeakCallbackStaging::default()));
         let objects = Rc::new(RefCell::new(BoundObjects::default()));
         let demand = Rc::new(RefCell::new(demand));
 
@@ -282,6 +388,8 @@ impl PipeWireTransport {
             _context: context,
             main_loop,
             staging,
+            peak_staging,
+            peak_streams: HashMap::new(),
             demand,
             resources: PipeWireResourceCounters::default(),
         })
@@ -492,10 +600,225 @@ impl PipeWireTransport {
         staging.take()
     }
 
+    pub(crate) fn take_peak_staged(
+        &mut self,
+    ) -> (Vec<PipeWirePeakEvent>, Vec<PipeWirePeakSamples>) {
+        let staging = self.peak_staging.borrow();
+        self.resources.peak_process_callbacks = staging.callbacks;
+        self.resources.peak_callbacks_coalesced = staging.coalesced;
+        drop(staging);
+        self.peak_staging.borrow_mut().take()
+    }
+
     pub(crate) fn resources(&self) -> PipeWireResourceCounters {
         let mut resources = self.resources.clone();
         self.objects.borrow().update_counters(&mut resources);
+        resources.peak_stream_count = self.peak_streams.len();
         resources
+    }
+
+    pub(crate) fn record_peak_publications(&mut self, count: u64) {
+        self.resources.peak_vectors_published =
+            self.resources.peak_vectors_published.saturating_add(count);
+    }
+
+    pub(crate) fn record_peak_duplicate(&mut self) {
+        self.resources.peak_duplicate_vectors_suppressed = self
+            .resources
+            .peak_duplicate_vectors_suppressed
+            .saturating_add(1);
+    }
+
+    pub(crate) fn start_peak_stream(
+        &mut self,
+        raw_id: u32,
+        stream_generation: u64,
+        target: &str,
+        capture_sink: bool,
+    ) -> Result<(), String> {
+        if self.peak_streams.contains_key(&raw_id) {
+            return Ok(());
+        }
+        if target.is_empty() || target.len() > MAX_NODE_TEXT_BYTES || target.contains('\0') {
+            return Err("PipeWire peak target is invalid".into());
+        }
+        let mut properties = pipewire::properties::properties! {
+            "media.type" => "Audio",
+            "media.category" => "Monitor",
+            "media.name" => "Peak detect",
+            "application.name" => "HTMShell Peak Detect",
+            "stream.monitor" => "true",
+            "target.object" => target,
+        };
+        if capture_sink {
+            properties.insert("stream.capture.sink", "true");
+        }
+        let stream = StreamRc::new(self.core.clone(), "htmshell-peak-monitor", properties)
+            .map_err(|error| format!("create PipeWire peak stream: {error}"))?;
+        let user_data = PeakStreamUserData {
+            raw_id,
+            stream_generation,
+            layout_generation: 0,
+            format: AudioInfoRaw::new(),
+            staging: self.peak_staging.clone(),
+        };
+        let listener = stream
+            .add_local_listener_with_user_data(user_data)
+            .state_changed(|_, data, _, new| match new {
+                StreamState::Connecting => {
+                    data.staging
+                        .borrow_mut()
+                        .push_event(PipeWirePeakEvent::Starting {
+                            raw_id: data.raw_id,
+                            stream_generation: data.stream_generation,
+                        })
+                }
+                StreamState::Error(message) => {
+                    data.staging
+                        .borrow_mut()
+                        .push_event(PipeWirePeakEvent::Failed {
+                            raw_id: data.raw_id,
+                            stream_generation: data.stream_generation,
+                            denied: is_permission_denial(&message),
+                        });
+                }
+                StreamState::Unconnected => {
+                    data.staging
+                        .borrow_mut()
+                        .push_event(PipeWirePeakEvent::Failed {
+                            raw_id: data.raw_id,
+                            stream_generation: data.stream_generation,
+                            denied: false,
+                        });
+                }
+                StreamState::Paused | StreamState::Streaming => {}
+            })
+            .param_changed(|_, data, id, param| {
+                if id != ParamType::Format.as_raw() {
+                    return;
+                }
+                let Some(param) = param else {
+                    data.format = AudioInfoRaw::new();
+                    return;
+                };
+                let mut format = AudioInfoRaw::new();
+                if format.parse(param).is_err()
+                    || format.format() != AudioFormat::F32LE
+                    || format.channels() == 0
+                    || format.channels() as usize > MAX_AUDIO_CHANNELS
+                {
+                    data.staging
+                        .borrow_mut()
+                        .push_event(PipeWirePeakEvent::Failed {
+                            raw_id: data.raw_id,
+                            stream_generation: data.stream_generation,
+                            denied: false,
+                        });
+                    return;
+                }
+                data.format = format;
+                data.layout_generation = data.layout_generation.saturating_add(1);
+                let channels = format.channels() as usize;
+                let positions = if format.flags().contains(AudioInfoRawFlags::UNPOSITIONED) {
+                    vec![0; channels]
+                } else {
+                    format.position()[..channels].to_vec()
+                };
+                data.staging
+                    .borrow_mut()
+                    .push_event(PipeWirePeakEvent::Format {
+                        raw_id: data.raw_id,
+                        stream_generation: data.stream_generation,
+                        layout_generation: data.layout_generation,
+                        positions,
+                    });
+            })
+            .process(|stream, data| {
+                let Some(mut buffer) = stream.dequeue_buffer() else {
+                    return;
+                };
+                let channels = data.format.channels() as usize;
+                if data.format.format() != AudioFormat::F32LE
+                    || channels == 0
+                    || channels > MAX_AUDIO_CHANNELS
+                {
+                    return;
+                }
+                let Some(spa_data) = buffer.datas_mut().first_mut() else {
+                    return;
+                };
+                let chunk = spa_data.chunk();
+                let offset = chunk.offset() as usize;
+                let size = chunk.size() as usize;
+                let stride = chunk.stride();
+                let Some(bytes) = spa_data.data() else {
+                    return;
+                };
+                let Some(peaks) =
+                    calculate_interleaved_peaks(bytes, offset, size, stride, channels)
+                else {
+                    return;
+                };
+                data.staging.borrow_mut().push_samples(
+                    data.raw_id,
+                    PipeWirePeakSamples {
+                        raw_id: data.raw_id,
+                        stream_generation: data.stream_generation,
+                        layout_generation: data.layout_generation,
+                        peaks,
+                    },
+                );
+            })
+            .register()
+            .map_err(|error| format!("listen to PipeWire peak stream: {error}"))?;
+
+        let mut audio_info = AudioInfoRaw::new();
+        audio_info.set_format(AudioFormat::F32LE);
+        let value = Value::Object(Object {
+            type_: pipewire::spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+            id: ParamType::EnumFormat.as_raw(),
+            properties: audio_info.into(),
+        });
+        let bytes = PodSerializer::serialize(Cursor::new(Vec::new()), &value)
+            .map_err(|error| format!("serialize peak stream format: {error:?}"))?
+            .0
+            .into_inner();
+        let pod = Pod::from_bytes(&bytes)
+            .ok_or_else(|| "serialized peak stream format is invalid".to_owned())?;
+        let flags = StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS;
+        stream
+            .connect(Direction::Input, None, flags, &mut [pod])
+            .map_err(|error| format!("connect PipeWire peak stream: {error}"))?;
+        self.peak_streams.insert(
+            raw_id,
+            BoundPeakStream {
+                _listener: listener,
+                _stream: stream,
+            },
+        );
+        self.resources.peak_stream_starts = self.resources.peak_stream_starts.saturating_add(1);
+        self.peak_staging
+            .borrow_mut()
+            .push_event(PipeWirePeakEvent::Starting {
+                raw_id,
+                stream_generation,
+            });
+        Ok(())
+    }
+
+    pub(crate) fn stop_peak_stream(&mut self, raw_id: u32) -> bool {
+        if self.peak_streams.remove(&raw_id).is_some() {
+            self.resources.peak_stream_stops = self.resources.peak_stream_stops.saturating_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn stop_all_peak_streams(&mut self) {
+        let count = self.peak_streams.len() as u64;
+        self.peak_streams.clear();
+        self.resources.peak_stream_stops = self.resources.peak_stream_stops.saturating_add(count);
     }
 
     pub(crate) fn set_node_mute(&self, raw_id: u32, muted: bool) -> Result<(), String> {
@@ -1225,5 +1548,72 @@ mod tests {
         .unwrap();
         let pod = Pod::from_bytes(&bytes).unwrap();
         assert!(parse_audio_properties(7, pod).is_err());
+    }
+
+    #[test]
+    fn peak_callback_calculation_is_ordered_perceptual_and_bounded() {
+        let samples = [0.0f32, -0.125, 1.0, 0.064, f32::NAN, -8.0];
+        let bytes = samples
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let peaks = calculate_interleaved_peaks(&bytes, 0, bytes.len(), 8, 2).unwrap();
+        let peaks = peaks.as_slice();
+        assert_eq!(peaks.len(), 2);
+        assert!((peaks[0].get() - 1.0).abs() < f32::EPSILON);
+        assert!((peaks[1].get() - 2.0).abs() < f32::EPSILON);
+
+        assert!(calculate_interleaved_peaks(&[], 0, 0, 8, 2).is_none());
+        assert!(calculate_interleaved_peaks(&bytes, 0, bytes.len(), 4, 2).is_none());
+        assert!(calculate_interleaved_peaks(&bytes, 1, bytes.len(), 8, 2).is_none());
+        assert!(calculate_interleaved_peaks(&bytes, 0, bytes.len() - 4, 8, 2).is_none());
+        assert!(
+            calculate_interleaved_peaks(&bytes, 0, bytes.len(), 8, MAX_AUDIO_CHANNELS + 1)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn peak_callback_staging_retains_only_the_latest_vector_per_node() {
+        let mut staging = PeakCallbackStaging::default();
+        for value in 0..1_000u32 {
+            staging.push_samples(
+                42,
+                PipeWirePeakSamples {
+                    raw_id: 42,
+                    stream_generation: 7,
+                    layout_generation: 3,
+                    peaks: FinitePeakVector::from_perceptual(&[value as f32]).unwrap(),
+                },
+            );
+        }
+        staging.push_samples(
+            43,
+            PipeWirePeakSamples {
+                raw_id: 43,
+                stream_generation: 8,
+                layout_generation: 1,
+                peaks: FinitePeakVector::from_perceptual(&[0.5]).unwrap(),
+            },
+        );
+        let (events, samples) = staging.take();
+        assert!(events.is_empty());
+        assert_eq!(samples.len(), 2);
+        assert_eq!(staging.callbacks, 1_001);
+        assert_eq!(staging.coalesced, 999);
+        assert!(
+            samples
+                .iter()
+                .any(|sample| { sample.raw_id == 42 && sample.peaks.as_slice()[0].get() == 999.0 })
+        );
+    }
+
+    #[test]
+    fn peak_permission_errors_are_classified_without_guessing_other_failures() {
+        assert!(is_permission_denial("Permission denied"));
+        assert!(is_permission_denial("access denied"));
+        assert!(is_permission_denial("operation not permitted"));
+        assert!(!is_permission_denial("format negotiation failed"));
+        assert!(!is_permission_denial("node was removed"));
     }
 }

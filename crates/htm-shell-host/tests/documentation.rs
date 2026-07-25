@@ -10,9 +10,13 @@ use htm_runtime::{
     MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_ITEM, MAX_PIPEWIRE_GRAPH_BINDINGS_PER_ITEM,
     MAX_PIPEWIRE_LINK_GROUP_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_PIPEWIRE_LINK_GROUPS_PER_PROCESS,
     MAX_PIPEWIRE_LINK_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_PIPEWIRE_LINKS_PER_PROCESS,
-    MAX_PIPEWIRE_PERCEPTUAL_VOLUME, MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM,
-    MAX_RANGE_CONTROLS_PER_DOCUMENT, MAX_RANGE_CONTROLS_PER_ITEM, RepeatSource, ShellAction,
-    StateBindingKey, StateToken, StateValueFormat, built_in_registry_names,
+    MAX_PIPEWIRE_PEAK_ACTIONS_PER_MONITOR, MAX_PIPEWIRE_PEAK_BINDINGS_PER_MONITOR,
+    MAX_PIPEWIRE_PEAK_CHANNEL_BINDINGS_PER_ITEM, MAX_PIPEWIRE_PEAK_CHANNEL_REPEATS_PER_MONITOR,
+    MAX_PIPEWIRE_PEAK_CHANNELS_PER_STREAM, MAX_PIPEWIRE_PEAK_MONITORS_PER_DOCUMENT,
+    MAX_PIPEWIRE_PEAK_MONITORS_PER_ITEM, MAX_PIPEWIRE_PERCEPTUAL_VOLUME,
+    MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM, MAX_RANGE_CONTROLS_PER_DOCUMENT,
+    MAX_RANGE_CONTROLS_PER_ITEM, PeakBindingKey, RepeatSource, ShellAction, StateBindingKey,
+    StateToken, StateValueFormat, built_in_registry_names,
 };
 use htm_shell_host::{
     PerformanceDegradationReason, PipeWireAudioChannelPosition, PipeWireNodeDirection,
@@ -186,7 +190,7 @@ fn public_documentation_style_is_safe_and_page_shape_is_stable() {
 fn typed_public_names_are_covered_by_the_reference() {
     let root = workspace_root();
     let reference = read_joined(&markdown_files(&root.join("docs/types")));
-    assert_eq!(built_in_registry_names().len(), 7);
+    assert_eq!(built_in_registry_names().len(), 8);
 
     for name in built_in_registry_names() {
         assert!(
@@ -236,6 +240,13 @@ fn typed_public_names_are_covered_by_the_reference() {
             binding.as_str()
         );
     }
+    for binding in PeakBindingKey::ALL {
+        assert!(
+            documented_name(&reference, binding.as_str()),
+            "peak binding is undocumented: {}",
+            binding.as_str()
+        );
+    }
     for format in StateValueFormat::ALL {
         assert!(
             documented_name(&reference, format.as_str()),
@@ -250,6 +261,7 @@ fn typed_public_names_are_covered_by_the_reference() {
         "data-htm-enabled-bind",
         "data-htm-property-key",
         "data-htm-state",
+        "data-htm-enabled",
         "min",
         "max",
         "step",
@@ -452,6 +464,61 @@ fn typed_public_names_are_covered_by_the_reference() {
 }
 
 #[test]
+fn peak_monitor_reference_example_and_limits_are_complete() {
+    let root = workspace_root();
+    let reference = read_joined(&markdown_files(&root.join("docs/types")));
+    let guide = fs::read_to_string(root.join("docs/guide/audio.md")).unwrap();
+    let example = fs::read_to_string(root.join("examples/audio-inspector/overlay.html")).unwrap();
+    let css = fs::read_to_string(root.join("examples/audio-inspector/style.css")).unwrap();
+    let public = format!("{reference}\n{guide}");
+
+    for name in [
+        "peak-monitor",
+        "peak.channels",
+        "pipewire.peaks.enable",
+        "pipewire.peaks.disable",
+        "pipewire.peaks.toggle",
+        "item.can_monitor_peaks",
+        "pipewire.default_sink.can_monitor_peaks",
+        "pipewire.default_source.can_monitor_peaks",
+        "disabled",
+        "suspended",
+        "unavailable",
+        "starting",
+        "ready",
+        "failed",
+        "capture-adjacent",
+        "raw samples",
+        "60 per second",
+    ] {
+        assert!(public.contains(name), "missing peak documentation: {name}");
+    }
+
+    assert!(example.contains(r#"data-htm-target="pipewire.default_sink""#));
+    assert!(example.contains(r#"data-htm-target="pipewire.default_source""#));
+    assert!(example.contains(r#"data-htm-enabled="true""#));
+    assert!(example.contains(r#"data-htm-enabled="false""#));
+    assert!(example.contains("capture-adjacent"));
+    assert!(css.contains(r#"[data-htm-state="starting"]"#));
+    assert!(css.contains(r#"[data-htm-state="suspended"]"#));
+
+    for limit in [
+        MAX_PIPEWIRE_PEAK_MONITORS_PER_DOCUMENT,
+        MAX_PIPEWIRE_PEAK_MONITORS_PER_ITEM,
+        MAX_PIPEWIRE_PEAK_ACTIONS_PER_MONITOR,
+        MAX_PIPEWIRE_PEAK_CHANNEL_REPEATS_PER_MONITOR,
+        MAX_PIPEWIRE_PEAK_BINDINGS_PER_MONITOR,
+        MAX_PIPEWIRE_PEAK_CHANNEL_BINDINGS_PER_ITEM,
+        MAX_PIPEWIRE_PEAK_CHANNELS_PER_STREAM,
+    ] {
+        assert!(
+            public.contains(&limit.to_string()),
+            "peak limit is undocumented: {limit}"
+        );
+    }
+}
+
+#[test]
 fn documented_manifests_validate_without_wayland() {
     let root = workspace_root();
     for path in [
@@ -513,16 +580,18 @@ fn audio_example_uses_only_the_typed_control_surface() {
         "item.can_set_preferred_source",
         "pipewire.configured_sink.can_clear",
         "pipewire.configured_source.can_clear",
+        "peak-monitor",
+        "peak.channels",
+        "pipewire.peaks.enable",
+        "pipewire.peaks.disable",
+        "pipewire.peaks.toggle",
+        "peak.maximum",
         "pending",
         "failed",
     ] {
         assert!(example.contains(name), "audio example omits `{name}`");
     }
-    for forbidden in [
-        "pipewire.configured_sink\"",
-        "pipewire.configured_source\"",
-        "pipewire.peaks",
-    ] {
+    for forbidden in ["pipewire.configured_sink\"", "pipewire.configured_source\""] {
         assert!(
             !overlay.contains(forbidden),
             "audio example uses forbidden control surface `{forbidden}`"

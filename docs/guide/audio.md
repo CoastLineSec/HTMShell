@@ -367,6 +367,104 @@ forms of one contextual level. The inner `item.*` shadows the outer scope.
 They cannot be nested inside one another and there is no `parent.*`, `../`,
 selector, interpolation, or arbitrary relation syntax.
 
+## Explicit peak monitoring
+
+Peak monitoring is capture-adjacent work and is never activated by ordinary
+node, volume, mute, channel, link, or default bindings. An author must declare
+`peak-monitor` on a `div`, `section`, `article`, or `aside`, and must provide a
+literal `data-htm-enabled="true"` or `data-htm-enabled="false"`.
+
+Outside a repeat, a monitor targets only the actual default sink or source:
+
+```html
+<section id="output-peaks"
+         data-htm-element="peak-monitor"
+         data-htm-target="pipewire.default_sink"
+         data-htm-enabled="true">
+  <span id="peak-status"
+        data-htm-element="state-token"
+        data-htm-bind="peak.status"></span>
+  <data id="peak-maximum"
+        data-htm-element="state-value"
+        data-htm-bind="peak.maximum"
+        data-htm-format="percent"></data>
+  <button id="peak-toggle"
+          data-htm-element="action-button"
+          data-htm-action="pipewire.peaks.toggle">
+    Toggle output monitor
+  </button>
+  <template data-htm-element="repeat"
+            data-htm-source="peak.channels">
+    <div class="peak-channel">
+      <span data-htm-element="state-text"
+            data-htm-local-id="name"
+            data-htm-bind="item.position_name"></span>
+      <data data-htm-element="state-value"
+            data-htm-local-id="peak"
+            data-htm-bind="item.peak"
+            data-htm-format="percent"></data>
+    </div>
+  </template>
+</section>
+```
+
+Inside `pipewire.nodes`, omit `data-htm-target`. The current node item is the
+implicit generation-safe target. An item-local declaration can read
+`item.can_monitor_peaks` outside its local peak scope. Actual defaults expose
+`pipewire.default_sink.can_monitor_peaks` and
+`pipewire.default_source.can_monitor_peaks`. Configured defaults, raw IDs,
+node names, DOM IDs, selectors, and dynamic targets are rejected.
+
+`peak.status` and the monitor element's runtime-owned `data-htm-state` use
+`disabled`, `suspended`, `unavailable`, `starting`, `ready`, and `failed`.
+`peak.enabled` is the declaration's requested state. `peak.active` means its
+shared stream is active. `peak.can_enable` and `peak.can_disable` describe the
+exact declaration controls. `peak.maximum` is the maximum latest channel peak,
+and `peak.channel_count` is the ready monitor layout size. Disabled, suspended,
+unavailable, starting, and failed declarations do not present a synthetic zero
+signal.
+
+The actions `pipewire.peaks.enable`, `pipewire.peaks.disable`, and
+`pipewire.peaks.toggle` are valid only on `action-button` descendants of the
+monitor. They have no target attribute and affect only that declaration.
+Buttons retain the standard `idle`, `pending`, `failed`, and `unavailable`
+control states.
+
+An enabled declaration contributes demand only while its surface is mapped.
+Closing a retained overlay changes it to `suspended` and releases its stream
+demand. Reopening restores demand. Several mapped declarations, documents, or
+outputs targeting the same generation-safe node share one process stream. The
+final active consumer tears that stream down within the event-loop cycle.
+
+The stream supplies F32 channel samples to a bounded callback. HTMShell
+retains only each channel's scalar absolute peak after the audited cube-root
+mapping. Raw buffers are returned immediately and never enter HTML, disk,
+history, or a network path. `1.0` is upstream full scale; finite values above
+`1.0` remain representable. There is no smoothing, decay, RMS, waveform,
+spectrum, or FFT service value.
+
+`peak.channels` is valid only inside a monitor and cannot contain actions,
+controls, clocks, monitors, or another repeat. Its ordered items expose
+`item.position`, `item.position_name`, `item.index`, `item.peak`,
+`item.status`, `item.is_auxiliary`, and `item.is_custom`. Position tokens and
+names use the same complete SPA inventory as audio channels, including
+auxiliary, custom, and `unknown` values. Peak layout identity is separate from
+volume-channel identity. Peak-only updates retain clone identity; a stream
+restart, count change, reorder, or position change replaces it.
+
+Audio callbacks stage only the latest vector. Publications are bounded to at
+most 60 per second per active node, duplicate vectors are suppressed, and
+several dirty nodes can reconcile in one event-loop batch. Closed and
+unrelated surfaces receive no peak frame. Stream failure retries while active
+demand remains at 250 milliseconds, 1 second, 5 seconds, then at most every 30
+seconds. Disabling, closing, target removal, or reconnect cancels stale work.
+
+Monitoring a source or microphone can be considered audio capture by session
+policy and may activate a platform capture indicator. The server may deny it.
+Denial and stream errors are contained to monitor state; all non-peak PipeWire
+features remain usable. No permission bypass, recording, persistence, or
+transmission occurs.
+
 ## Demand and limits
 
 Documents activate only the PipeWire state they consume. Audio parameter subscriptions and write coordinators are shared process-wide. Removing the final audio consumer releases audio demand. Closed retained overlays may update without receiving a frame.
@@ -415,12 +513,20 @@ Limits include:
 - one pending mute intent and one pending volume intent per node
 - one in-flight request and one latest queued request per default role
 - 4,096 interested preferred-default control identities process-wide
+- 64 peak monitors and 32 initially enabled peak monitors per document
+- 4 peak monitors per repeated node item
+- 8 peak action buttons and 4 `peak.channels` repeats per monitor
+- 128 monitor bindings and 64 peak-channel bindings per item
+- 256 active shared streams and 64 channels per stream process-wide
+- 256 monitor declarations per target node
+- 4,096 mapped monitor declaration identities process-wide
+- at most 60 peak publications per second per active node
 - a two-second confirmation timeout
 
 ## Current limitations
 
-Channel mute, channel-map writes, link mutation, peak monitoring, stream
-movement, arbitrary graph queries, and spatial graph rendering are not
-available.
+Channel mute, channel-map writes, link mutation, stream movement, arbitrary
+graph queries, spatial graph rendering, waveforms, spectra, FFT, persistent
+peak history, recording, and arbitrary media capture are not available.
 
 See the tracked [audio inspector dashboard](../../examples/audio-inspector/shell.json).

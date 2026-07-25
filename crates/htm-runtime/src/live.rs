@@ -2,9 +2,10 @@ use crate::adapter::{elapsed_ms, render_rgba_scaled, resolve_resources, validate
 use crate::builtin::{
     BindingUpdate, BuiltInElementIndex, BuiltInElementKind, BuiltInElementSummary,
     BuiltInSurfaceKind, ClockDeclaration, DATETIME_ATTRIBUTE, ElementDeclaration,
-    ElementInstanceId, PipeWireControlTarget, RangeControlDeclaration, RepeatDeclaration,
-    RepeatedElementDeclaration, STATE_ATTRIBUTE, ShellAction, StateBindingKey, StateToken,
-    StateValueKind, ensure_registry_valid,
+    ElementInstanceId, PeakBindingKey, PeakMonitorDeclaration, PeakMonitorTarget,
+    PeakScopedElementDeclaration, PipeWireControlTarget, RangeControlDeclaration,
+    RepeatDeclaration, RepeatedElementDeclaration, STATE_ATTRIBUTE, ShellAction, StateBindingKey,
+    StateToken, StateValueKind, ensure_registry_valid,
 };
 use crate::identity::IdentityRegistry;
 use crate::model::{DiagnosticMessage, LogicalRect, ViewportSpec};
@@ -126,6 +127,7 @@ pub enum LiveAction {
     PowerProfileSetPerformance,
     PipeWireAudio(PipeWireControlRequest),
     PipeWireDefault(PipeWireDefaultControlRequest),
+    PipeWirePeak(PipeWirePeakActionRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +157,82 @@ pub enum PipeWireControlLocator {
         channel_item_key: String,
         local_id: String,
     },
+    Peak {
+        monitor: PipeWirePeakMonitorLocator,
+        local_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PipeWirePeakMonitorLocator {
+    Element(String),
+    Repeated {
+        repeat_id: String,
+        item_key: String,
+        local_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PipeWirePeakMonitorIdentity {
+    pub document_generation: ExperimentalDocumentIdentity,
+    pub locator: PipeWirePeakMonitorLocator,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PipeWirePeakTarget {
+    NodeItem {
+        source_generation: u64,
+        item_key: String,
+    },
+    DefaultSink,
+    DefaultSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PipeWirePeakDeclarationDemand {
+    pub monitor: PipeWirePeakMonitorIdentity,
+    pub target: PipeWirePeakTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipeWirePeakOperation {
+    Enable,
+    Disable,
+    Toggle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeWirePeakActionRequest {
+    pub control: PipeWireControlIdentity,
+    pub monitor: PipeWirePeakMonitorIdentity,
+    pub operation: PipeWirePeakOperation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipeWirePeakStreamState {
+    Starting,
+    Ready,
+    Failed,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PipeWirePeakProjection {
+    pub node_item_key: String,
+    pub stream_generation: u64,
+    pub layout_generation: u64,
+    pub state: PipeWirePeakStreamState,
+    pub maximum: NumericValue,
+    pub channels: crate::ContextualRepeatSnapshot,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PipeWirePeakProjectionSet {
+    pub default_sink_item_key: Option<String>,
+    pub default_source_item_key: Option<String>,
+    pub monitorable_nodes: BTreeSet<String>,
+    pub nodes: BTreeMap<String, PipeWirePeakProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -308,6 +386,13 @@ impl LiveAction {
                     "preferred-default node selection requires a repeated item identity".into(),
                 ));
             }
+            ShellAction::PipeWirePeaksEnable
+            | ShellAction::PipeWirePeaksDisable
+            | ShellAction::PipeWirePeaksToggle => {
+                return Err(RuntimeError::InvalidMutationTarget(
+                    "peak actions require a peak-monitor identity".into(),
+                ));
+            }
         })
     }
 }
@@ -423,6 +508,7 @@ pub struct LiveDocument {
     pressed_action: Option<PendingActivation>,
     pressed_range: Option<PendingRange>,
     pending_action: Option<LiveAction>,
+    peak_monitors: BTreeMap<String, LivePeakMonitor>,
     click_count: u64,
     measurements: LiveRuntimeMeasurements,
     diagnostics: Vec<DiagnosticMessage>,
@@ -439,6 +525,50 @@ struct LiveRepeatedItem {
     root: ExperimentalNodeIdentity,
     elements: Vec<LiveRepeatedElement>,
     contextual_repeats: BTreeMap<String, LiveContextualRepeat>,
+    peak_monitors: BTreeMap<String, LivePeakMonitor>,
+}
+
+#[derive(Debug, Clone)]
+struct LivePeakElement {
+    declaration: PeakScopedElementDeclaration,
+    node: ExperimentalNodeIdentity,
+    control_state: PipeWireControlState,
+}
+
+#[derive(Debug, Clone)]
+struct LivePeakMonitor {
+    declaration: PeakMonitorDeclaration,
+    identity: PipeWirePeakMonitorIdentity,
+    root: ExperimentalNodeIdentity,
+    elements: Vec<LivePeakElement>,
+    channel_repeats: BTreeMap<String, LiveContextualRepeat>,
+    enabled: bool,
+    last_status: PipeWirePeakMonitorStatus,
+    target_item_key: Option<String>,
+    stream_generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipeWirePeakMonitorStatus {
+    Disabled,
+    Suspended,
+    Unavailable,
+    Starting,
+    Ready,
+    Failed,
+}
+
+impl PipeWirePeakMonitorStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Suspended => "suspended",
+            Self::Unavailable => "unavailable",
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -457,6 +587,183 @@ struct LiveRepeat {
     source_generation: u64,
     items: BTreeMap<String, LiveRepeatedItem>,
     order: Vec<String>,
+}
+
+fn instantiate_peak_monitor(
+    document: &HtmlDocument,
+    identities: &IdentityRegistry,
+    declaration: PeakMonitorDeclaration,
+    root: ExperimentalNodeIdentity,
+    identity: PipeWirePeakMonitorIdentity,
+) -> Result<LivePeakMonitor, RuntimeError> {
+    let root_slot = identities.resolve(document, root)?;
+    let slots = subtree_slots(document, root_slot)?;
+    if slots.len() != declaration.prototype_nodes {
+        return Err(RuntimeError::InvalidMutationTarget(format!(
+            "peak monitor `{}` contains {} nodes; expected {}",
+            declaration.id,
+            slots.len(),
+            declaration.prototype_nodes
+        )));
+    }
+    let nodes = slots
+        .iter()
+        .map(|slot| identities.identity_for_slot(document, *slot))
+        .collect::<Result<Vec<_>, _>>()?;
+    let elements = declaration
+        .descendants
+        .iter()
+        .map(|descendant| {
+            nodes
+                .get(descendant.prototype_order)
+                .copied()
+                .map(|node| LivePeakElement {
+                    declaration: descendant.clone(),
+                    node,
+                    control_state: PipeWireControlState::Idle,
+                })
+                .ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "peak monitor descendant `{}` has an invalid prototype position",
+                        descendant.local_id
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut channel_repeats = BTreeMap::new();
+    for channel in &declaration.channel_repeats {
+        let template_node = nodes
+            .get(channel.template_prototype_order)
+            .copied()
+            .ok_or_else(|| {
+                RuntimeError::InvalidMutationTarget(format!(
+                    "peak channel repeat `{}` has an invalid template position",
+                    channel.id
+                ))
+            })?;
+        let template_slot = identities.resolve(document, template_node)?;
+        let prototype_root_slot = template_root_element(document, template_slot)?;
+        let prototype_root = identities.identity_for_slot(document, prototype_root_slot)?;
+        channel_repeats.insert(
+            channel.id.clone(),
+            LiveContextualRepeat {
+                declaration: crate::ContextualRepeatDeclaration {
+                    id: channel.id.clone(),
+                    source: crate::ContextualRepeatSource::Channels,
+                    template_prototype_order: channel.template_prototype_order,
+                    descendants: channel.descendants.clone(),
+                    prototype_nodes: channel.prototype_nodes,
+                },
+                template_node,
+                prototype_root,
+                source_generation: 0,
+                items: BTreeMap::new(),
+                order: Vec::new(),
+            },
+        );
+    }
+    let enabled = declaration.enabled;
+    Ok(LivePeakMonitor {
+        declaration,
+        identity,
+        root,
+        elements,
+        channel_repeats,
+        enabled,
+        last_status: if enabled {
+            PipeWirePeakMonitorStatus::Suspended
+        } else {
+            PipeWirePeakMonitorStatus::Disabled
+        },
+        target_item_key: None,
+        stream_generation: 0,
+    })
+}
+
+fn instantiate_repeated_peak_monitor(
+    document: &HtmlDocument,
+    identities: &IdentityRegistry,
+    declaration: PeakMonitorDeclaration,
+    clone_identities: &[ExperimentalNodeIdentity],
+    identity: PipeWirePeakMonitorIdentity,
+) -> Result<LivePeakMonitor, RuntimeError> {
+    let root = clone_identities
+        .get(declaration.root_prototype_order)
+        .copied()
+        .ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget(format!(
+                "repeated peak monitor `{}` has an invalid root position",
+                declaration.id
+            ))
+        })?;
+    let elements = declaration
+        .descendants
+        .iter()
+        .map(|descendant| {
+            clone_identities
+                .get(descendant.prototype_order)
+                .copied()
+                .map(|node| LivePeakElement {
+                    declaration: descendant.clone(),
+                    node,
+                    control_state: PipeWireControlState::Idle,
+                })
+                .ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "repeated peak descendant `{}` has an invalid prototype position",
+                        descendant.local_id
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut channel_repeats = BTreeMap::new();
+    for channel in &declaration.channel_repeats {
+        let template_node = clone_identities
+            .get(channel.template_prototype_order)
+            .copied()
+            .ok_or_else(|| {
+                RuntimeError::InvalidMutationTarget(format!(
+                    "repeated peak channel `{}` has an invalid template position",
+                    channel.id
+                ))
+            })?;
+        let template_slot = identities.resolve(document, template_node)?;
+        let prototype_root_slot = template_root_element(document, template_slot)?;
+        let prototype_root = identities.identity_for_slot(document, prototype_root_slot)?;
+        channel_repeats.insert(
+            channel.id.clone(),
+            LiveContextualRepeat {
+                declaration: crate::ContextualRepeatDeclaration {
+                    id: channel.id.clone(),
+                    source: crate::ContextualRepeatSource::Channels,
+                    template_prototype_order: channel.template_prototype_order,
+                    descendants: channel.descendants.clone(),
+                    prototype_nodes: channel.prototype_nodes,
+                },
+                template_node,
+                prototype_root,
+                source_generation: 0,
+                items: BTreeMap::new(),
+                order: Vec::new(),
+            },
+        );
+    }
+    let enabled = declaration.enabled;
+    Ok(LivePeakMonitor {
+        declaration,
+        identity,
+        root,
+        elements,
+        channel_repeats,
+        enabled,
+        last_status: if enabled {
+            PipeWirePeakMonitorStatus::Suspended
+        } else {
+            PipeWirePeakMonitorStatus::Disabled
+        },
+        target_item_key: None,
+        stream_generation: 0,
+    })
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -629,6 +936,24 @@ impl LiveDocument {
         )?;
         let declaration_discovery_ms = elapsed_ms(discovery_started);
         let builtin_summary = builtins.summary();
+        let peak_monitors = builtins
+            .peak_monitor_declarations()
+            .into_iter()
+            .map(|declaration| {
+                let id = declaration.id.clone();
+                let root = builtins.indexed_node(&id).ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "peak monitor `#{id}` disappeared during discovery"
+                    ))
+                })?;
+                let identity = PipeWirePeakMonitorIdentity {
+                    document_generation: document_identity,
+                    locator: PipeWirePeakMonitorLocator::Element(id.clone()),
+                };
+                instantiate_peak_monitor(&document, &identities, declaration, root, identity)
+                    .map(|monitor| (id, monitor))
+            })
+            .collect::<Result<BTreeMap<_, _>, RuntimeError>>()?;
         let repeats = builtins
             .repeat_declarations()
             .into_iter()
@@ -663,6 +988,7 @@ impl LiveDocument {
             pressed_action: None,
             pressed_range: None,
             pending_action: None,
+            peak_monitors,
             click_count: 0,
             measurements: LiveRuntimeMeasurements {
                 package_read_ms,
@@ -691,6 +1017,7 @@ impl LiveDocument {
             },
             diagnostics,
         };
+        live.initialize_peak_monitor_states()?;
         live.apply_bound_tokens(&[
             (StateBindingKey::OverlayStatus, StateToken::Closed),
             (StateBindingKey::SurfaceScaleProfile, StateToken::Scale1),
@@ -1047,8 +1374,107 @@ impl LiveDocument {
                         ))
                     })?
             }
+            PipeWireControlLocator::Peak { monitor, local_id } => {
+                let peak = match monitor {
+                    PipeWirePeakMonitorLocator::Element(id) => self.peak_monitors.get(id),
+                    PipeWirePeakMonitorLocator::Repeated {
+                        repeat_id,
+                        item_key,
+                        local_id,
+                    } => self
+                        .repeats
+                        .get(repeat_id)
+                        .and_then(|repeat| repeat.items.get(item_key))
+                        .and_then(|item| item.peak_monitors.get(local_id)),
+                }
+                .ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget("peak monitor disappeared".into())
+                })?;
+                peak.elements
+                    .iter()
+                    .find(|element| element.declaration.local_id == *local_id)
+                    .filter(|element| element.declaration.action.is_some())
+                    .map(|element| element.node)
+                    .ok_or_else(|| {
+                        RuntimeError::InvalidMutationTarget(format!(
+                            "peak control `{local_id}` disappeared"
+                        ))
+                    })?
+            }
         };
         let changed = self.apply_attribute_to_node(node, STATE_ATTRIBUTE, Some(state.as_str()))?;
+        if changed {
+            self.resolve();
+        }
+        Ok(changed)
+    }
+
+    pub fn apply_pipewire_peak_action(
+        &mut self,
+        request: &PipeWirePeakActionRequest,
+    ) -> Result<bool, RuntimeError> {
+        if request.control.document_generation != self.document_identity
+            || request.monitor.document_generation != self.document_identity
+        {
+            return Err(RuntimeError::InvalidMutationTarget(
+                "peak action belongs to a stale document generation".into(),
+            ));
+        }
+        let enabled_count = self.enabled_peak_monitor_count();
+        let mut monitor = self.take_peak_monitor(&request.monitor)?;
+        let desired = match request.operation {
+            PipeWirePeakOperation::Enable => true,
+            PipeWirePeakOperation::Disable => false,
+            PipeWirePeakOperation::Toggle => !monitor.enabled,
+        };
+        let enabled_changed = monitor.enabled != desired;
+        let control_index = monitor
+            .elements
+            .iter()
+            .position(|element| {
+                matches!(
+                    &request.control.locator,
+                    PipeWireControlLocator::Peak { local_id, .. }
+                        if element.declaration.local_id == *local_id
+                )
+            })
+            .ok_or_else(|| {
+                RuntimeError::InvalidMutationTarget("peak action control disappeared".into())
+            })?;
+        let control_node = monitor.elements[control_index].node;
+        if desired
+            && !monitor.enabled
+            && enabled_count >= crate::MAX_PIPEWIRE_ENABLED_PEAK_MONITORS_PER_DOCUMENT
+        {
+            monitor.elements[control_index].control_state = PipeWireControlState::Failed;
+            let changed = self.apply_attribute_to_node(
+                control_node,
+                STATE_ATTRIBUTE,
+                Some(PipeWireControlState::Failed.as_str()),
+            )?;
+            self.put_peak_monitor(monitor)?;
+            if changed {
+                self.resolve();
+            }
+            return Ok(changed);
+        }
+        monitor.enabled = desired;
+        let state = if desired {
+            PipeWireControlState::Pending
+        } else {
+            PipeWireControlState::Idle
+        };
+        monitor.elements[control_index].control_state = state;
+        let state_changed =
+            self.apply_attribute_to_node(control_node, STATE_ATTRIBUTE, Some(state.as_str()))?;
+        let root_state = if desired {
+            PipeWirePeakMonitorStatus::Starting
+        } else {
+            PipeWirePeakMonitorStatus::Disabled
+        };
+        let monitor_changed = self.update_peak_monitor(&mut monitor, root_state, None, desired)?;
+        self.put_peak_monitor(monitor)?;
+        let changed = enabled_changed || state_changed || monitor_changed > 0;
         if changed {
             self.resolve();
         }
@@ -1187,6 +1613,124 @@ impl LiveDocument {
             .values()
             .filter(|repeat| repeat.declaration.source == source)
             .count()
+    }
+
+    pub fn pipewire_peak_demands(&self, mapped: bool) -> Vec<PipeWirePeakDeclarationDemand> {
+        if !mapped {
+            return Vec::new();
+        }
+        let mut demands = Vec::new();
+        for monitor in self
+            .peak_monitors
+            .values()
+            .filter(|monitor| monitor.enabled)
+        {
+            demands.push(PipeWirePeakDeclarationDemand {
+                monitor: monitor.identity.clone(),
+                target: match monitor.declaration.target {
+                    PeakMonitorTarget::DefaultSink => PipeWirePeakTarget::DefaultSink,
+                    PeakMonitorTarget::DefaultSource => PipeWirePeakTarget::DefaultSource,
+                    PeakMonitorTarget::CurrentItem => continue,
+                },
+            });
+        }
+        for (repeat_id, repeat) in &self.repeats {
+            if repeat.declaration.source != RepeatSource::PipeWireNodes {
+                continue;
+            }
+            for item_key in &repeat.order {
+                let Some(item) = repeat.items.get(item_key) else {
+                    continue;
+                };
+                for monitor in item
+                    .peak_monitors
+                    .values()
+                    .filter(|monitor| monitor.enabled)
+                {
+                    demands.push(PipeWirePeakDeclarationDemand {
+                        monitor: monitor.identity.clone(),
+                        target: PipeWirePeakTarget::NodeItem {
+                            source_generation: repeat.source_generation,
+                            item_key: item_key.clone(),
+                        },
+                    });
+                }
+            }
+            let _ = repeat_id;
+        }
+        demands
+    }
+
+    pub fn apply_pipewire_peak_projections(
+        &mut self,
+        projections: &PipeWirePeakProjectionSet,
+        mapped: bool,
+    ) -> Result<usize, RuntimeError> {
+        let identities = self.peak_monitor_identities();
+        let enabled_count = self.enabled_peak_monitor_count();
+        let mut changed = 0usize;
+        for identity in identities {
+            let mut monitor = self.take_peak_monitor(&identity)?;
+            let item_key = match (&identity.locator, monitor.declaration.target) {
+                (_, PeakMonitorTarget::DefaultSink) => projections.default_sink_item_key.as_deref(),
+                (_, PeakMonitorTarget::DefaultSource) => {
+                    projections.default_source_item_key.as_deref()
+                }
+                (
+                    PipeWirePeakMonitorLocator::Repeated { item_key, .. },
+                    PeakMonitorTarget::CurrentItem,
+                ) => Some(item_key.as_str()),
+                _ => None,
+            };
+            let projection = item_key.and_then(|key| projections.nodes.get(key));
+            let monitorable = item_key
+                .is_some_and(|key| projections.monitorable_nodes.contains(key))
+                && (monitor.enabled
+                    || enabled_count < crate::MAX_PIPEWIRE_ENABLED_PEAK_MONITORS_PER_DOCUMENT);
+            if monitor.target_item_key.as_deref() != item_key {
+                monitor.target_item_key = item_key.map(str::to_owned);
+                monitor.stream_generation = 0;
+                for element in &mut monitor.elements {
+                    if element.declaration.action.is_some() {
+                        element.control_state = if monitorable {
+                            PipeWireControlState::Idle
+                        } else {
+                            PipeWireControlState::Unavailable
+                        };
+                    }
+                }
+            }
+            if let Some(projection) = projection {
+                monitor.stream_generation = projection.stream_generation;
+            }
+            let status = if !monitor.enabled {
+                PipeWirePeakMonitorStatus::Disabled
+            } else if !mapped {
+                PipeWirePeakMonitorStatus::Suspended
+            } else if !monitorable {
+                PipeWirePeakMonitorStatus::Unavailable
+            } else {
+                match projection.map(|projection| projection.state) {
+                    Some(PipeWirePeakStreamState::Starting) => PipeWirePeakMonitorStatus::Starting,
+                    Some(PipeWirePeakStreamState::Ready) => PipeWirePeakMonitorStatus::Ready,
+                    Some(PipeWirePeakStreamState::Failed) => PipeWirePeakMonitorStatus::Failed,
+                    Some(PipeWirePeakStreamState::Unavailable) | None => {
+                        PipeWirePeakMonitorStatus::Unavailable
+                    }
+                }
+            };
+            changed = changed.saturating_add(self.update_peak_monitor(
+                &mut monitor,
+                status,
+                projection,
+                monitorable,
+            )?);
+            self.put_peak_monitor(monitor)?;
+        }
+        if changed > 0 {
+            self.resolve();
+        }
+        Ok(changed)
     }
 
     pub fn pipewire_demand(&self) -> PipeWireDocumentDemand {
@@ -1422,7 +1966,327 @@ impl LiveDocument {
                 }
             }
         }
+        let top_monitors = self.peak_monitors.values().collect::<Vec<_>>();
+        let repeated_monitors = self
+            .repeats
+            .values()
+            .flat_map(|repeat| repeat.items.values())
+            .flat_map(|item| item.peak_monitors.values())
+            .collect::<Vec<_>>();
+        if !top_monitors.is_empty() || !repeated_monitors.is_empty() {
+            demand.service = true;
+            demand.nodes = true;
+            demand.node_details = true;
+            demand.defaults = top_monitors.iter().any(|monitor| {
+                matches!(
+                    monitor.declaration.target,
+                    PeakMonitorTarget::DefaultSink | PeakMonitorTarget::DefaultSource
+                )
+            });
+            demand.peak_monitor_declarations = true;
+            for monitor in top_monitors.into_iter().chain(repeated_monitors) {
+                demand.peak_maximum_projection |= monitor
+                    .declaration
+                    .descendants
+                    .iter()
+                    .any(|element| element.binding == Some(PeakBindingKey::Maximum));
+                demand.peak_channel_projection |= !monitor.declaration.channel_repeats.is_empty()
+                    || monitor
+                        .declaration
+                        .descendants
+                        .iter()
+                        .any(|element| element.binding == Some(PeakBindingKey::ChannelCount));
+            }
+        }
         demand
+    }
+
+    fn initialize_peak_monitor_states(&mut self) -> Result<(), RuntimeError> {
+        let identities = self.peak_monitor_identities();
+        for identity in identities {
+            let mut monitor = self.take_peak_monitor(&identity)?;
+            let status = if monitor.enabled {
+                PipeWirePeakMonitorStatus::Suspended
+            } else {
+                PipeWirePeakMonitorStatus::Disabled
+            };
+            self.update_peak_monitor(&mut monitor, status, None, false)?;
+            self.put_peak_monitor(monitor)?;
+        }
+        Ok(())
+    }
+
+    fn peak_monitor_identities(&self) -> Vec<PipeWirePeakMonitorIdentity> {
+        self.peak_monitors
+            .values()
+            .map(|monitor| monitor.identity.clone())
+            .chain(
+                self.repeats
+                    .values()
+                    .flat_map(|repeat| repeat.items.values())
+                    .flat_map(|item| item.peak_monitors.values())
+                    .map(|monitor| monitor.identity.clone()),
+            )
+            .collect()
+    }
+
+    fn enabled_peak_monitor_count(&self) -> usize {
+        self.peak_monitors
+            .values()
+            .filter(|monitor| monitor.enabled)
+            .count()
+            .saturating_add(
+                self.repeats
+                    .values()
+                    .flat_map(|repeat| repeat.items.values())
+                    .flat_map(|item| item.peak_monitors.values())
+                    .filter(|monitor| monitor.enabled)
+                    .count(),
+            )
+    }
+
+    fn take_peak_monitor(
+        &mut self,
+        identity: &PipeWirePeakMonitorIdentity,
+    ) -> Result<LivePeakMonitor, RuntimeError> {
+        if identity.document_generation != self.document_identity {
+            return Err(RuntimeError::InvalidMutationTarget(
+                "peak monitor belongs to a stale document generation".into(),
+            ));
+        }
+        match &identity.locator {
+            PipeWirePeakMonitorLocator::Element(id) => {
+                self.peak_monitors.remove(id).ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!("peak monitor `#{id}` disappeared"))
+                })
+            }
+            PipeWirePeakMonitorLocator::Repeated {
+                repeat_id,
+                item_key,
+                local_id,
+            } => self
+                .repeats
+                .get_mut(repeat_id)
+                .and_then(|repeat| repeat.items.get_mut(item_key))
+                .and_then(|item| item.peak_monitors.remove(local_id))
+                .ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "repeated peak monitor `{local_id}` disappeared"
+                    ))
+                }),
+        }
+    }
+
+    fn put_peak_monitor(&mut self, monitor: LivePeakMonitor) -> Result<(), RuntimeError> {
+        match &monitor.identity.locator {
+            PipeWirePeakMonitorLocator::Element(id) => {
+                self.peak_monitors.insert(id.clone(), monitor);
+            }
+            PipeWirePeakMonitorLocator::Repeated {
+                repeat_id,
+                item_key,
+                local_id,
+            } => {
+                let item = self
+                    .repeats
+                    .get_mut(repeat_id)
+                    .and_then(|repeat| repeat.items.get_mut(item_key))
+                    .ok_or_else(|| {
+                        RuntimeError::InvalidMutationTarget(
+                            "repeated peak monitor parent disappeared".into(),
+                        )
+                    })?;
+                item.peak_monitors.insert(local_id.clone(), monitor);
+            }
+        }
+        Ok(())
+    }
+
+    fn update_peak_monitor(
+        &mut self,
+        monitor: &mut LivePeakMonitor,
+        status: PipeWirePeakMonitorStatus,
+        projection: Option<&PipeWirePeakProjection>,
+        monitorable: bool,
+    ) -> Result<usize, RuntimeError> {
+        let mut changed = 0usize;
+        if self.apply_attribute_to_node(monitor.root, STATE_ATTRIBUTE, Some(status.as_str()))? {
+            changed = changed.saturating_add(1);
+        }
+        monitor.last_status = status;
+        let active = monitor.enabled
+            && matches!(
+                projection.map(|projection| projection.state),
+                Some(PipeWirePeakStreamState::Starting | PipeWirePeakStreamState::Ready)
+            );
+        let ready = status == PipeWirePeakMonitorStatus::Ready;
+        let maximum = if ready {
+            projection
+                .map(|projection| projection.maximum)
+                .unwrap_or(NumericValue::Unknown)
+        } else {
+            NumericValue::Unknown
+        };
+        let channel_count = if ready {
+            projection
+                .map(|projection| projection.channels.items.len() as i64)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        for element in &mut monitor.elements {
+            if let Some(binding) = element.declaration.binding {
+                let element_changed = match element.declaration.kind {
+                    BuiltInElementKind::StateText => {
+                        let value = match binding {
+                            PeakBindingKey::Status => peak_status_text(status),
+                            PeakBindingKey::Enabled => bool_text(monitor.enabled),
+                            PeakBindingKey::Active => bool_text(active),
+                            PeakBindingKey::CanEnable => bool_text(!monitor.enabled && monitorable),
+                            PeakBindingKey::CanDisable => bool_text(monitor.enabled),
+                            PeakBindingKey::Maximum | PeakBindingKey::ChannelCount => {
+                                return Err(RuntimeError::InvalidMutationTarget(
+                                    "numeric peak binding reached a text element".into(),
+                                ));
+                            }
+                        };
+                        self.apply_text_to_node(element.node, &value)?
+                    }
+                    BuiltInElementKind::StateToken => {
+                        let value = match binding {
+                            PeakBindingKey::Status => status.as_str(),
+                            PeakBindingKey::Enabled => {
+                                if monitor.enabled {
+                                    "true"
+                                } else {
+                                    "false"
+                                }
+                            }
+                            PeakBindingKey::Active => {
+                                if active {
+                                    "true"
+                                } else {
+                                    "false"
+                                }
+                            }
+                            PeakBindingKey::CanEnable => {
+                                if !monitor.enabled && monitorable {
+                                    "true"
+                                } else {
+                                    "false"
+                                }
+                            }
+                            PeakBindingKey::CanDisable => {
+                                if monitor.enabled {
+                                    "true"
+                                } else {
+                                    "false"
+                                }
+                            }
+                            PeakBindingKey::Maximum | PeakBindingKey::ChannelCount => {
+                                return Err(RuntimeError::InvalidMutationTarget(
+                                    "numeric peak binding reached a token element".into(),
+                                ));
+                            }
+                        };
+                        self.apply_attribute_to_node(element.node, STATE_ATTRIBUTE, Some(value))?
+                    }
+                    BuiltInElementKind::StateValue => {
+                        let value = match binding {
+                            PeakBindingKey::Maximum => maximum,
+                            PeakBindingKey::ChannelCount => NumericValue::Integer(channel_count),
+                            _ => {
+                                return Err(RuntimeError::InvalidMutationTarget(
+                                    "text peak binding reached a value element".into(),
+                                ));
+                            }
+                        };
+                        let format = element
+                            .declaration
+                            .value_format
+                            .unwrap_or(StateValueFormat::Raw);
+                        let formatted = if binding == PeakBindingKey::Maximum {
+                            value.format_volume(format)
+                        } else {
+                            value.format(format)
+                        }
+                        .map_err(|error| {
+                            RuntimeError::InvalidMutationTarget(format!(
+                                "peak value formatting failed: {error}"
+                            ))
+                        })?;
+                        let text_changed =
+                            self.apply_text_to_node(element.node, &formatted.display)?;
+                        let value_changed = self.apply_attribute_to_node(
+                            element.node,
+                            "value",
+                            formatted.value.as_deref(),
+                        )?;
+                        text_changed || value_changed
+                    }
+                    _ => false,
+                };
+                changed = changed.saturating_add(usize::from(element_changed));
+            }
+            if let Some(action) = element.declaration.action {
+                let effective_disabled = element.declaration.disabled
+                    || match action {
+                        ShellAction::PipeWirePeaksEnable => monitor.enabled || !monitorable,
+                        ShellAction::PipeWirePeaksDisable => !monitor.enabled,
+                        ShellAction::PipeWirePeaksToggle => !monitor.enabled && !monitorable,
+                        _ => true,
+                    };
+                let disabled_changed = self.apply_attribute_to_node(
+                    element.node,
+                    "disabled",
+                    effective_disabled.then_some(""),
+                )?;
+                element.control_state = match status {
+                    PipeWirePeakMonitorStatus::Disabled
+                    | PipeWirePeakMonitorStatus::Suspended
+                    | PipeWirePeakMonitorStatus::Ready => PipeWireControlState::Idle,
+                    PipeWirePeakMonitorStatus::Unavailable => PipeWireControlState::Unavailable,
+                    PipeWirePeakMonitorStatus::Failed
+                        if element.control_state == PipeWireControlState::Pending =>
+                    {
+                        PipeWireControlState::Failed
+                    }
+                    PipeWirePeakMonitorStatus::Starting | PipeWirePeakMonitorStatus::Failed => {
+                        element.control_state
+                    }
+                };
+                let state_changed = self.apply_attribute_to_node(
+                    element.node,
+                    STATE_ATTRIBUTE,
+                    Some(element.control_state.as_str()),
+                )?;
+                changed = changed.saturating_add(usize::from(disabled_changed || state_changed));
+            }
+        }
+        let empty = crate::ContextualRepeatSnapshot {
+            source_generation: projection
+                .map(|projection| projection.layout_generation)
+                .unwrap_or_else(|| {
+                    monitor
+                        .channel_repeats
+                        .values()
+                        .map(|repeat| repeat.source_generation)
+                        .max()
+                        .unwrap_or(0)
+                }),
+            items: Vec::new(),
+        };
+        let channels = if ready {
+            projection.map(|projection| &projection.channels)
+        } else {
+            None
+        };
+        for repeat in monitor.channel_repeats.values_mut() {
+            changed = changed.saturating_add(
+                self.reconcile_contextual_repeat(repeat, channels.unwrap_or(&empty))?,
+            );
+        }
+        Ok(changed)
     }
 
     pub fn element_identity(&self, html_id: &str) -> Result<ElementInstanceId, RuntimeError> {
@@ -2177,6 +3041,46 @@ impl LiveDocument {
                 "repeat clone would exceed the document node limit of {MAX_CLONED_NODES_PER_DOCUMENT}"
             )));
         }
+        if repeat.declaration.source == RepeatSource::PipeWireNodes {
+            let source_replacement = repeat.source_generation != 0
+                && repeat.source_generation != snapshot.source_generation;
+            let authored_enabled = repeat
+                .declaration
+                .peak_monitors
+                .iter()
+                .filter(|monitor| monitor.enabled)
+                .count();
+            let repeated_enabled = snapshot.items.iter().try_fold(0usize, |count, item| {
+                let item_enabled = if source_replacement {
+                    authored_enabled
+                } else {
+                    repeat
+                        .items
+                        .get(&item.key)
+                        .map_or(authored_enabled, |item| {
+                            item.peak_monitors
+                                .values()
+                                .filter(|monitor| monitor.enabled)
+                                .count()
+                        })
+                };
+                count.checked_add(item_enabled).ok_or_else(|| {
+                    RuntimeError::LimitExceeded("enabled peak monitor count overflow".into())
+                })
+            })?;
+            let enabled = self
+                .enabled_peak_monitor_count()
+                .checked_add(repeated_enabled)
+                .ok_or_else(|| {
+                    RuntimeError::LimitExceeded("enabled peak monitor count overflow".into())
+                })?;
+            if enabled > crate::MAX_PIPEWIRE_ENABLED_PEAK_MONITORS_PER_DOCUMENT {
+                return Err(RuntimeError::LimitExceeded(format!(
+                    "repeat projection would exceed the document limit of {} enabled peak monitors",
+                    crate::MAX_PIPEWIRE_ENABLED_PEAK_MONITORS_PER_DOCUMENT
+                )));
+            }
+        }
         let mut update = RepeatMutation::default();
         if repeat.source_generation != 0 && repeat.source_generation != snapshot.source_generation {
             let old_keys = repeat.order.clone();
@@ -2385,12 +3289,38 @@ impl LiveDocument {
                 },
             );
         }
+        let mut peak_monitors = BTreeMap::new();
+        for declaration in &repeat.declaration.peak_monitors {
+            let identity = PipeWirePeakMonitorIdentity {
+                document_generation: self.document_identity,
+                locator: PipeWirePeakMonitorLocator::Repeated {
+                    repeat_id: repeat.declaration.id.html_id.clone(),
+                    item_key: item.key.clone(),
+                    local_id: declaration.id.clone(),
+                },
+            };
+            let mut monitor = instantiate_repeated_peak_monitor(
+                &self.document,
+                &self.identities,
+                declaration.clone(),
+                &clone_identities,
+                identity,
+            )?;
+            let status = if monitor.enabled {
+                PipeWirePeakMonitorStatus::Suspended
+            } else {
+                PipeWirePeakMonitorStatus::Disabled
+            };
+            self.update_peak_monitor(&mut monitor, status, None, false)?;
+            peak_monitors.insert(declaration.id.clone(), monitor);
+        }
         repeat.items.insert(
             item.key.clone(),
             LiveRepeatedItem {
                 root: clone_identities[0],
                 elements,
                 contextual_repeats,
+                peak_monitors,
             },
         );
         repeat.order.push(item.key.clone());
@@ -2521,7 +3451,10 @@ impl LiveDocument {
                             element.declaration.local_id
                         ))
                     })?;
-                    let formatted = if binding == crate::ItemBindingKey::Volume {
+                    let formatted = if matches!(
+                        binding,
+                        crate::ItemBindingKey::Volume | crate::ItemBindingKey::Peak
+                    ) {
                         value.format_volume(format)
                     } else {
                         value.format(format)
@@ -2900,6 +3833,7 @@ impl LiveDocument {
                 root: identities[0],
                 elements: elements.clone(),
                 contextual_repeats: BTreeMap::new(),
+                peak_monitors: BTreeMap::new(),
             },
         );
         repeat.order.push(item.key.clone());
@@ -3158,6 +4092,49 @@ impl LiveDocument {
 
     fn action_at(&self, x: f32, y: f32) -> Result<Option<PendingActivation>, RuntimeError> {
         if !self.builtins.is_empty() {
+            for monitor in self.peak_monitors.values().chain(
+                self.repeats
+                    .values()
+                    .flat_map(|repeat| repeat.items.values())
+                    .flat_map(|item| item.peak_monitors.values()),
+            ) {
+                for element in monitor.elements.iter().rev() {
+                    let Some(action) = element.declaration.action else {
+                        continue;
+                    };
+                    if self.node_is_disabled(element.node)? {
+                        continue;
+                    }
+                    let bounds = self.bounds_for_identity(element.node)?;
+                    if !contains(&bounds, x, y) {
+                        continue;
+                    }
+                    let operation = match action {
+                        ShellAction::PipeWirePeaksEnable => PipeWirePeakOperation::Enable,
+                        ShellAction::PipeWirePeaksDisable => PipeWirePeakOperation::Disable,
+                        ShellAction::PipeWirePeaksToggle => PipeWirePeakOperation::Toggle,
+                        _ => continue,
+                    };
+                    let control = PipeWireControlIdentity {
+                        document_generation: self.document_identity,
+                        locator: PipeWireControlLocator::Peak {
+                            monitor: monitor.identity.locator.clone(),
+                            local_id: element.declaration.local_id.clone(),
+                        },
+                    };
+                    return Ok(Some(PendingActivation {
+                        id: format!(
+                            "peak:{:?}:{}",
+                            monitor.identity.locator, element.declaration.local_id
+                        ),
+                        action: LiveAction::PipeWirePeak(PipeWirePeakActionRequest {
+                            control,
+                            monitor: monitor.identity.clone(),
+                            operation,
+                        }),
+                    }));
+                }
+            }
             for (repeat_id, repeat) in &self.repeats {
                 if repeat.declaration.source != RepeatSource::PipeWireNodes {
                     continue;
@@ -3544,6 +4521,22 @@ fn pipewire_mute_request(
         operation: pipewire_mute_operation(action)?,
         volume: None,
     })
+}
+
+fn bool_text(value: bool) -> String {
+    if value { "true" } else { "false" }.into()
+}
+
+fn peak_status_text(status: PipeWirePeakMonitorStatus) -> String {
+    match status {
+        PipeWirePeakMonitorStatus::Disabled => "Disabled",
+        PipeWirePeakMonitorStatus::Suspended => "Suspended",
+        PipeWirePeakMonitorStatus::Unavailable => "Unavailable",
+        PipeWirePeakMonitorStatus::Starting => "Starting",
+        PipeWirePeakMonitorStatus::Ready => "Ready",
+        PipeWirePeakMonitorStatus::Failed => "Failed",
+    }
+    .into()
 }
 
 fn checked_scaled_dimension(logical: u32, numerator: u32) -> Result<u32, RuntimeError> {
@@ -4691,6 +5684,251 @@ mod tests {
                 .registered_attribute("default-output-range", STATE_ATTRIBUTE)
                 .unwrap(),
             Some("unavailable".into())
+        );
+    }
+
+    #[test]
+    fn explicit_peak_monitors_share_demand_and_reconcile_latest_channels() {
+        let mut overlay = LiveDocument::load_surface_document(
+            audio_fixture(),
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            1100,
+            1200,
+        )
+        .unwrap();
+        let demand = overlay.pipewire_demand();
+        assert!(demand.peak_monitor_declarations);
+        assert!(demand.peak_maximum_projection);
+        assert!(demand.peak_channel_projection);
+        assert_eq!(overlay.pipewire_peak_demands(false).len(), 0);
+        let mapped = overlay.pipewire_peak_demands(true);
+        assert_eq!(mapped.len(), 2);
+        assert!(
+            mapped
+                .iter()
+                .all(|demand| demand.target == PipeWirePeakTarget::DefaultSink)
+        );
+
+        let channel = RepeatItemSnapshot {
+            key: "4:0:3".into(),
+            text: BTreeMap::from([
+                (crate::ItemBindingKey::Position, "front-left".into()),
+                (crate::ItemBindingKey::PositionName, "Front left".into()),
+                (crate::ItemBindingKey::Status, "Ready".into()),
+                (crate::ItemBindingKey::IsAuxiliary, "false".into()),
+                (crate::ItemBindingKey::IsCustom, "false".into()),
+            ]),
+            tokens: BTreeMap::from([
+                (crate::ItemBindingKey::Position, "front-left".into()),
+                (crate::ItemBindingKey::Status, "ready".into()),
+                (crate::ItemBindingKey::IsAuxiliary, "false".into()),
+                (crate::ItemBindingKey::IsCustom, "false".into()),
+            ]),
+            values: BTreeMap::from([
+                (crate::ItemBindingKey::Index, NumericValue::Integer(0)),
+                (crate::ItemBindingKey::Peak, NumericValue::Decimal(0.75)),
+            ]),
+            properties: BTreeMap::new(),
+            channels: None,
+            links: None,
+            link_groups: None,
+        };
+        let ready = PipeWirePeakProjection {
+            node_item_key: "1:42".into(),
+            stream_generation: 3,
+            layout_generation: 4,
+            state: PipeWirePeakStreamState::Ready,
+            maximum: NumericValue::Decimal(0.75),
+            channels: crate::ContextualRepeatSnapshot {
+                source_generation: 4,
+                items: vec![channel],
+            },
+        };
+        let mut projections = PipeWirePeakProjectionSet {
+            default_sink_item_key: Some("1:42".into()),
+            default_source_item_key: Some("1:43".into()),
+            monitorable_nodes: BTreeSet::from(["1:42".into(), "1:43".into()]),
+            nodes: BTreeMap::from([("1:42".into(), ready)]),
+        };
+        assert!(
+            overlay
+                .apply_pipewire_peak_projections(&projections, true)
+                .unwrap()
+                > 0
+        );
+        assert_eq!(
+            overlay
+                .registered_attribute("default-output-peaks", STATE_ATTRIBUTE)
+                .unwrap(),
+            Some("ready".into())
+        );
+        assert_eq!(
+            overlay
+                .document
+                .get_node(
+                    required_selector(&overlay.document, "#default-output-peak-maximum").unwrap()
+                )
+                .and_then(|node| node.element_data())
+                .and_then(|element| element.attr(local_name!("value"))),
+            Some("0.75")
+        );
+        let channel_root =
+            overlay.peak_monitors["default-output-peaks"].channel_repeats["peak-channels-0"].items
+                ["4:0:3"]
+                .root;
+
+        let mut updated = projections.nodes["1:42"].clone();
+        updated.maximum = NumericValue::Decimal(0.5);
+        updated.channels.items[0]
+            .values
+            .insert(crate::ItemBindingKey::Peak, NumericValue::Decimal(0.5));
+        projections.nodes.insert("1:42".into(), updated);
+        overlay
+            .apply_pipewire_peak_projections(&projections, true)
+            .unwrap();
+        assert_eq!(
+            overlay.peak_monitors["default-output-peaks"].channel_repeats["peak-channels-0"].items
+                ["4:0:3"]
+                .root,
+            channel_root
+        );
+
+        let enable_bounds = selector_bounds(&overlay, "#default-input-peak-enable");
+        let LiveAction::PipeWirePeak(request) = click_action(&mut overlay, &enable_bounds) else {
+            panic!("peak action emitted the wrong typed request");
+        };
+        assert_eq!(request.operation, PipeWirePeakOperation::Enable);
+        assert!(overlay.apply_pipewire_peak_action(&request).unwrap());
+        assert_eq!(
+            overlay.peak_monitors["default-input-peaks"]
+                .elements
+                .iter()
+                .find(|element| element.declaration.local_id == "default-input-peak-enable")
+                .unwrap()
+                .control_state,
+            PipeWireControlState::Pending
+        );
+        assert_eq!(
+            overlay.peak_monitors["default-input-peaks"]
+                .elements
+                .iter()
+                .find(|element| element.declaration.local_id == "default-input-peak-disable")
+                .unwrap()
+                .control_state,
+            PipeWireControlState::Idle
+        );
+        assert_eq!(overlay.pipewire_peak_demands(true).len(), 3);
+        assert!(
+            overlay
+                .pipewire_peak_demands(true)
+                .iter()
+                .any(|demand| demand.target == PipeWirePeakTarget::DefaultSource)
+        );
+
+        let mut source = projections.nodes["1:42"].clone();
+        source.node_item_key = "1:43".into();
+        source.stream_generation = 5;
+        source.state = PipeWirePeakStreamState::Failed;
+        source.channels.items.clear();
+        source.maximum = NumericValue::Unknown;
+        projections.nodes.insert("1:43".into(), source.clone());
+        overlay
+            .apply_pipewire_peak_projections(&projections, true)
+            .unwrap();
+        assert_eq!(
+            overlay.peak_monitors["default-input-peaks"]
+                .elements
+                .iter()
+                .find(|element| element.declaration.local_id == "default-input-peak-enable")
+                .unwrap()
+                .control_state,
+            PipeWireControlState::Failed
+        );
+        assert_eq!(
+            overlay.peak_monitors["default-input-peaks"]
+                .elements
+                .iter()
+                .find(|element| element.declaration.local_id == "default-input-peak-disable")
+                .unwrap()
+                .control_state,
+            PipeWireControlState::Idle
+        );
+        source.state = PipeWirePeakStreamState::Ready;
+        projections.nodes.insert("1:43".into(), source);
+        overlay
+            .apply_pipewire_peak_projections(&projections, true)
+            .unwrap();
+        assert_eq!(
+            overlay.peak_monitors["default-input-peaks"]
+                .elements
+                .iter()
+                .find(|element| element.declaration.local_id == "default-input-peak-enable")
+                .unwrap()
+                .control_state,
+            PipeWireControlState::Idle
+        );
+
+        assert!(
+            overlay
+                .apply_pipewire_peak_projections(&projections, false)
+                .unwrap()
+                > 0
+        );
+        assert_eq!(
+            overlay
+                .registered_attribute("default-input-peaks", STATE_ATTRIBUTE)
+                .unwrap(),
+            Some("suspended".into())
+        );
+        assert!(overlay.pipewire_peak_demands(false).is_empty());
+    }
+
+    #[test]
+    fn peak_enable_action_contains_the_per_document_active_limit() {
+        let mut overlay = LiveDocument::load_surface_document(
+            audio_fixture(),
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            1100,
+            1200,
+        )
+        .unwrap();
+        let prototype = overlay.peak_monitors["shared-output-peaks"].clone();
+        for index in 0..30 {
+            let id = format!("modeled-enabled-peak-{index}");
+            let mut monitor = prototype.clone();
+            monitor.identity.locator = PipeWirePeakMonitorLocator::Element(id.clone());
+            overlay.peak_monitors.insert(id, monitor);
+        }
+        assert_eq!(
+            overlay.enabled_peak_monitor_count(),
+            crate::MAX_PIPEWIRE_ENABLED_PEAK_MONITORS_PER_DOCUMENT
+        );
+
+        let monitor = &overlay.peak_monitors["default-input-peaks"];
+        let request = PipeWirePeakActionRequest {
+            control: PipeWireControlIdentity {
+                document_generation: overlay.document_identity,
+                locator: PipeWireControlLocator::Peak {
+                    monitor: monitor.identity.locator.clone(),
+                    local_id: "default-input-peak-enable".into(),
+                },
+            },
+            monitor: monitor.identity.clone(),
+            operation: PipeWirePeakOperation::Enable,
+        };
+        assert!(overlay.apply_pipewire_peak_action(&request).unwrap());
+        let monitor = &overlay.peak_monitors["default-input-peaks"];
+        assert!(!monitor.enabled);
+        assert_eq!(
+            monitor
+                .elements
+                .iter()
+                .find(|element| element.declaration.local_id == "default-input-peak-enable")
+                .unwrap()
+                .control_state,
+            PipeWireControlState::Failed
         );
     }
 
