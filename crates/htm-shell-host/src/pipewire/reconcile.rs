@@ -62,6 +62,8 @@ pub(crate) struct PipeWireReconciler {
     links: BTreeMap<u32, LinkRecord>,
     group_representatives: BTreeMap<(u32, u32), u32>,
     active_metadata: Option<u32>,
+    metadata_generation: u64,
+    metadata_writable: bool,
     metadata: BTreeMap<String, MetadataValue>,
     sequence: u64,
     resources: PipeWireResourceCounters,
@@ -83,6 +85,8 @@ impl PipeWireReconciler {
         self.links.clear();
         self.group_representatives.clear();
         self.active_metadata = None;
+        self.metadata_generation = self.metadata_generation.saturating_add(1);
+        self.metadata_writable = false;
         self.metadata.clear();
         self.publish_if_changed()
     }
@@ -100,6 +104,8 @@ impl PipeWireReconciler {
         self.links.clear();
         self.group_representatives.clear();
         self.active_metadata = None;
+        self.metadata_generation = self.metadata_generation.saturating_add(1);
+        self.metadata_writable = false;
         self.metadata.clear();
         self.publish_if_changed()
     }
@@ -245,8 +251,10 @@ impl PipeWireReconciler {
                 PipeWireDelta::LinkRemoved(raw_id) => {
                     self.links.remove(&raw_id);
                 }
-                PipeWireDelta::MetadataAdded { raw_id } => {
+                PipeWireDelta::MetadataAdded { raw_id, writable } => {
                     self.active_metadata = Some(raw_id);
+                    self.metadata_generation = self.metadata_generation.saturating_add(1);
+                    self.metadata_writable = writable;
                     self.metadata.clear();
                 }
                 PipeWireDelta::MetadataProperty {
@@ -259,6 +267,8 @@ impl PipeWireReconciler {
                 PipeWireDelta::MetadataRemoved(raw_id) => {
                     if self.active_metadata == Some(raw_id) {
                         self.active_metadata = None;
+                        self.metadata_generation = self.metadata_generation.saturating_add(1);
+                        self.metadata_writable = false;
                         self.metadata.clear();
                     }
                 }
@@ -446,6 +456,8 @@ impl PipeWireReconciler {
         let link_groups = self.build_link_groups(&node_ids)?;
         let defaults = PipeWireDefaultsSnapshot {
             metadata_available: self.active_metadata.is_some(),
+            metadata_writable: self.active_metadata.is_some() && self.metadata_writable,
+            metadata_generation: self.metadata_generation,
             actual_sink: self.default_target(DEFAULT_AUDIO_SINK),
             actual_source: self.default_target(DEFAULT_AUDIO_SOURCE),
             configured_sink: self.default_target(DEFAULT_CONFIGURED_AUDIO_SINK),
@@ -1072,7 +1084,10 @@ mod tests {
         reconciler.begin_generation(2).unwrap();
         reconciler
             .apply([
-                PipeWireDelta::MetadataAdded { raw_id: 80 },
+                PipeWireDelta::MetadataAdded {
+                    raw_id: 80,
+                    writable: true,
+                },
                 PipeWireDelta::MetadataProperty {
                     raw_id: 80,
                     subject: 0,
@@ -1117,7 +1132,10 @@ mod tests {
         reconciler.begin_generation(1).unwrap();
         reconciler
             .apply([
-                PipeWireDelta::MetadataAdded { raw_id: 1 },
+                PipeWireDelta::MetadataAdded {
+                    raw_id: 1,
+                    writable: true,
+                },
                 PipeWireDelta::MetadataProperty {
                     raw_id: 1,
                     subject: 0,
@@ -1138,7 +1156,10 @@ mod tests {
         reconciler.begin_generation(7).unwrap();
         reconciler
             .apply([
-                PipeWireDelta::MetadataAdded { raw_id: 10 },
+                PipeWireDelta::MetadataAdded {
+                    raw_id: 10,
+                    writable: true,
+                },
                 PipeWireDelta::MetadataProperty {
                     raw_id: 10,
                     subject: 0,
@@ -1146,7 +1167,10 @@ mod tests {
                     type_name: Some("Spa:String:JSON".into()),
                     value: Some(r#"{"name":"old"}"#.into()),
                 },
-                PipeWireDelta::MetadataAdded { raw_id: 11 },
+                PipeWireDelta::MetadataAdded {
+                    raw_id: 11,
+                    writable: true,
+                },
                 PipeWireDelta::MetadataProperty {
                     raw_id: 10,
                     subject: 0,
@@ -1186,7 +1210,10 @@ mod tests {
             DEFAULT_CONFIGURED_AUDIO_SINK,
             DEFAULT_CONFIGURED_AUDIO_SOURCE,
         ];
-        let mut deltas = vec![PipeWireDelta::MetadataAdded { raw_id: 1 }];
+        let mut deltas = vec![PipeWireDelta::MetadataAdded {
+            raw_id: 1,
+            writable: true,
+        }];
         for (index, key) in keys.into_iter().enumerate() {
             deltas.push(PipeWireDelta::MetadataProperty {
                 raw_id: 1,
@@ -1241,7 +1268,10 @@ mod tests {
         reconciler.begin_generation(1).unwrap();
         let mut deltas = add_node(1, "source", "Audio/Source");
         deltas.extend(add_link(2, 1, 3, PipeWireLinkState::Active));
-        deltas.push(PipeWireDelta::MetadataAdded { raw_id: 9 });
+        deltas.push(PipeWireDelta::MetadataAdded {
+            raw_id: 9,
+            writable: true,
+        });
         deltas.push(PipeWireDelta::MetadataProperty {
             raw_id: 9,
             subject: 0,

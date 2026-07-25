@@ -492,6 +492,8 @@ pub struct PipeWireDefaultTarget {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PipeWireDefaultsSnapshot {
     pub metadata_available: bool,
+    pub metadata_writable: bool,
+    pub metadata_generation: u64,
     pub actual_sink: PipeWireDefaultTarget,
     pub actual_source: PipeWireDefaultTarget,
     pub configured_sink: PipeWireDefaultTarget,
@@ -521,6 +523,20 @@ pub struct PipeWireControlCounters {
     pub vectors_timed_out: u64,
     pub stale_vectors_rejected: u64,
     pub layout_invalidated_intents: u64,
+    pub preferred_sink_capability_updates: u64,
+    pub preferred_source_capability_updates: u64,
+    pub sink_requests_accepted: u64,
+    pub source_requests_accepted: u64,
+    pub metadata_writes_sent: u64,
+    pub default_requests_queued: u64,
+    pub default_requests_replaced: u64,
+    pub default_external_overrides: u64,
+    pub default_confirmations: u64,
+    pub default_failures: u64,
+    pub default_timeouts: u64,
+    pub stale_default_confirmations_rejected: u64,
+    pub default_node_removal_cancellations: u64,
+    pub metadata_generation_cancellations: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -656,6 +672,7 @@ pub(crate) enum PipeWireDelta {
     LinkRemoved(u32),
     MetadataAdded {
         raw_id: u32,
+        writable: bool,
     },
     MetadataProperty {
         raw_id: u32,

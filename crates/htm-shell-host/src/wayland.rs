@@ -2106,8 +2106,11 @@ impl State {
             }
             return Ok(());
         }
-        if matches!(action, LiveAction::PipeWireAudio(_)) {
-            self.handle_pipewire_audio_action(owner, action)?;
+        if matches!(
+            action,
+            LiveAction::PipeWireAudio(_) | LiveAction::PipeWireDefault(_)
+        ) {
+            self.handle_pipewire_action(owner, action)?;
             if matches!(self.options, SessionOptions::Manifest(_)) {
                 self.manifest_actions = self.manifest_actions.saturating_add(1);
             }
@@ -2170,7 +2173,8 @@ impl State {
             | LiveAction::PowerProfileSetPowerSaver
             | LiveAction::PowerProfileSetBalanced
             | LiveAction::PowerProfileSetPerformance
-            | LiveAction::PipeWireAudio(_) => unreachable!("handled above"),
+            | LiveAction::PipeWireAudio(_)
+            | LiveAction::PipeWireDefault(_) => unreachable!("handled above"),
         }
         Ok(())
     }
@@ -2204,7 +2208,7 @@ impl State {
         Ok(())
     }
 
-    fn handle_pipewire_audio_action(
+    fn handle_pipewire_action(
         &mut self,
         owner: u64,
         action: LiveAction,
@@ -2217,12 +2221,22 @@ impl State {
                 "unmapped surface cannot dispatch a PipeWire audio action".into(),
             ));
         }
-        let LiveAction::PipeWireAudio(request) = action else {
-            return Err(ShellHostError::Wayland(
-                "non-PipeWire action entered PipeWire audio dispatch".into(),
-            ));
+        let (control, result) = match action {
+            LiveAction::PipeWireAudio(request) => {
+                let control = request.control.clone();
+                (control, self.pipewire.request_control(request))
+            }
+            LiveAction::PipeWireDefault(request) => {
+                let control = request.control.clone();
+                (control, self.pipewire.request_default_control(request))
+            }
+            _ => {
+                return Err(ShellHostError::Wayland(
+                    "non-PipeWire action entered PipeWire dispatch".into(),
+                ));
+            }
         };
-        if let Err(error) = self.pipewire.request_control(request.clone()) {
+        if let Err(error) = result {
             let state = if error.contains("unavailable")
                 || error.contains("unresolved")
                 || error.contains("stale")
@@ -2233,11 +2247,11 @@ impl State {
                 htm_runtime::PipeWireControlState::Failed
             };
             if let Some(runtime) = self.surfaces[index].runtime.as_mut() {
-                let _ = runtime.apply_pipewire_control_state(&request.control, state);
+                let _ = runtime.apply_pipewire_control_state(&control, state);
                 self.surfaces[index].scheduler.mark_dirty();
             }
             self.fanout_current_pipewire_snapshot();
-            eprintln!("htmshell-live: PipeWire audio request was contained: {error}");
+            eprintln!("htmshell-live: PipeWire request was contained: {error}");
             return Ok(());
         }
         self.fanout_pipewire_control_outcomes();
@@ -2380,7 +2394,8 @@ impl State {
             | LiveAction::PowerProfileSetPowerSaver
             | LiveAction::PowerProfileSetBalanced
             | LiveAction::PowerProfileSetPerformance
-            | LiveAction::PipeWireAudio(_) => {
+            | LiveAction::PipeWireAudio(_)
+            | LiveAction::PipeWireDefault(_) => {
                 unreachable!("handled before manifest dispatch")
             }
         }
@@ -3632,7 +3647,8 @@ fn validate_manifest_action_source(
         LiveAction::PowerProfileSetPowerSaver
         | LiveAction::PowerProfileSetBalanced
         | LiveAction::PowerProfileSetPerformance
-        | LiveAction::PipeWireAudio(_) => Ok(()),
+        | LiveAction::PipeWireAudio(_)
+        | LiveAction::PipeWireDefault(_) => Ok(()),
     }
 }
 

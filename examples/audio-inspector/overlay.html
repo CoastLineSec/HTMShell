@@ -68,6 +68,13 @@
         <span id="configured-output"
               data-htm-element="state-text"
               data-htm-bind="pipewire.configured_sink.description"></span>
+        <button id="clear-configured-output"
+                class="clear-preference"
+                data-htm-element="action-button"
+                data-htm-action="pipewire.defaults.clear_preferred_sink"
+                data-htm-enabled-bind="pipewire.configured_sink.can_clear">
+          Clear preference
+        </button>
       </div>
       <div>
         <span>Actual input</span>
@@ -92,6 +99,13 @@
         <span id="configured-input"
               data-htm-element="state-text"
               data-htm-bind="pipewire.configured_source.description"></span>
+        <button id="clear-configured-input"
+                class="clear-preference"
+                data-htm-element="action-button"
+                data-htm-action="pipewire.defaults.clear_preferred_source"
+                data-htm-enabled-bind="pipewire.configured_source.can_clear">
+          Clear preference
+        </button>
       </div>
     </section>
 
@@ -221,6 +235,20 @@
                       data-htm-local-id="mute-control"
                       data-htm-action="pipewire.audio.toggle_mute"
                       data-htm-enabled-bind="item.can_set_mute">Toggle mute</button>
+            </div>
+            <div class="default-selection">
+              <button data-htm-element="action-button"
+                      data-htm-local-id="prefer-output"
+                      data-htm-action="pipewire.defaults.set_preferred_sink"
+                      data-htm-enabled-bind="item.can_set_preferred_sink">
+                Use as preferred output
+              </button>
+              <button data-htm-element="action-button"
+                      data-htm-local-id="prefer-input"
+                      data-htm-action="pipewire.defaults.set_preferred_source"
+                      data-htm-enabled-bind="item.can_set_preferred_source">
+                Use as preferred input
+              </button>
             </div>
             <section class="channels"
                      data-htm-element="state-token"

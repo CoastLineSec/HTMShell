@@ -7,7 +7,8 @@ use crate::{
     MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT,
     MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM, MAX_PIPEWIRE_BINDINGS_PER_ITEM,
     MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM, MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_DOCUMENT,
-    MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM, MAX_PIPEWIRE_GRAPH_BINDINGS_PER_ITEM,
+    MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM, MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_DOCUMENT,
+    MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_ITEM, MAX_PIPEWIRE_GRAPH_BINDINGS_PER_ITEM,
     MAX_PIPEWIRE_LINK_GROUP_REPEAT_DECLARATIONS_PER_DOCUMENT,
     MAX_PIPEWIRE_LINK_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_PIPEWIRE_PERCEPTUAL_VOLUME,
     MAX_PIPEWIRE_PROPERTY_KEY_BYTES, MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT,
@@ -149,11 +150,13 @@ pub enum StateBindingKey {
     PipeWireConfiguredSinkMuteState,
     PipeWireConfiguredSinkCanSetVolume,
     PipeWireConfiguredSinkCanSetMute,
+    PipeWireConfiguredSinkCanClear,
     PipeWireConfiguredSourceAudioStatus,
     PipeWireConfiguredSourceVolume,
     PipeWireConfiguredSourceMuteState,
     PipeWireConfiguredSourceCanSetVolume,
     PipeWireConfiguredSourceCanSetMute,
+    PipeWireConfiguredSourceCanClear,
     OutputLabel,
     OutputScale,
     SurfaceTemplateId,
@@ -164,7 +167,7 @@ pub enum StateBindingKey {
 }
 
 impl StateBindingKey {
-    pub const ALL: [Self; 83] = [
+    pub const ALL: [Self; 85] = [
         Self::ClockTime,
         Self::UPowerAvailability,
         Self::UPowerOnBattery,
@@ -236,11 +239,13 @@ impl StateBindingKey {
         Self::PipeWireConfiguredSinkMuteState,
         Self::PipeWireConfiguredSinkCanSetVolume,
         Self::PipeWireConfiguredSinkCanSetMute,
+        Self::PipeWireConfiguredSinkCanClear,
         Self::PipeWireConfiguredSourceAudioStatus,
         Self::PipeWireConfiguredSourceVolume,
         Self::PipeWireConfiguredSourceMuteState,
         Self::PipeWireConfiguredSourceCanSetVolume,
         Self::PipeWireConfiguredSourceCanSetMute,
+        Self::PipeWireConfiguredSourceCanClear,
         Self::OutputLabel,
         Self::OutputScale,
         Self::SurfaceTemplateId,
@@ -323,6 +328,7 @@ impl StateBindingKey {
             Self::PipeWireConfiguredSinkMuteState => "pipewire.configured_sink.mute_state",
             Self::PipeWireConfiguredSinkCanSetVolume => "pipewire.configured_sink.can_set_volume",
             Self::PipeWireConfiguredSinkCanSetMute => "pipewire.configured_sink.can_set_mute",
+            Self::PipeWireConfiguredSinkCanClear => "pipewire.configured_sink.can_clear",
             Self::PipeWireConfiguredSourceAudioStatus => "pipewire.configured_source.audio_status",
             Self::PipeWireConfiguredSourceVolume => "pipewire.configured_source.volume",
             Self::PipeWireConfiguredSourceMuteState => "pipewire.configured_source.mute_state",
@@ -330,6 +336,7 @@ impl StateBindingKey {
                 "pipewire.configured_source.can_set_volume"
             }
             Self::PipeWireConfiguredSourceCanSetMute => "pipewire.configured_source.can_set_mute",
+            Self::PipeWireConfiguredSourceCanClear => "pipewire.configured_source.can_clear",
             Self::OutputLabel => "output.label",
             Self::OutputScale => "output.scale",
             Self::SurfaceTemplateId => "surface.template_id",
@@ -413,11 +420,13 @@ impl StateBindingKey {
             | Self::PipeWireConfiguredSinkMuteState
             | Self::PipeWireConfiguredSinkCanSetVolume
             | Self::PipeWireConfiguredSinkCanSetMute
+            | Self::PipeWireConfiguredSinkCanClear
             | Self::PipeWireConfiguredSourceAudioStatus
             | Self::PipeWireConfiguredSourceVolume
             | Self::PipeWireConfiguredSourceMuteState
             | Self::PipeWireConfiguredSourceCanSetVolume
-            | Self::PipeWireConfiguredSourceCanSetMute => StateBindingScope::Process,
+            | Self::PipeWireConfiguredSourceCanSetMute
+            | Self::PipeWireConfiguredSourceCanClear => StateBindingScope::Process,
             Self::OutputLabel
             | Self::OutputScale
             | Self::OverlayStatus
@@ -483,10 +492,12 @@ impl StateBindingKey {
                     | Self::PipeWireConfiguredSinkMuteState
                     | Self::PipeWireConfiguredSinkCanSetVolume
                     | Self::PipeWireConfiguredSinkCanSetMute
+                    | Self::PipeWireConfiguredSinkCanClear
                     | Self::PipeWireConfiguredSourceAudioStatus
                     | Self::PipeWireConfiguredSourceMuteState
                     | Self::PipeWireConfiguredSourceCanSetVolume
                     | Self::PipeWireConfiguredSourceCanSetMute
+                    | Self::PipeWireConfiguredSourceCanClear
                     | Self::OutputLabel
                     | Self::OutputScale
                     | Self::SurfaceTemplateId
@@ -528,10 +539,12 @@ impl StateBindingKey {
                     | Self::PipeWireConfiguredSinkMuteState
                     | Self::PipeWireConfiguredSinkCanSetVolume
                     | Self::PipeWireConfiguredSinkCanSetMute
+                    | Self::PipeWireConfiguredSinkCanClear
                     | Self::PipeWireConfiguredSourceAudioStatus
                     | Self::PipeWireConfiguredSourceMuteState
                     | Self::PipeWireConfiguredSourceCanSetVolume
                     | Self::PipeWireConfiguredSourceCanSetMute
+                    | Self::PipeWireConfiguredSourceCanClear
                     | Self::SurfaceScaleProfile
                     | Self::OverlayStatus
             ),
@@ -569,8 +582,10 @@ impl StateBindingKey {
                     | Self::PipeWireDefaultSourceCanSetMute
                     | Self::PipeWireConfiguredSinkCanSetVolume
                     | Self::PipeWireConfiguredSinkCanSetMute
+                    | Self::PipeWireConfiguredSinkCanClear
                     | Self::PipeWireConfiguredSourceCanSetVolume
                     | Self::PipeWireConfiguredSourceCanSetMute
+                    | Self::PipeWireConfiguredSourceCanClear
             ),
         }
     }
@@ -673,8 +688,10 @@ impl StateBindingKey {
             | Self::PipeWireDefaultSourceCanSetMute
             | Self::PipeWireConfiguredSinkCanSetVolume
             | Self::PipeWireConfiguredSinkCanSetMute
+            | Self::PipeWireConfiguredSinkCanClear
             | Self::PipeWireConfiguredSourceCanSetVolume
-            | Self::PipeWireConfiguredSourceCanSetMute => &["true", "false"],
+            | Self::PipeWireConfiguredSourceCanSetMute
+            | Self::PipeWireConfiguredSourceCanClear => &["true", "false"],
             _ => &[],
         }
     }
@@ -804,6 +821,7 @@ impl std::str::FromStr for StateBindingKey {
                 Ok(Self::PipeWireConfiguredSinkCanSetVolume)
             }
             "pipewire.configured_sink.can_set_mute" => Ok(Self::PipeWireConfiguredSinkCanSetMute),
+            "pipewire.configured_sink.can_clear" => Ok(Self::PipeWireConfiguredSinkCanClear),
             "pipewire.configured_source.audio_status" => {
                 Ok(Self::PipeWireConfiguredSourceAudioStatus)
             }
@@ -815,6 +833,7 @@ impl std::str::FromStr for StateBindingKey {
             "pipewire.configured_source.can_set_mute" => {
                 Ok(Self::PipeWireConfiguredSourceCanSetMute)
             }
+            "pipewire.configured_source.can_clear" => Ok(Self::PipeWireConfiguredSourceCanClear),
             "output.label" => Ok(Self::OutputLabel),
             "output.scale" => Ok(Self::OutputScale),
             "surface.template_id" => Ok(Self::SurfaceTemplateId),
@@ -1173,10 +1192,14 @@ pub enum ShellAction {
     PipeWireAudioToggleMute,
     PipeWireAudioSetVolume,
     PipeWireAudioSetChannelVolume,
+    PipeWireDefaultsSetPreferredSink,
+    PipeWireDefaultsSetPreferredSource,
+    PipeWireDefaultsClearPreferredSink,
+    PipeWireDefaultsClearPreferredSource,
 }
 
 impl ShellAction {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 18] = [
         Self::OverlayToggle,
         Self::OverlayClose,
         Self::OverlayActivate,
@@ -1191,6 +1214,10 @@ impl ShellAction {
         Self::PipeWireAudioToggleMute,
         Self::PipeWireAudioSetVolume,
         Self::PipeWireAudioSetChannelVolume,
+        Self::PipeWireDefaultsSetPreferredSink,
+        Self::PipeWireDefaultsSetPreferredSource,
+        Self::PipeWireDefaultsClearPreferredSink,
+        Self::PipeWireDefaultsClearPreferredSource,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -1209,6 +1236,12 @@ impl ShellAction {
             Self::PipeWireAudioToggleMute => "pipewire.audio.toggle_mute",
             Self::PipeWireAudioSetVolume => "pipewire.audio.set_volume",
             Self::PipeWireAudioSetChannelVolume => "pipewire.audio.set_channel_volume",
+            Self::PipeWireDefaultsSetPreferredSink => "pipewire.defaults.set_preferred_sink",
+            Self::PipeWireDefaultsSetPreferredSource => "pipewire.defaults.set_preferred_source",
+            Self::PipeWireDefaultsClearPreferredSink => "pipewire.defaults.clear_preferred_sink",
+            Self::PipeWireDefaultsClearPreferredSource => {
+                "pipewire.defaults.clear_preferred_source"
+            }
         }
     }
 }
@@ -1232,6 +1265,16 @@ impl std::str::FromStr for ShellAction {
             "pipewire.audio.toggle_mute" => Ok(Self::PipeWireAudioToggleMute),
             "pipewire.audio.set_volume" => Ok(Self::PipeWireAudioSetVolume),
             "pipewire.audio.set_channel_volume" => Ok(Self::PipeWireAudioSetChannelVolume),
+            "pipewire.defaults.set_preferred_sink" => Ok(Self::PipeWireDefaultsSetPreferredSink),
+            "pipewire.defaults.set_preferred_source" => {
+                Ok(Self::PipeWireDefaultsSetPreferredSource)
+            }
+            "pipewire.defaults.clear_preferred_sink" => {
+                Ok(Self::PipeWireDefaultsClearPreferredSink)
+            }
+            "pipewire.defaults.clear_preferred_source" => {
+                Ok(Self::PipeWireDefaultsClearPreferredSource)
+            }
             _ => Err(()),
         }
     }
@@ -1270,6 +1313,10 @@ impl BuiltInSurfaceKind {
                         | ShellAction::PipeWireAudioToggleMute
                         | ShellAction::PipeWireAudioSetVolume
                         | ShellAction::PipeWireAudioSetChannelVolume
+                        | ShellAction::PipeWireDefaultsSetPreferredSink
+                        | ShellAction::PipeWireDefaultsSetPreferredSource
+                        | ShellAction::PipeWireDefaultsClearPreferredSink
+                        | ShellAction::PipeWireDefaultsClearPreferredSource
                 )
         )
     }
@@ -1643,11 +1690,16 @@ impl BuiltInElementIndex {
                             | ShellAction::ClockDisable
                             | ShellAction::ClockToggle
                     );
-                    let pipewire_action = matches!(
+                    let pipewire_mute_action = matches!(
                         action,
                         ShellAction::PipeWireAudioMute
                             | ShellAction::PipeWireAudioUnmute
                             | ShellAction::PipeWireAudioToggleMute
+                    );
+                    let pipewire_clear_action = matches!(
+                        action,
+                        ShellAction::PipeWireDefaultsClearPreferredSink
+                            | ShellAction::PipeWireDefaultsClearPreferredSource
                     );
                     if matches!(
                         action,
@@ -1659,34 +1711,52 @@ impl BuiltInElementIndex {
                             "PipeWire numeric audio actions require `range-control`",
                         ));
                     }
+                    if matches!(
+                        action,
+                        ShellAction::PipeWireDefaultsSetPreferredSink
+                            | ShellAction::PipeWireDefaultsSetPreferredSource
+                    ) {
+                        return Err(invalid_declaration(
+                            &context,
+                            "preferred-default node actions are valid only inside `pipewire.nodes`",
+                        ));
+                    }
                     let target_value = element.attr(LocalName::from(TARGET_ATTRIBUTE));
-                    let pipewire_target = match (clock_action, pipewire_action, target_value) {
-                        (true, _, Some(target)) if !target.is_empty() => {
+                    let pipewire_target = match (
+                        clock_action,
+                        pipewire_mute_action,
+                        pipewire_clear_action,
+                        target_value,
+                    ) {
+                        (true, _, _, Some(target)) if !target.is_empty() => {
                             unresolved_action_targets.insert(html_id.clone(), target.to_owned());
                             None
                         }
-                        (true, _, _) => {
+                        (true, _, _, _) => {
                             return Err(invalid_declaration(
                                 &context,
                                 "clock action requires nonempty `data-htm-target`",
                             ));
                         }
-                        (false, true, Some(target)) => {
+                        (false, true, false, Some(target)) => {
                             Some(parse_default_pipewire_target(target, &context)?)
                         }
-                        (false, true, None) => {
+                        (false, true, false, None) => {
                             return Err(invalid_declaration(
                                 &context,
                                 "PipeWire audio action requires `data-htm-target` outside a repeat",
                             ));
                         }
-                        (false, false, Some(_)) => {
+                        (false, false, _, Some(_)) => {
                             return Err(invalid_declaration(
                                 &context,
                                 "`data-htm-target` is forbidden for this action",
                             ));
                         }
-                        (false, false, None) => None,
+                        (false, false, _, None) => None,
+                        (false, true, true, _) => {
+                            unreachable!("one action cannot be both mute and clear")
+                        }
                     };
                     let enabled_binding = element
                         .attr(LocalName::from(ENABLED_BIND_ATTRIBUTE))
@@ -1707,12 +1777,27 @@ impl BuiltInElementIndex {
                             "`data-htm-enabled-bind` requires a Boolean state key",
                         ));
                     }
-                    if pipewire_action
+                    if pipewire_mute_action
                         && enabled_binding != pipewire_target.map(pipewire_mute_enabled_key)
                     {
                         return Err(invalid_declaration(
                             &context,
                             "PipeWire mute action requires the matching `can_set_mute` enabled binding",
+                        ));
+                    }
+                    let clear_enabled = match action {
+                        ShellAction::PipeWireDefaultsClearPreferredSink => {
+                            Some(StateBindingKey::PipeWireConfiguredSinkCanClear)
+                        }
+                        ShellAction::PipeWireDefaultsClearPreferredSource => {
+                            Some(StateBindingKey::PipeWireConfiguredSourceCanClear)
+                        }
+                        _ => None,
+                    };
+                    if pipewire_clear_action && enabled_binding != clear_enabled {
+                        return Err(invalid_declaration(
+                            &context,
+                            "preferred-default clear action requires the matching configured-default `can_clear` enabled binding",
                         ));
                     }
                     (
@@ -2073,12 +2158,40 @@ impl BuiltInElementIndex {
         let repeated_audio_controls = pipewire_repeats
             .iter()
             .flat_map(|repeat| repeat.descendants.iter())
-            .filter(|descendant| descendant.action.is_some())
+            .filter(|descendant| {
+                descendant
+                    .action
+                    .is_some_and(|action| action.as_str().starts_with("pipewire.audio."))
+            })
             .count();
         let audio_controls = top_audio_controls.saturating_add(repeated_audio_controls);
         if audio_controls > MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT {
             return Err(RuntimeError::LimitExceeded(format!(
                 "{source} contains {audio_controls} PipeWire audio controls; the per-document limit is {MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT}"
+            )));
+        }
+        let top_default_controls = elements
+            .values()
+            .filter(|element| {
+                element
+                    .declaration
+                    .action
+                    .is_some_and(|action| action.as_str().starts_with("pipewire.defaults."))
+            })
+            .count();
+        let repeated_default_controls = pipewire_repeats
+            .iter()
+            .flat_map(|repeat| repeat.descendants.iter())
+            .filter(|descendant| {
+                descendant
+                    .action
+                    .is_some_and(|action| action.as_str().starts_with("pipewire.defaults."))
+            })
+            .count();
+        let default_controls = top_default_controls.saturating_add(repeated_default_controls);
+        if default_controls > MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{source} contains {default_controls} PipeWire preferred-default controls; the per-document limit is {MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_DOCUMENT}"
             )));
         }
         let contextual_repeats = pipewire_repeats
@@ -2819,21 +2932,41 @@ fn analyze_repeat(
                                         ShellAction::PipeWireAudioMute
                                             | ShellAction::PipeWireAudioUnmute
                                             | ShellAction::PipeWireAudioToggleMute
+                                            | ShellAction::PipeWireDefaultsSetPreferredSink
+                                            | ShellAction::PipeWireDefaultsSetPreferredSource
                                     )
                                 })
                                 .ok_or_else(|| {
                                     invalid_declaration(
                                         context,
-                                        "only PipeWire mute actions are allowed inside `pipewire.nodes`",
+                                        "only PipeWire mute and preferred-default selection actions are allowed inside `pipewire.nodes`",
                                     )
                                 })?;
                             let enabled = element
                                 .attr(LocalName::from(ENABLED_BIND_ATTRIBUTE))
                                 .and_then(|value| value.parse::<ItemBindingKey>().ok());
-                            if enabled != Some(ItemBindingKey::CanSetMute) {
+                            let required_enabled = match parsed {
+                                ShellAction::PipeWireAudioMute
+                                | ShellAction::PipeWireAudioUnmute
+                                | ShellAction::PipeWireAudioToggleMute => {
+                                    ItemBindingKey::CanSetMute
+                                }
+                                ShellAction::PipeWireDefaultsSetPreferredSink => {
+                                    ItemBindingKey::CanSetPreferredSink
+                                }
+                                ShellAction::PipeWireDefaultsSetPreferredSource => {
+                                    ItemBindingKey::CanSetPreferredSource
+                                }
+                                _ => unreachable!("filtered item-local action"),
+                            };
+                            if enabled != Some(required_enabled) {
                                 return Err(invalid_declaration(
                                     context,
-                                    "item-local mute action requires `data-htm-enabled-bind=\"item.can_set_mute\"`",
+                                    format!(
+                                        "item-local action `{}` requires `data-htm-enabled-bind=\"{}\"`",
+                                        parsed.as_str(),
+                                        required_enabled.as_str()
+                                    ),
                                 ));
                             }
                             if element.has_attr(LocalName::from(STATE_ATTRIBUTE)) {
@@ -2968,11 +3101,28 @@ fn analyze_repeat(
     }
     let audio_controls = descendants
         .iter()
-        .filter(|descendant| descendant.action.is_some())
+        .filter(|descendant| {
+            descendant
+                .action
+                .is_some_and(|action| action.as_str().starts_with("pipewire.audio."))
+        })
         .count();
     if audio_controls > MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM {
         return Err(RuntimeError::LimitExceeded(format!(
             "{context}: repeat template has {audio_controls} PipeWire audio controls; the limit is {MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM}"
+        )));
+    }
+    let default_controls = descendants
+        .iter()
+        .filter(|descendant| {
+            descendant
+                .action
+                .is_some_and(|action| action.as_str().starts_with("pipewire.defaults."))
+        })
+        .count();
+    if default_controls > MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_ITEM {
+        return Err(RuntimeError::LimitExceeded(format!(
+            "{context}: repeat template has {default_controls} PipeWire preferred-default controls; the limit is {MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_ITEM}"
         )));
     }
     let range_controls = descendants
@@ -3621,10 +3771,10 @@ mod tests {
         assert!(validate_definitions(&DEFINITIONS).is_ok());
         let duplicate = [DEFINITIONS[0], DEFINITIONS[0]];
         assert!(validate_definitions(&duplicate).is_err());
-        assert_eq!(StateBindingKey::ALL.len(), 83);
+        assert_eq!(StateBindingKey::ALL.len(), 85);
         assert!(StateBindingKey::ALL.contains(&StateBindingKey::UPowerOnBattery));
         assert!(StateBindingKey::ALL.contains(&StateBindingKey::PowerProfileCurrent));
-        assert_eq!(ShellAction::ALL.len(), 14);
+        assert_eq!(ShellAction::ALL.len(), 18);
         assert!(ShellAction::ALL.contains(&ShellAction::PowerProfileSetPerformance));
         for key in StateBindingKey::ALL {
             assert_eq!(key.as_str().parse::<StateBindingKey>(), Ok(key));
@@ -3984,6 +4134,72 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn pipewire_preferred_default_actions_are_item_local_typed_and_bounded() {
+        let valid = discover(
+            r#"
+              <span id="clearable-sink" data-htm-element="state-token" data-htm-bind="pipewire.configured_sink.can_clear"></span>
+              <button id="clear-sink" data-htm-element="action-button" data-htm-action="pipewire.defaults.clear_preferred_sink" data-htm-enabled-bind="pipewire.configured_sink.can_clear"></button>
+              <button id="clear-source" data-htm-element="action-button" data-htm-action="pipewire.defaults.clear_preferred_source" data-htm-enabled-bind="pipewire.configured_source.can_clear"></button>
+              <template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes">
+                <article>
+                  <span data-htm-local-id="sink-capability" data-htm-element="state-token" data-htm-bind="item.can_set_preferred_sink"></span>
+                  <span data-htm-local-id="source-capability" data-htm-element="state-token" data-htm-bind="item.can_set_preferred_source"></span>
+                  <button data-htm-local-id="set-sink" data-htm-element="action-button" data-htm-action="pipewire.defaults.set_preferred_sink" data-htm-enabled-bind="item.can_set_preferred_sink"></button>
+                  <button data-htm-local-id="set-source" data-htm-element="action-button" data-htm-action="pipewire.defaults.set_preferred_source" data-htm-enabled-bind="item.can_set_preferred_source"></button>
+                </article>
+              </template>
+            "#,
+            BuiltInSurfaceKind::Overlay,
+        )
+        .unwrap();
+        assert_eq!(
+            valid.element("clear-sink").unwrap().action,
+            Some(ShellAction::PipeWireDefaultsClearPreferredSink)
+        );
+        assert_eq!(
+            valid
+                .element("nodes")
+                .unwrap()
+                .repeat
+                .as_ref()
+                .unwrap()
+                .descendants
+                .iter()
+                .filter(|descendant| {
+                    descendant
+                        .action
+                        .is_some_and(|action| action.as_str().starts_with("pipewire.defaults."))
+                })
+                .count(),
+            2
+        );
+
+        for invalid in [
+            r#"<button id="set" data-htm-element="action-button" data-htm-action="pipewire.defaults.set_preferred_sink" data-htm-enabled-bind="pipewire.configured_sink.can_clear"></button>"#,
+            r#"<button id="clear" data-htm-element="action-button" data-htm-action="pipewire.defaults.clear_preferred_sink"></button>"#,
+            r#"<button id="clear" data-htm-element="action-button" data-htm-action="pipewire.defaults.clear_preferred_sink" data-htm-enabled-bind="pipewire.configured_sink.can_clear" data-htm-target="42"></button>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><article><button data-htm-local-id="set" data-htm-element="action-button" data-htm-action="pipewire.defaults.set_preferred_sink" data-htm-enabled-bind="item.can_set_preferred_source"></button></article></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><article><button data-htm-local-id="clear" data-htm-element="action-button" data-htm-action="pipewire.defaults.clear_preferred_sink" data-htm-enabled-bind="item.can_set_preferred_sink"></button></article></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><article><button data-htm-local-id="set" data-htm-element="action-button" data-htm-action="pipewire.defaults.set_preferred_sink" data-htm-enabled-bind="item.can_set_preferred_sink" data-htm-target="pipewire.default_sink"></button></article></template>"#,
+            r#"<input id="set" type="range" data-htm-element="range-control" data-htm-bind="pipewire.default_sink.volume" data-htm-action="pipewire.defaults.set_preferred_sink" data-htm-enabled-bind="pipewire.default_sink.can_set_volume">"#,
+        ] {
+            assert!(discover(invalid, BuiltInSurfaceKind::Overlay).is_err());
+        }
+
+        let excessive = (0..=MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_ITEM)
+            .map(|index| {
+                format!(
+                    r#"<button data-htm-local-id="set-{index}" data-htm-element="action-button" data-htm-action="pipewire.defaults.set_preferred_sink" data-htm-enabled-bind="item.can_set_preferred_sink"></button>"#
+                )
+            })
+            .collect::<String>();
+        let excessive = format!(
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><article>{excessive}</article></template>"#
+        );
+        assert!(discover(&excessive, BuiltInSurfaceKind::Overlay).is_err());
     }
 
     #[test]

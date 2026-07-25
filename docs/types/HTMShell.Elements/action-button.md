@@ -46,6 +46,18 @@ Clock actions resolve `data-htm-target` as an exact `id` in the same document. T
 
 Inside `pipewire.nodes`, the mute actions `pipewire.audio.mute`, `pipewire.audio.unmute`, and `pipewire.audio.toggle_mute` target the current item and require `item.can_set_mute`. No target attribute is used. Other actions and repeats remain read-only.
 
+The same node repeat permits
+`pipewire.defaults.set_preferred_sink` with
+`item.can_set_preferred_sink` and
+`pipewire.defaults.set_preferred_source` with
+`item.can_set_preferred_source`. These actions also use the implicit current
+item and reject `data-htm-target`.
+
+Top-level buttons may use `pipewire.defaults.clear_preferred_sink` with
+`pipewire.configured_sink.can_clear` or
+`pipewire.defaults.clear_preferred_source` with
+`pipewire.configured_source.can_clear`. Clear actions also reject a target.
+
 Outside a repeat, PipeWire mute actions require `pipewire.default_sink` or `pipewire.default_source` as `data-htm-target`. Raw IDs and configured defaults are rejected. `pipewire.audio.set_volume` is valid only on [`range-control`](range-control.md).
 
 ## See also
@@ -54,4 +66,5 @@ Outside a repeat, PipeWire mute actions require `pipewire.default_sink` or `pipe
 - [Clock actions](../HTMShell.Actions/Clock.md)
 - [Power profile actions](../HTMShell.Actions/PowerProfile.md)
 - [PipeWire audio actions](../HTMShell.Actions/PipeWireAudio.md)
+- [PipeWire default actions](../HTMShell.Actions/PipeWireDefaults.md)
 - [State and actions guide](../../guide/state-and-actions.md)

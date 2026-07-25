@@ -211,6 +211,58 @@ Inside `pipewire.nodes`, `item.property` reads one static key:
 
 Common keys include `application.name`, `application.icon-name`, `media.name`, `media.title`, and `media.artist`. Presence is not guaranteed.
 
+## Preferred output and input
+
+Actual defaults and configured defaults remain separate. The actual default is
+the current result of session policy. The configured default is the user's
+stored preference for future policy decisions. Selecting a preference does not
+guarantee that the actual default changes immediately, and existing streams
+can remain routed to their current nodes.
+
+Inside `pipewire.nodes`, eligible nodes expose
+`item.can_set_preferred_sink` and `item.can_set_preferred_source`:
+
+```html
+<button data-htm-element="action-button"
+        data-htm-local-id="prefer-output"
+        data-htm-action="pipewire.defaults.set_preferred_sink"
+        data-htm-enabled-bind="item.can_set_preferred_sink">
+  Use as preferred output
+</button>
+```
+
+The source action is `pipewire.defaults.set_preferred_source` with
+`item.can_set_preferred_source`. The current node item is the complete target.
+No target attribute is accepted. Raw IDs, node names, DOM IDs, selectors, and
+dynamic values cannot target these actions.
+
+A writable configured preference can be cleared outside a repeat:
+
+```html
+<button id="clear-output"
+        data-htm-element="action-button"
+        data-htm-action="pipewire.defaults.clear_preferred_sink"
+        data-htm-enabled-bind="pipewire.configured_sink.can_clear">
+  Clear preferred output
+</button>
+```
+
+Use `pipewire.defaults.clear_preferred_source` and
+`pipewire.configured_source.can_clear` for the input role.
+
+Configured metadata is authoritative. Buttons use runtime-owned
+`data-htm-state` values `idle`, `pending`, `failed`, and `unavailable`. A write
+call alone does not confirm the change, and an actual-default change does not
+confirm it either. Confirmation requires the matching configured metadata
+event. Permission denial, write failure, a two-second timeout, node removal,
+metadata replacement, and reconnect cannot publish stale success.
+
+Sink and source requests are independent. Each role retains one in-flight
+request and one latest queued target. Duplicate requests are suppressed.
+Several documents and outputs share the same metadata proxy and role
+coordinators. Removing the final preferred-write consumer releases that role's
+write state without disabling read-only configured-default consumers.
+
 ## Links and grouped connections
 
 `pipewire.link_count` and `pipewire.link_group_count` report the authoritative
@@ -330,6 +382,10 @@ outputs share the process graph. Removing the last graph consumer releases
 link proxies and graph-detail demand without disturbing independent audio or
 channel consumers.
 
+Configured-default read demand and write demand are separate. Preferred sink
+and source write demand are also independent. A document without a preferred
+action creates no configured-default write demand.
+
 Limits include:
 
 - 16 `pipewire.nodes` repeats per document
@@ -339,6 +395,8 @@ Limits include:
 - 32 property lookups per item
 - 128 PipeWire audio controls per document
 - 16 PipeWire audio controls per repeated item
+- 128 preferred-default controls per document
+- 8 preferred-default controls per repeated node item
 - 64 range controls per document
 - 8 range controls per repeated item
 - 8 `item.channels` repeats per outer node template
@@ -355,12 +413,14 @@ Limits include:
 - exactly one contextual repeat level
 - 4,096 node write coordinators, bounded by the graph limit
 - one pending mute intent and one pending volume intent per node
+- one in-flight request and one latest queued request per default role
+- 4,096 interested preferred-default control identities process-wide
 - a two-second confirmation timeout
 
 ## Current limitations
 
-Channel mute, channel-map writes, preferred-default writes, link mutation,
-peak monitoring, stream movement, arbitrary graph queries, and spatial graph
-rendering are not available.
+Channel mute, channel-map writes, link mutation, peak monitoring, stream
+movement, arbitrary graph queries, and spatial graph rendering are not
+available.
 
 See the tracked [audio inspector dashboard](../../examples/audio-inspector/shell.json).

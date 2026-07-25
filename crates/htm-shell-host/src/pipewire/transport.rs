@@ -28,6 +28,45 @@ use std::os::fd::AsRawFd;
 use std::rc::Rc;
 
 pub(crate) const MAX_PIPEWIRE_ITERATIONS_PER_DISPATCH: usize = 8;
+const CONFIGURED_DEFAULT_METADATA_TYPE: &str = "Spa:String:JSON";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConfiguredDefaultProperty<'a> {
+    subject: u32,
+    key: &'a str,
+    type_name: &'static str,
+    value: Option<&'a str>,
+}
+
+fn configured_default_property<'a>(
+    key: &'a str,
+    value: Option<&'a str>,
+) -> Result<ConfiguredDefaultProperty<'a>, String> {
+    if !matches!(
+        key,
+        "default.configured.audio.sink" | "default.configured.audio.source"
+    ) {
+        return Err("unsupported PipeWire configured-default metadata key".into());
+    }
+    if value.is_some_and(|value| value.len() > MAX_METADATA_VALUE_BYTES || value.contains('\0')) {
+        return Err("PipeWire configured-default metadata value is invalid".into());
+    }
+    Ok(ConfiguredDefaultProperty {
+        subject: PW_ID_CORE,
+        key,
+        type_name: CONFIGURED_DEFAULT_METADATA_TYPE,
+        value,
+    })
+}
+
+fn dispatch_configured_default_property<'a>(
+    key: &'a str,
+    value: Option<&'a str>,
+    dispatch: impl FnOnce(ConfiguredDefaultProperty<'a>),
+) -> Result<(), String> {
+    dispatch(configured_default_property(key, value)?);
+    Ok(())
+}
 
 #[derive(Debug, Default)]
 struct CallbackStaging {
@@ -71,7 +110,7 @@ struct BoundLink {
 
 struct BoundMetadata {
     _listener: MetadataListener,
-    _proxy: Metadata,
+    proxy: Metadata,
 }
 
 #[derive(Clone)]
@@ -98,6 +137,7 @@ struct BoundObjects {
     nodes: HashMap<u32, BoundNode>,
     links: HashMap<u32, BoundLink>,
     metadata: HashMap<u32, BoundMetadata>,
+    active_metadata: Option<u32>,
 }
 
 impl BoundObjects {
@@ -221,6 +261,9 @@ impl PipeWireTransport {
                     }
                     let metadata_known = objects.known_metadata.remove(&raw_id).is_some();
                     objects.metadata.remove(&raw_id);
+                    if objects.active_metadata == Some(raw_id) {
+                        objects.active_metadata = None;
+                    }
                     if metadata_known && demand.borrow().defaults {
                         staging
                             .borrow_mut()
@@ -385,13 +428,14 @@ impl PipeWireTransport {
         }
 
         if previous.defaults != demand.defaults {
-            let known = self
+            let mut known = self
                 .objects
                 .borrow()
                 .known_metadata
                 .values()
                 .cloned()
                 .collect::<Vec<_>>();
+            known.sort_by_key(|global| global.id);
             if demand.defaults {
                 for global in known {
                     bind_metadata_proxy(&self._registry, &global, &self.objects, &self.staging);
@@ -404,7 +448,10 @@ impl PipeWireTransport {
                     .keys()
                     .copied()
                     .collect::<Vec<_>>();
-                self.objects.borrow_mut().metadata.clear();
+                let mut objects = self.objects.borrow_mut();
+                objects.metadata.clear();
+                objects.active_metadata = None;
+                drop(objects);
                 for raw_id in ids {
                     self.staging
                         .borrow_mut()
@@ -481,6 +528,37 @@ impl PipeWireTransport {
                 Value::ValueArray(ValueArray::Float(volumes)),
             )],
         )
+    }
+
+    pub(crate) fn set_configured_default(
+        &self,
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<(), String> {
+        let objects = self.objects.borrow();
+        let raw_id = objects
+            .active_metadata
+            .ok_or_else(|| "PipeWire default metadata is unavailable".to_owned())?;
+        let metadata = objects
+            .metadata
+            .get(&raw_id)
+            .ok_or_else(|| "PipeWire default metadata proxy is unavailable".to_owned())?;
+        let writable = objects.known_metadata.get(&raw_id).is_some_and(|global| {
+            global
+                .permissions
+                .contains(PermissionFlags::W | PermissionFlags::X)
+        });
+        if !writable {
+            return Err("PipeWire default metadata is read-only".into());
+        }
+        dispatch_configured_default_property(key, value, |property| {
+            metadata.proxy.set_property(
+                property.subject,
+                property.key,
+                Some(property.type_name),
+                property.value,
+            );
+        })
     }
 
     fn set_node_properties(&self, raw_id: u32, properties: Vec<Property>) -> Result<(), String> {
@@ -837,7 +915,9 @@ fn bind_metadata_proxy(
     objects: &Rc<RefCell<BoundObjects>>,
     staging: &Rc<RefCell<CallbackStaging>>,
 ) {
-    if objects.borrow().metadata.contains_key(&global.id) {
+    if objects.borrow().active_metadata == Some(global.id)
+        && objects.borrow().metadata.contains_key(&global.id)
+    {
         return;
     }
     let metadata = match registry.bind::<Metadata, _>(global) {
@@ -850,9 +930,12 @@ fn bind_metadata_proxy(
             return;
         }
     };
-    staging
-        .borrow_mut()
-        .push(PipeWireDelta::MetadataAdded { raw_id: global.id });
+    staging.borrow_mut().push(PipeWireDelta::MetadataAdded {
+        raw_id: global.id,
+        writable: global
+            .permissions
+            .contains(PermissionFlags::W | PermissionFlags::X),
+    });
     let raw_id = global.id;
     let metadata_staging = staging.clone();
     let listener = metadata
@@ -882,11 +965,14 @@ fn bind_metadata_proxy(
             0
         })
         .register();
-    objects.borrow_mut().metadata.insert(
+    let mut objects = objects.borrow_mut();
+    objects.metadata.clear();
+    objects.active_metadata = Some(global.id);
+    objects.metadata.insert(
         global.id,
         BoundMetadata {
             _listener: listener,
-            _proxy: metadata,
+            proxy: metadata,
         },
     );
 }
@@ -1063,6 +1149,46 @@ mod tests {
     #[test]
     fn dispatch_iteration_bound_is_finite() {
         assert_eq!(MAX_PIPEWIRE_ITERATIONS_PER_DISPATCH, 8);
+    }
+
+    #[test]
+    fn configured_default_write_spec_is_exact_and_bounded() {
+        let mut sink = None;
+        dispatch_configured_default_property(
+            "default.configured.audio.sink",
+            Some(r#"{"name":"alsa_output.test"}"#),
+            |property| sink = Some(property),
+        )
+        .unwrap();
+        let sink = sink.unwrap();
+        assert_eq!(sink.subject, PW_ID_CORE);
+        assert_eq!(sink.key, "default.configured.audio.sink");
+        assert_eq!(sink.type_name, "Spa:String:JSON");
+        assert_eq!(sink.value, Some(r#"{"name":"alsa_output.test"}"#));
+
+        let mut source = None;
+        dispatch_configured_default_property("default.configured.audio.source", None, |property| {
+            source = Some(property)
+        })
+        .unwrap();
+        let source = source.unwrap();
+        assert_eq!(source.subject, PW_ID_CORE);
+        assert_eq!(source.key, "default.configured.audio.source");
+        assert_eq!(source.type_name, "Spa:String:JSON");
+        assert_eq!(source.value, None);
+
+        assert!(configured_default_property("default.audio.sink", None).is_err());
+        assert!(
+            configured_default_property("default.configured.audio.sink", Some("bad\0value"))
+                .is_err()
+        );
+        assert!(
+            configured_default_property(
+                "default.configured.audio.sink",
+                Some(&"x".repeat(MAX_METADATA_VALUE_BYTES + 1)),
+            )
+            .is_err()
+        );
     }
 
     #[test]

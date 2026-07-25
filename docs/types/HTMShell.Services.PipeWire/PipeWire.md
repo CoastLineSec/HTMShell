@@ -4,7 +4,8 @@
 **Scope:** Process
 
 `PipeWire` exposes connection state, nodes, the read-only link graph, default
-audio state, ordered channels, and typed volume and mute controls.
+audio state, ordered channels, typed volume and mute controls, and configured
+default selection.
 
 ## State
 
@@ -43,6 +44,11 @@ Link collection, link detail, group collection, group-member, node-tracker,
 and relation demand are tracked separately. Declaring graph bindings does not
 create PipeWire write or peak-monitor demand.
 
+Preferred sink and source actions add independent configured-default write
+demand. All documents share the existing default metadata proxy and one
+bounded coordinator per role. Removing the final role consumer releases that
+role's pending presentation state while independent read demand can remain.
+
 ## Lifecycle
 
 PipeWire absence is valid. On disconnect, the current graph and defaults are
@@ -53,6 +59,7 @@ session-local node or link IDs cannot alias old items.
 
 - [`Node`](Node.md)
 - [`Defaults`](Defaults.md)
+- [`DefaultControls`](DefaultControls.md)
 - [`AudioNode`](AudioNode.md)
 - [`AudioControls`](AudioControls.md)
 - [`AudioChannel`](AudioChannel.md)

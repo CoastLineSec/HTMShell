@@ -23,6 +23,7 @@ button:disabled, input:disabled { opacity: 0.45; }
 .summary > div { padding: 12px; border-radius: 10px; background: #1b2940; }
 .summary span { display: block; margin-bottom: 5px; color: #92a5c0; }
 .audio-summary { display: flex; gap: 8px; }
+.clear-preference { margin-top: 7px; }
 .default-controls { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin: 20px 0; }
 .default-controls article { padding: 14px; border-radius: 10px; background: #1b2940; }
 .default-controls h2 { margin-top: 0; }
@@ -42,6 +43,8 @@ dd[data-htm-state="unavailable"] { color: #74839a; }
 .node-audio { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; margin-top: 12px; padding-top: 12px; border-top: 1px solid #3c4f6c; }
 .node-audio input { grid-column: 1 / -1; }
 .audio-reading { display: flex; gap: 8px; }
+.default-selection { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 10px; }
+.default-selection button[data-htm-state="idle"] { border-color: #71d8a7; }
 .channels { margin-top: 12px; padding-top: 12px; border-top: 1px solid #3c4f6c; }
 .channels > header { display: flex; justify-content: space-between; color: #91a8c8; }
 .channel-strips { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-top: 8px; }

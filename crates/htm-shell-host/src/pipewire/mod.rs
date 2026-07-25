@@ -5,7 +5,8 @@ mod transport;
 
 use htm_runtime::{
     PipeWireAudioOperation, PipeWireAudioTarget, PipeWireControlIdentity, PipeWireControlRequest,
-    PipeWireControlState,
+    PipeWireControlState, PipeWireDefaultControlRequest, PipeWireDefaultRole,
+    PipeWireDefaultTarget,
 };
 pub use model::PipeWireAudioChannelPosition;
 #[cfg(test)]
@@ -17,7 +18,7 @@ pub use public::{PipeWireNodeDirection, PipeWireNodeType};
 use reconcile::PipeWireReconciler;
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fd::BorrowedFd;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::RawFd;
 use std::time::{Duration, Instant};
 use transport::PipeWireTransport;
@@ -32,6 +33,9 @@ const DIAGNOSTIC_MAXIMUM_RUNTIME: Duration = Duration::from_secs(3);
 const DIAGNOSTIC_SETTLE_TIME: Duration = Duration::from_millis(150);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
 const VOLUME_WRITE_INTERVAL: Duration = Duration::from_millis(16);
+const MAX_DEFAULT_CONTROL_IDENTITIES: usize = 4096;
+const CONFIGURED_SINK_KEY: &str = "default.configured.audio.sink";
+const CONFIGURED_SOURCE_KEY: &str = "default.configured.audio.source";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PipeWireControlOutcome {
@@ -52,6 +56,33 @@ struct PendingWrite<T> {
 struct NodeWriteCoordinator {
     mute: Option<PendingWrite<bool>>,
     volume: Option<PendingWrite<Vec<model::FiniteVolume>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreferredTarget {
+    Node {
+        id: model::PipeWireNodeId,
+        name: String,
+    },
+    Clear,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConfiguredValue {
+    Cleared,
+    Named(String),
+    Unresolved,
+}
+
+#[derive(Debug, Clone)]
+struct PendingDefaultWrite {
+    sent: PreferredTarget,
+    queued: Option<PreferredTarget>,
+    started: Instant,
+    connection_generation: u64,
+    metadata_generation: u64,
+    baseline: ConfiguredValue,
+    controls: BTreeMap<PipeWireControlIdentity, PreferredTarget>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +116,8 @@ pub(crate) struct PipeWireSource {
     last_publication: Instant,
     demand: PipeWireDemand,
     writes: BTreeMap<model::PipeWireNodeId, NodeWriteCoordinator>,
+    preferred_sink_write: Option<PendingDefaultWrite>,
+    preferred_source_write: Option<PendingDefaultWrite>,
     control_outcomes: Vec<PipeWireControlOutcome>,
     control_counters: model::PipeWireControlCounters,
 }
@@ -104,6 +137,8 @@ impl Default for PipeWireSource {
             last_publication: Instant::now(),
             demand: PipeWireDemand::default(),
             writes: BTreeMap::new(),
+            preferred_sink_write: None,
+            preferred_source_write: None,
             control_outcomes: Vec::new(),
             control_counters: model::PipeWireControlCounters::default(),
         }
@@ -122,9 +157,14 @@ impl PipeWireSource {
         if self.demand == demand {
             return false;
         }
+        let preferred_capabilities_before = demand
+            .is_empty()
+            .then(|| preferred_capabilities(self.snapshot()));
         let was_empty = self.demand.is_empty();
         let had_audio = self.demand.audio_state || self.demand.audio_writes;
         let had_writes = self.demand.audio_writes;
+        let had_sink_writes = self.demand.preferred_sink_writes;
+        let had_source_writes = self.demand.preferred_source_writes;
         self.demand = demand.clone();
         let has_audio = demand.audio_state || demand.audio_writes;
         if !had_audio && has_audio {
@@ -138,7 +178,16 @@ impl PipeWireSource {
         }
         self.sync_control_counters();
         if had_writes && !demand.audio_writes {
-            self.finish_all_controls(PipeWireControlState::Unavailable);
+            self.finish_all_audio_controls(PipeWireControlState::Unavailable);
+        }
+        if had_sink_writes && !demand.preferred_sink_writes {
+            self.finish_default_role(PipeWireDefaultRole::Sink, PipeWireControlState::Unavailable);
+        }
+        if had_source_writes && !demand.preferred_source_writes {
+            self.finish_default_role(
+                PipeWireDefaultRole::Source,
+                PipeWireControlState::Unavailable,
+            );
         }
         if demand.is_empty() {
             self.transport.take();
@@ -147,6 +196,9 @@ impl PipeWireSource {
             self.synchronization = SynchronizationStage::First;
             self.lifecycle = PipeWireLifecycle::Dormant;
             let _ = self.reconciler.mark_unavailable();
+            if let Some(before) = preferred_capabilities_before.as_ref() {
+                self.record_preferred_capability_updates(before);
+            }
         } else if was_empty {
             self.start();
         } else if let Some(transport) = self.transport.as_mut() {
@@ -191,7 +243,18 @@ impl PipeWireSource {
             .filter(|write| write.queued.is_some())
             .map(|write| (write.started + VOLUME_WRITE_INTERVAL).saturating_duration_since(now))
             .min();
-        [retry, control, cadence].into_iter().flatten().min()
+        let default_control = [
+            self.preferred_sink_write.as_ref(),
+            self.preferred_source_write.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|write| (write.started + CONTROL_TIMEOUT).saturating_duration_since(now))
+        .min();
+        [retry, control, cadence, default_control]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     pub(crate) fn reconnect_if_due(&mut self, now: Instant) -> bool {
@@ -234,6 +297,7 @@ impl PipeWireSource {
         if deltas.is_empty() {
             return;
         }
+        let preferred_capabilities = preferred_capabilities(self.snapshot());
         if let Some(error) = deltas.iter().find_map(|delta| match delta {
             PipeWireDelta::CoreError(message) | PipeWireDelta::SourceError(message) => {
                 Some(message.clone())
@@ -332,6 +396,7 @@ impl PipeWireSource {
             self.last_publication = now;
         }
         self.reconcile_pending_writes(now);
+        self.record_preferred_capability_updates(&preferred_capabilities);
     }
 
     pub(crate) fn request_control(
@@ -556,6 +621,116 @@ impl PipeWireSource {
         Ok(())
     }
 
+    pub(crate) fn request_default_control(
+        &mut self,
+        request: PipeWireDefaultControlRequest,
+    ) -> Result<(), String> {
+        let demanded = match request.role {
+            PipeWireDefaultRole::Sink => self.demand.preferred_sink_writes,
+            PipeWireDefaultRole::Source => self.demand.preferred_source_writes,
+        };
+        if !demanded || !self.demand.configured_default_writes {
+            return Err("PipeWire configured-default writes have no active document demand".into());
+        }
+        let target = self.resolve_default_target(request.role, &request.target)?;
+        let authoritative = self.configured_value(request.role);
+        let mut pending = self.take_default_role(request.role);
+        if let Some(write) = pending.as_mut() {
+            if write.controls.len() >= MAX_DEFAULT_CONTROL_IDENTITIES
+                && !write.controls.contains_key(&request.control)
+            {
+                self.put_default_role(request.role, pending);
+                return Err("PipeWire preferred-default control identity limit reached".into());
+            }
+            if write.sent == target {
+                if let Some(replaced) = write.queued.take() {
+                    let replaced_controls =
+                        take_controls_for_target(&mut write.controls, &replaced);
+                    self.finish_preferred_controls(replaced_controls, PipeWireControlState::Failed);
+                    self.control_counters.default_requests_replaced = self
+                        .control_counters
+                        .default_requests_replaced
+                        .saturating_add(1);
+                }
+                self.control_counters.duplicate_writes_suppressed = self
+                    .control_counters
+                    .duplicate_writes_suppressed
+                    .saturating_add(1);
+            } else if write.queued.as_ref() == Some(&target) {
+                self.control_counters.duplicate_writes_suppressed = self
+                    .control_counters
+                    .duplicate_writes_suppressed
+                    .saturating_add(1);
+            } else {
+                if let Some(replaced) = write.queued.replace(target.clone()) {
+                    let replaced_controls =
+                        take_controls_for_target(&mut write.controls, &replaced);
+                    self.finish_preferred_controls(replaced_controls, PipeWireControlState::Failed);
+                    self.control_counters.default_requests_replaced = self
+                        .control_counters
+                        .default_requests_replaced
+                        .saturating_add(1);
+                } else {
+                    self.control_counters.default_requests_queued = self
+                        .control_counters
+                        .default_requests_queued
+                        .saturating_add(1);
+                }
+            }
+            write.controls.insert(request.control.clone(), target);
+            self.put_default_role(request.role, pending);
+        } else if target_matches_configured(&target, &authoritative) {
+            self.control_counters.duplicate_writes_suppressed = self
+                .control_counters
+                .duplicate_writes_suppressed
+                .saturating_add(1);
+            self.control_outcomes.push(PipeWireControlOutcome {
+                control: request.control,
+                state: PipeWireControlState::Idle,
+            });
+            self.sync_control_counters();
+            return Ok(());
+        } else {
+            if let Err(error) = self.send_preferred_default(request.role, &target) {
+                self.control_counters.default_failures =
+                    self.control_counters.default_failures.saturating_add(1);
+                self.sync_control_counters();
+                return Err(error);
+            }
+            let snapshot = self.snapshot();
+            pending = Some(PendingDefaultWrite {
+                sent: target.clone(),
+                queued: None,
+                started: Instant::now(),
+                connection_generation: snapshot.connection_generation,
+                metadata_generation: snapshot.defaults.metadata_generation,
+                baseline: authoritative,
+                controls: BTreeMap::from([(request.control.clone(), target)]),
+            });
+            self.put_default_role(request.role, pending);
+        }
+        match request.role {
+            PipeWireDefaultRole::Sink => {
+                self.control_counters.sink_requests_accepted = self
+                    .control_counters
+                    .sink_requests_accepted
+                    .saturating_add(1);
+            }
+            PipeWireDefaultRole::Source => {
+                self.control_counters.source_requests_accepted = self
+                    .control_counters
+                    .source_requests_accepted
+                    .saturating_add(1);
+            }
+        }
+        self.control_outcomes.push(PipeWireControlOutcome {
+            control: request.control,
+            state: PipeWireControlState::Pending,
+        });
+        self.sync_control_counters();
+        Ok(())
+    }
+
     pub(crate) fn take_control_outcomes(&mut self) -> Vec<PipeWireControlOutcome> {
         std::mem::take(&mut self.control_outcomes)
     }
@@ -612,12 +787,14 @@ impl PipeWireSource {
     }
 
     fn disconnect(&mut self, now: Instant, _reason: String) {
+        let preferred_capabilities_before = preferred_capabilities(self.snapshot());
         self.finish_all_controls(PipeWireControlState::Unavailable);
         self.transport.take();
         self.expected_sync = None;
         self.synchronization = SynchronizationStage::First;
         self.lifecycle = PipeWireLifecycle::Disconnected;
         let _ = self.reconciler.mark_unavailable();
+        self.record_preferred_capability_updates(&preferred_capabilities_before);
         if self.demand.is_empty() {
             self.retry_deadline = None;
             self.lifecycle = PipeWireLifecycle::Dormant;
@@ -679,6 +856,114 @@ impl PipeWireSource {
                 channel_target_index(target, node)?;
                 Ok(id)
             }
+        }
+    }
+
+    fn resolve_default_target(
+        &self,
+        role: PipeWireDefaultRole,
+        target: &PipeWireDefaultTarget,
+    ) -> Result<PreferredTarget, String> {
+        let snapshot = self.snapshot();
+        if !snapshot.ready
+            || !snapshot.defaults.metadata_available
+            || !snapshot.defaults.metadata_writable
+        {
+            return Err("PipeWire configured-default metadata is not writable".into());
+        }
+        match target {
+            PipeWireDefaultTarget::Clear => Ok(PreferredTarget::Clear),
+            PipeWireDefaultTarget::NodeItem {
+                source_generation,
+                item_key,
+            } => {
+                if *source_generation != snapshot.connection_generation {
+                    return Err(
+                        "PipeWire preferred-default target belongs to a stale generation".into(),
+                    );
+                }
+                let id = parse_node_item_key(item_key)?;
+                let node = snapshot
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == id)
+                    .ok_or_else(|| "PipeWire preferred-default target is unavailable".to_owned())?;
+                let eligible = node.ready
+                    && node.classification.audio
+                    && match role {
+                        PipeWireDefaultRole::Sink => node.classification.sink,
+                        PipeWireDefaultRole::Source => node.classification.source,
+                    };
+                if !eligible {
+                    return Err(
+                        "PipeWire node is not eligible for the requested default role".into(),
+                    );
+                }
+                let name = node
+                    .name
+                    .as_ref()
+                    .filter(|name| !name.is_empty())
+                    .cloned()
+                    .ok_or_else(|| {
+                        "PipeWire node lacks the name required by configured-default metadata"
+                            .to_owned()
+                    })?;
+                if name.len() > model::MAX_NODE_TEXT_BYTES || name.contains('\0') {
+                    return Err("PipeWire configured-default node name is invalid".into());
+                }
+                Ok(PreferredTarget::Node { id, name })
+            }
+        }
+    }
+
+    fn configured_value(&self, role: PipeWireDefaultRole) -> ConfiguredValue {
+        let target = match role {
+            PipeWireDefaultRole::Sink => &self.snapshot().defaults.configured_sink,
+            PipeWireDefaultRole::Source => &self.snapshot().defaults.configured_source,
+        };
+        if let Some(name) = &target.metadata_name {
+            ConfiguredValue::Named(name.clone())
+        } else if target.unresolved_value.is_some() {
+            ConfiguredValue::Unresolved
+        } else {
+            ConfiguredValue::Cleared
+        }
+    }
+
+    fn send_preferred_default(
+        &mut self,
+        role: PipeWireDefaultRole,
+        target: &PreferredTarget,
+    ) -> Result<(), String> {
+        let value = encode_preferred_target(target)?;
+        let key = match role {
+            PipeWireDefaultRole::Sink => CONFIGURED_SINK_KEY,
+            PipeWireDefaultRole::Source => CONFIGURED_SOURCE_KEY,
+        };
+        self.transport
+            .as_ref()
+            .ok_or_else(|| "PipeWire transport is unavailable".to_owned())?
+            .set_configured_default(key, value.as_deref())?;
+        self.control_counters.metadata_writes_sent =
+            self.control_counters.metadata_writes_sent.saturating_add(1);
+        Ok(())
+    }
+
+    fn take_default_role(&mut self, role: PipeWireDefaultRole) -> Option<PendingDefaultWrite> {
+        match role {
+            PipeWireDefaultRole::Sink => self.preferred_sink_write.take(),
+            PipeWireDefaultRole::Source => self.preferred_source_write.take(),
+        }
+    }
+
+    fn put_default_role(
+        &mut self,
+        role: PipeWireDefaultRole,
+        pending: Option<PendingDefaultWrite>,
+    ) {
+        match role {
+            PipeWireDefaultRole::Sink => self.preferred_sink_write = pending,
+            PipeWireDefaultRole::Source => self.preferred_source_write = pending,
         }
     }
 
@@ -835,6 +1120,192 @@ impl PipeWireSource {
                 self.writes.insert(id, coordinator);
             }
         }
+        self.reconcile_preferred_default(PipeWireDefaultRole::Sink, now);
+        self.reconcile_preferred_default(PipeWireDefaultRole::Source, now);
+        self.sync_control_counters();
+    }
+
+    fn reconcile_preferred_default(&mut self, role: PipeWireDefaultRole, now: Instant) {
+        let Some(mut write) = self.take_default_role(role) else {
+            return;
+        };
+        let snapshot = self.snapshot();
+        if !snapshot.ready
+            || !snapshot.defaults.metadata_available
+            || !snapshot.defaults.metadata_writable
+        {
+            self.control_counters.metadata_generation_cancellations = self
+                .control_counters
+                .metadata_generation_cancellations
+                .saturating_add(1);
+            self.finish_preferred_controls(write.controls, PipeWireControlState::Unavailable);
+            return;
+        }
+        if write.connection_generation != snapshot.connection_generation
+            || write.metadata_generation != snapshot.defaults.metadata_generation
+        {
+            self.control_counters.stale_default_confirmations_rejected = self
+                .control_counters
+                .stale_default_confirmations_rejected
+                .saturating_add(1);
+            self.control_counters.metadata_generation_cancellations = self
+                .control_counters
+                .metadata_generation_cancellations
+                .saturating_add(1);
+            self.finish_preferred_controls(write.controls, PipeWireControlState::Unavailable);
+            return;
+        }
+        if !self.preferred_target_is_current(&write.sent) {
+            self.control_counters.default_node_removal_cancellations = self
+                .control_counters
+                .default_node_removal_cancellations
+                .saturating_add(1);
+            self.finish_preferred_controls(write.controls, PipeWireControlState::Unavailable);
+            return;
+        }
+
+        let authoritative = self.configured_value(role);
+        if target_matches_configured(&write.sent, &authoritative) {
+            let sent_controls = take_controls_for_target(&mut write.controls, &write.sent);
+            self.finish_preferred_controls(sent_controls, PipeWireControlState::Idle);
+            self.control_counters.default_confirmations = self
+                .control_counters
+                .default_confirmations
+                .saturating_add(1);
+            if let Some(queued) = write.queued.take() {
+                if target_matches_configured(&queued, &authoritative) {
+                    let queued_controls = take_controls_for_target(&mut write.controls, &queued);
+                    self.finish_preferred_controls(queued_controls, PipeWireControlState::Idle);
+                    self.finish_preferred_controls(write.controls, PipeWireControlState::Idle);
+                    return;
+                }
+                if !self.preferred_target_is_current(&queued) {
+                    self.control_counters.default_node_removal_cancellations = self
+                        .control_counters
+                        .default_node_removal_cancellations
+                        .saturating_add(1);
+                    self.finish_preferred_controls(
+                        write.controls,
+                        PipeWireControlState::Unavailable,
+                    );
+                    return;
+                }
+                if self.send_preferred_default(role, &queued).is_err() {
+                    self.control_counters.default_failures =
+                        self.control_counters.default_failures.saturating_add(1);
+                    self.finish_preferred_controls(write.controls, PipeWireControlState::Failed);
+                    return;
+                }
+                write.sent = queued;
+                write.started = now;
+                write.baseline = authoritative;
+                self.put_default_role(role, Some(write));
+                return;
+            }
+            self.finish_preferred_controls(write.controls, PipeWireControlState::Idle);
+            return;
+        }
+
+        if authoritative != write.baseline && authoritative != ConfiguredValue::Unresolved {
+            self.control_counters.default_external_overrides = self
+                .control_counters
+                .default_external_overrides
+                .saturating_add(1);
+            let sent_controls = take_controls_for_target(&mut write.controls, &write.sent);
+            self.finish_preferred_controls(sent_controls, PipeWireControlState::Failed);
+            if let Some(queued) = write.queued.take() {
+                if target_matches_configured(&queued, &authoritative) {
+                    let queued_controls = take_controls_for_target(&mut write.controls, &queued);
+                    self.finish_preferred_controls(queued_controls, PipeWireControlState::Idle);
+                    self.finish_preferred_controls(write.controls, PipeWireControlState::Idle);
+                } else if self.preferred_target_is_current(&queued)
+                    && self.send_preferred_default(role, &queued).is_ok()
+                {
+                    write.sent = queued;
+                    write.started = now;
+                    write.baseline = authoritative;
+                    self.put_default_role(role, Some(write));
+                } else {
+                    self.control_counters.default_failures =
+                        self.control_counters.default_failures.saturating_add(1);
+                    self.finish_preferred_controls(write.controls, PipeWireControlState::Failed);
+                }
+            } else {
+                self.finish_preferred_controls(write.controls, PipeWireControlState::Failed);
+            }
+            return;
+        }
+
+        if now.duration_since(write.started) >= CONTROL_TIMEOUT {
+            self.control_counters.default_timeouts =
+                self.control_counters.default_timeouts.saturating_add(1);
+            let sent_controls = take_controls_for_target(&mut write.controls, &write.sent);
+            self.finish_preferred_controls(sent_controls, PipeWireControlState::Failed);
+            if let Some(queued) = write.queued.take() {
+                if target_matches_configured(&queued, &authoritative) {
+                    let queued_controls = take_controls_for_target(&mut write.controls, &queued);
+                    self.finish_preferred_controls(queued_controls, PipeWireControlState::Idle);
+                    self.finish_preferred_controls(write.controls, PipeWireControlState::Idle);
+                } else if self.preferred_target_is_current(&queued)
+                    && self.send_preferred_default(role, &queued).is_ok()
+                {
+                    write.sent = queued;
+                    write.started = now;
+                    write.baseline = authoritative;
+                    self.put_default_role(role, Some(write));
+                } else {
+                    self.control_counters.default_failures =
+                        self.control_counters.default_failures.saturating_add(1);
+                    self.finish_preferred_controls(write.controls, PipeWireControlState::Failed);
+                }
+            } else {
+                self.finish_preferred_controls(write.controls, PipeWireControlState::Failed);
+            }
+            return;
+        }
+        self.put_default_role(role, Some(write));
+    }
+
+    fn preferred_target_is_current(&self, target: &PreferredTarget) -> bool {
+        match target {
+            PreferredTarget::Clear => true,
+            PreferredTarget::Node { id, name } => {
+                self.snapshot()
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == *id)
+                    .and_then(|node| node.name.as_ref())
+                    == Some(name)
+            }
+        }
+    }
+
+    fn record_preferred_capability_updates(
+        &mut self,
+        before: &BTreeMap<model::PipeWireNodeId, (bool, bool)>,
+    ) {
+        let after = preferred_capabilities(self.snapshot());
+        let ids = before
+            .keys()
+            .chain(after.keys())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let mut sink_updates = 0u64;
+        let mut source_updates = 0u64;
+        for id in ids {
+            let old = before.get(&id).copied().unwrap_or_default();
+            let new = after.get(&id).copied().unwrap_or_default();
+            sink_updates = sink_updates.saturating_add(u64::from(old.0 != new.0));
+            source_updates = source_updates.saturating_add(u64::from(old.1 != new.1));
+        }
+        self.control_counters.preferred_sink_capability_updates = self
+            .control_counters
+            .preferred_sink_capability_updates
+            .saturating_add(sink_updates);
+        self.control_counters.preferred_source_capability_updates = self
+            .control_counters
+            .preferred_source_capability_updates
+            .saturating_add(source_updates);
         self.sync_control_counters();
     }
 
@@ -888,7 +1359,25 @@ impl PipeWireSource {
         );
     }
 
-    fn finish_all_controls(&mut self, state: PipeWireControlState) {
+    fn finish_preferred_controls(
+        &mut self,
+        controls: BTreeMap<PipeWireControlIdentity, PreferredTarget>,
+        state: PipeWireControlState,
+    ) {
+        self.control_outcomes.extend(
+            controls
+                .into_keys()
+                .map(|control| PipeWireControlOutcome { control, state }),
+        );
+    }
+
+    fn finish_default_role(&mut self, role: PipeWireDefaultRole, state: PipeWireControlState) {
+        if let Some(write) = self.take_default_role(role) {
+            self.finish_preferred_controls(write.controls, state);
+        }
+    }
+
+    fn finish_all_audio_controls(&mut self, state: PipeWireControlState) {
         let writes = std::mem::take(&mut self.writes);
         for coordinator in writes.into_values() {
             if let Some(write) = coordinator.mute {
@@ -898,6 +1387,12 @@ impl PipeWireSource {
                 self.finish_controls(write.controls, state);
             }
         }
+    }
+
+    fn finish_all_controls(&mut self, state: PipeWireControlState) {
+        self.finish_all_audio_controls(state);
+        self.finish_default_role(PipeWireDefaultRole::Sink, state);
+        self.finish_default_role(PipeWireDefaultRole::Source, state);
     }
 
     fn sync_control_counters(&mut self) {
@@ -916,6 +1411,66 @@ fn volume_vectors_match(left: &[model::FiniteVolume], right: &[model::FiniteVolu
             .iter()
             .zip(right)
             .all(|(left, right)| volumes_match(*left, *right))
+}
+
+fn target_matches_configured(target: &PreferredTarget, configured: &ConfiguredValue) -> bool {
+    match (target, configured) {
+        (PreferredTarget::Clear, ConfiguredValue::Cleared) => true,
+        (PreferredTarget::Node { name, .. }, ConfiguredValue::Named(configured)) => {
+            name == configured
+        }
+        _ => false,
+    }
+}
+
+fn preferred_node_capabilities(
+    snapshot: &PipeWireSnapshot,
+    node: &model::PipeWireNodeSnapshot,
+) -> (bool, bool) {
+    let eligible = snapshot.ready
+        && snapshot.defaults.metadata_writable
+        && node.ready
+        && node.classification.audio
+        && node.name.as_ref().is_some_and(|name| !name.is_empty());
+    (
+        eligible && node.classification.sink,
+        eligible && node.classification.source,
+    )
+}
+
+fn preferred_capabilities(
+    snapshot: &PipeWireSnapshot,
+) -> BTreeMap<model::PipeWireNodeId, (bool, bool)> {
+    snapshot
+        .nodes
+        .iter()
+        .map(|node| (node.id, preferred_node_capabilities(snapshot, node)))
+        .collect()
+}
+
+fn encode_preferred_target(target: &PreferredTarget) -> Result<Option<String>, String> {
+    match target {
+        PreferredTarget::Clear => Ok(None),
+        PreferredTarget::Node { name, .. } => {
+            serde_json::to_string(&serde_json::json!({ "name": name }))
+                .map(Some)
+                .map_err(|error| format!("encode PipeWire configured-default target: {error}"))
+        }
+    }
+}
+
+fn take_controls_for_target(
+    controls: &mut BTreeMap<PipeWireControlIdentity, PreferredTarget>,
+    target: &PreferredTarget,
+) -> BTreeMap<PipeWireControlIdentity, PreferredTarget> {
+    let matching = controls
+        .iter()
+        .filter_map(|(control, current)| (current == target).then_some(control.clone()))
+        .collect::<Vec<_>>();
+    matching
+        .into_iter()
+        .filter_map(|control| controls.remove_entry(&control))
+        .collect()
 }
 
 fn parse_node_item_key(value: &str) -> Result<model::PipeWireNodeId, String> {
@@ -1157,6 +1712,272 @@ mod tests {
             .unwrap();
         source.reconciler.mark_ready().unwrap();
         source
+    }
+
+    fn source_with_writable_defaults() -> PipeWireSource {
+        let mut source = source_with_audio_node();
+        source.demand.defaults = true;
+        source.demand.configured_default_writes = true;
+        source.demand.preferred_sink_writes = true;
+        source.demand.preferred_source_writes = true;
+        source
+            .reconciler
+            .apply([
+                PipeWireDelta::NodeInfo(model::RawNodeInfo {
+                    raw_id: 42,
+                    state: model::PipeWireNodeState::Running,
+                    raw_state: pipewire::sys::pw_node_state_PW_NODE_STATE_RUNNING,
+                    state_error: None,
+                    input_ports: 2,
+                    output_ports: 0,
+                    properties: None,
+                }),
+                PipeWireDelta::MetadataAdded {
+                    raw_id: 80,
+                    writable: true,
+                },
+                PipeWireDelta::MetadataProperty {
+                    raw_id: 80,
+                    subject: 0,
+                    key: Some(CONFIGURED_SINK_KEY.into()),
+                    type_name: Some("Spa:String:JSON".into()),
+                    value: Some(r#"{"name":"old-sink"}"#.into()),
+                },
+            ])
+            .unwrap();
+        source
+    }
+
+    fn preferred_node_target() -> PreferredTarget {
+        PreferredTarget::Node {
+            id: PipeWireNodeId {
+                connection_generation: 1,
+                global_id: 42,
+            },
+            name: "test-sink".into(),
+        }
+    }
+
+    fn pending_default(
+        source: &PipeWireSource,
+        target: PreferredTarget,
+        control: PipeWireControlIdentity,
+        started: Instant,
+    ) -> PendingDefaultWrite {
+        PendingDefaultWrite {
+            sent: target.clone(),
+            queued: None,
+            started,
+            connection_generation: source.snapshot().connection_generation,
+            metadata_generation: source.snapshot().defaults.metadata_generation,
+            baseline: ConfiguredValue::Named("old-sink".into()),
+            controls: BTreeMap::from([(control, target)]),
+        }
+    }
+
+    #[test]
+    fn configured_default_target_encoding_is_exact_and_clear_is_null() {
+        assert_eq!(
+            encode_preferred_target(&preferred_node_target()).unwrap(),
+            Some(r#"{"name":"test-sink"}"#.into())
+        );
+        assert_eq!(
+            encode_preferred_target(&PreferredTarget::Clear).unwrap(),
+            None
+        );
+        assert_eq!(CONFIGURED_SINK_KEY, "default.configured.audio.sink");
+        assert_eq!(CONFIGURED_SOURCE_KEY, "default.configured.audio.source");
+    }
+
+    #[test]
+    fn preferred_capability_counters_track_each_node_once() {
+        let mut source = source_with_writable_defaults();
+        let before = preferred_capabilities(source.snapshot());
+        let node_id = PipeWireNodeId {
+            connection_generation: 1,
+            global_id: 42,
+        };
+        assert_eq!(before[&node_id], (true, false));
+
+        source
+            .reconciler
+            .apply([PipeWireDelta::MetadataRemoved(80)])
+            .unwrap();
+        source.record_preferred_capability_updates(&before);
+
+        assert_eq!(
+            source
+                .snapshot()
+                .resources
+                .controls
+                .preferred_sink_capability_updates,
+            1
+        );
+        assert_eq!(
+            source
+                .snapshot()
+                .resources
+                .controls
+                .preferred_source_capability_updates,
+            0
+        );
+    }
+
+    #[test]
+    fn authoritative_configured_metadata_confirms_only_the_matching_role() {
+        let mut source = source_with_writable_defaults();
+        let sink_control = control("sink");
+        let source_control = control("source");
+        source.preferred_sink_write = Some(pending_default(
+            &source,
+            preferred_node_target(),
+            sink_control.clone(),
+            Instant::now(),
+        ));
+        source.preferred_source_write = Some(PendingDefaultWrite {
+            sent: preferred_node_target(),
+            queued: None,
+            started: Instant::now(),
+            connection_generation: source.snapshot().connection_generation,
+            metadata_generation: source.snapshot().defaults.metadata_generation,
+            baseline: ConfiguredValue::Cleared,
+            controls: BTreeMap::from([(source_control.clone(), preferred_node_target())]),
+        });
+        source
+            .reconciler
+            .apply([PipeWireDelta::MetadataProperty {
+                raw_id: 80,
+                subject: 0,
+                key: Some(CONFIGURED_SINK_KEY.into()),
+                type_name: Some("Spa:String:JSON".into()),
+                value: Some(r#"{"name":"test-sink"}"#.into()),
+            }])
+            .unwrap();
+        source.reconcile_pending_writes(Instant::now());
+        let outcomes = source.take_control_outcomes();
+        assert!(outcomes.contains(&PipeWireControlOutcome {
+            control: sink_control,
+            state: PipeWireControlState::Idle,
+        }));
+        assert!(
+            !outcomes
+                .iter()
+                .any(|outcome| outcome.control == source_control)
+        );
+        assert!(source.preferred_sink_write.is_none());
+        assert!(source.preferred_source_write.is_some());
+    }
+
+    #[test]
+    fn newest_preferred_target_replaces_an_older_queued_target() {
+        let mut source = source_with_writable_defaults();
+        let sent_control = control("sent");
+        let replaced_control = control("replaced");
+        let newest_control = control("newest");
+        source.preferred_sink_write = Some(PendingDefaultWrite {
+            sent: preferred_node_target(),
+            queued: Some(PreferredTarget::Clear),
+            started: Instant::now(),
+            connection_generation: source.snapshot().connection_generation,
+            metadata_generation: source.snapshot().defaults.metadata_generation,
+            baseline: ConfiguredValue::Named("old-sink".into()),
+            controls: BTreeMap::from([
+                (sent_control, preferred_node_target()),
+                (replaced_control.clone(), PreferredTarget::Clear),
+            ]),
+        });
+
+        source
+            .request_default_control(PipeWireDefaultControlRequest {
+                control: newest_control.clone(),
+                role: PipeWireDefaultRole::Sink,
+                target: PipeWireDefaultTarget::NodeItem {
+                    source_generation: 1,
+                    item_key: "1:42".into(),
+                },
+            })
+            .unwrap();
+
+        let pending = source.preferred_sink_write.as_ref().unwrap();
+        assert!(pending.queued.is_none());
+        assert_eq!(
+            pending.controls.get(&newest_control),
+            Some(&preferred_node_target())
+        );
+        let outcomes = source.take_control_outcomes();
+        assert!(outcomes.contains(&PipeWireControlOutcome {
+            control: replaced_control,
+            state: PipeWireControlState::Failed,
+        }));
+        assert!(outcomes.contains(&PipeWireControlOutcome {
+            control: newest_control,
+            state: PipeWireControlState::Pending,
+        }));
+    }
+
+    #[test]
+    fn preferred_default_timeout_node_removal_and_metadata_replacement_are_contained() {
+        let mut timed_out = source_with_writable_defaults();
+        let timeout_control = control("timeout");
+        timed_out.preferred_sink_write = Some(pending_default(
+            &timed_out,
+            preferred_node_target(),
+            timeout_control.clone(),
+            Instant::now() - CONTROL_TIMEOUT,
+        ));
+        timed_out.reconcile_pending_writes(Instant::now());
+        assert_eq!(
+            timed_out.take_control_outcomes(),
+            vec![PipeWireControlOutcome {
+                control: timeout_control,
+                state: PipeWireControlState::Failed,
+            }]
+        );
+
+        let mut removed = source_with_writable_defaults();
+        let removed_control = control("removed");
+        removed.preferred_sink_write = Some(pending_default(
+            &removed,
+            preferred_node_target(),
+            removed_control.clone(),
+            Instant::now(),
+        ));
+        removed
+            .reconciler
+            .apply([PipeWireDelta::NodeRemoved(42)])
+            .unwrap();
+        removed.reconcile_pending_writes(Instant::now());
+        assert_eq!(
+            removed.take_control_outcomes(),
+            vec![PipeWireControlOutcome {
+                control: removed_control,
+                state: PipeWireControlState::Unavailable,
+            }]
+        );
+
+        let mut replaced = source_with_writable_defaults();
+        let replaced_control = control("metadata");
+        replaced.preferred_sink_write = Some(pending_default(
+            &replaced,
+            preferred_node_target(),
+            replaced_control.clone(),
+            Instant::now(),
+        ));
+        replaced
+            .reconciler
+            .apply([PipeWireDelta::MetadataAdded {
+                raw_id: 81,
+                writable: true,
+            }])
+            .unwrap();
+        replaced.reconcile_pending_writes(Instant::now());
+        assert_eq!(
+            replaced.take_control_outcomes(),
+            vec![PipeWireControlOutcome {
+                control: replaced_control,
+                state: PipeWireControlState::Unavailable,
+            }]
+        );
     }
 
     #[test]
@@ -1528,7 +2349,10 @@ mod tests {
         source
             .reconciler
             .apply([
-                PipeWireDelta::MetadataAdded { raw_id: 80 },
+                PipeWireDelta::MetadataAdded {
+                    raw_id: 80,
+                    writable: true,
+                },
                 PipeWireDelta::MetadataProperty {
                     raw_id: 80,
                     subject: 0,

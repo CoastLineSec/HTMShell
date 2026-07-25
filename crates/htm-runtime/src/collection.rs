@@ -22,6 +22,8 @@ pub const MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS: usize = 256;
 pub const MAX_PIPEWIRE_PROPERTY_KEY_BYTES: usize = 128;
 pub const MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT: usize = 128;
 pub const MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM: usize = 16;
+pub const MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_DOCUMENT: usize = 128;
+pub const MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_ITEM: usize = 8;
 pub const MAX_RANGE_CONTROLS_PER_DOCUMENT: usize = 64;
 pub const MAX_RANGE_CONTROLS_PER_ITEM: usize = 8;
 pub const MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE: usize = 8;
@@ -170,6 +172,8 @@ pub enum ItemBindingKey {
     MuteState,
     CanSetVolume,
     CanSetMute,
+    CanSetPreferredSink,
+    CanSetPreferredSource,
     ChannelCount,
     ChannelStatus,
     PositionName,
@@ -216,7 +220,7 @@ pub enum ItemBindingKey {
 }
 
 impl ItemBindingKey {
-    pub const ALL: [Self; 84] = [
+    pub const ALL: [Self; 86] = [
         Self::Ready,
         Self::Type,
         Self::PowerSupply,
@@ -258,6 +262,8 @@ impl ItemBindingKey {
         Self::MuteState,
         Self::CanSetVolume,
         Self::CanSetMute,
+        Self::CanSetPreferredSink,
+        Self::CanSetPreferredSource,
         Self::ChannelCount,
         Self::ChannelStatus,
         Self::PositionName,
@@ -346,6 +352,8 @@ impl ItemBindingKey {
             Self::MuteState => "item.mute_state",
             Self::CanSetVolume => "item.can_set_volume",
             Self::CanSetMute => "item.can_set_mute",
+            Self::CanSetPreferredSink => "item.can_set_preferred_sink",
+            Self::CanSetPreferredSource => "item.can_set_preferred_source",
             Self::ChannelCount => "item.channel_count",
             Self::ChannelStatus => "item.channel_status",
             Self::PositionName => "item.position_name",
@@ -441,6 +449,8 @@ impl ItemBindingKey {
                     | Self::MuteState
                     | Self::CanSetVolume
                     | Self::CanSetMute
+                    | Self::CanSetPreferredSink
+                    | Self::CanSetPreferredSource
                     | Self::ChannelCount
                     | Self::ChannelStatus
                     | Self::LinkGroupCount
@@ -617,6 +627,8 @@ impl ItemBindingKey {
                 | Self::MuteState
                 | Self::CanSetVolume
                 | Self::CanSetMute
+                | Self::CanSetPreferredSink
+                | Self::CanSetPreferredSource
                 | Self::ChannelStatus
                 | Self::PositionName
                 | Self::Position
@@ -679,6 +691,8 @@ impl ItemBindingKey {
                 | Self::MuteState
                 | Self::CanSetVolume
                 | Self::CanSetMute
+                | Self::CanSetPreferredSink
+                | Self::CanSetPreferredSource
                 | Self::ChannelStatus
                 | Self::Position
                 | Self::Status
@@ -968,6 +982,9 @@ pub struct PipeWireDocumentDemand {
     pub defaults: bool,
     pub audio_state: bool,
     pub audio_writes: bool,
+    pub configured_default_writes: bool,
+    pub preferred_sink_writes: bool,
+    pub preferred_source_writes: bool,
     pub channel_projection: bool,
     pub channel_writes: bool,
     pub link_collection: bool,
@@ -987,6 +1004,9 @@ impl PipeWireDocumentDemand {
             && !self.defaults
             && !self.audio_state
             && !self.audio_writes
+            && !self.configured_default_writes
+            && !self.preferred_sink_writes
+            && !self.preferred_source_writes
             && !self.channel_projection
             && !self.channel_writes
             && !self.link_collection
@@ -1005,6 +1025,9 @@ impl PipeWireDocumentDemand {
         self.defaults |= other.defaults;
         self.audio_state |= other.audio_state;
         self.audio_writes |= other.audio_writes;
+        self.configured_default_writes |= other.configured_default_writes;
+        self.preferred_sink_writes |= other.preferred_sink_writes;
+        self.preferred_source_writes |= other.preferred_source_writes;
         self.channel_projection |= other.channel_projection;
         self.channel_writes |= other.channel_writes;
         self.link_collection |= other.link_collection;

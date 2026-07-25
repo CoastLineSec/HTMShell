@@ -35,6 +35,9 @@ pub(crate) struct PipeWireDemand {
     pub group_members: bool,
     pub node_link_tracking: bool,
     pub relation_projection: bool,
+    pub configured_default_writes: bool,
+    pub preferred_sink_writes: bool,
+    pub preferred_source_writes: bool,
     pub property_keys: std::collections::BTreeSet<String>,
 }
 
@@ -58,6 +61,9 @@ impl PipeWireDemand {
         self.group_members |= demand.group_members;
         self.node_link_tracking |= demand.node_link_tracking;
         self.relation_projection |= demand.relation_projection;
+        self.configured_default_writes |= demand.configured_default_writes;
+        self.preferred_sink_writes |= demand.preferred_sink_writes;
+        self.preferred_source_writes |= demand.preferred_source_writes;
         self.links |= demand.link_collection
             || demand.link_group_collection
             || demand.node_link_tracking
@@ -389,6 +395,7 @@ struct DefaultKeys {
     mute_state: StateBindingKey,
     can_set_volume: StateBindingKey,
     can_set_mute: StateBindingKey,
+    can_clear: Option<StateBindingKey>,
 }
 
 impl DefaultKeys {
@@ -404,6 +411,7 @@ impl DefaultKeys {
         mute_state: StateBindingKey::PipeWireDefaultSinkMuteState,
         can_set_volume: StateBindingKey::PipeWireDefaultSinkCanSetVolume,
         can_set_mute: StateBindingKey::PipeWireDefaultSinkCanSetMute,
+        can_clear: None,
     };
     const ACTUAL_SOURCE: Self = Self {
         status: StateBindingKey::PipeWireDefaultSourceStatus,
@@ -417,6 +425,7 @@ impl DefaultKeys {
         mute_state: StateBindingKey::PipeWireDefaultSourceMuteState,
         can_set_volume: StateBindingKey::PipeWireDefaultSourceCanSetVolume,
         can_set_mute: StateBindingKey::PipeWireDefaultSourceCanSetMute,
+        can_clear: None,
     };
     const CONFIGURED_SINK: Self = Self {
         status: StateBindingKey::PipeWireConfiguredSinkStatus,
@@ -430,6 +439,7 @@ impl DefaultKeys {
         mute_state: StateBindingKey::PipeWireConfiguredSinkMuteState,
         can_set_volume: StateBindingKey::PipeWireConfiguredSinkCanSetVolume,
         can_set_mute: StateBindingKey::PipeWireConfiguredSinkCanSetMute,
+        can_clear: Some(StateBindingKey::PipeWireConfiguredSinkCanClear),
     };
     const CONFIGURED_SOURCE: Self = Self {
         status: StateBindingKey::PipeWireConfiguredSourceStatus,
@@ -443,6 +453,7 @@ impl DefaultKeys {
         mute_state: StateBindingKey::PipeWireConfiguredSourceMuteState,
         can_set_volume: StateBindingKey::PipeWireConfiguredSourceCanSetVolume,
         can_set_mute: StateBindingKey::PipeWireConfiguredSourceCanSetMute,
+        can_clear: Some(StateBindingKey::PipeWireConfiguredSourceCanClear),
     };
 }
 
@@ -514,6 +525,14 @@ fn project_default(
         projections.tokens.push((key, bool_token(value)));
         projections.booleans.push((key, Some(value)));
     }
+    if let Some(key) = keys.can_clear {
+        let value = snapshot.ready
+            && snapshot.defaults.metadata_writable
+            && (target.metadata_name.is_some() || target.unresolved_value.is_some());
+        projections.text.push((key, bool_text(value)));
+        projections.tokens.push((key, bool_token(value)));
+        projections.booleans.push((key, Some(value)));
+    }
 }
 
 fn project_node(
@@ -528,6 +547,8 @@ fn project_node(
     } else {
         Vec::new()
     };
+    let (can_set_preferred_sink, can_set_preferred_source) =
+        super::preferred_node_capabilities(snapshot, node);
     let mut text = BTreeMap::from([
         (ItemBindingKey::Ready, bool_text(node.ready)),
         (ItemBindingKey::Name, option_text(node.name.as_deref())),
@@ -581,6 +602,14 @@ fn project_node(
         (
             ItemBindingKey::CanSetMute,
             bool_text(node.audio.can_set_mute),
+        ),
+        (
+            ItemBindingKey::CanSetPreferredSink,
+            bool_text(can_set_preferred_sink),
+        ),
+        (
+            ItemBindingKey::CanSetPreferredSource,
+            bool_text(can_set_preferred_source),
         ),
         (
             ItemBindingKey::ChannelStatus,
@@ -649,6 +678,14 @@ fn project_node(
         (
             ItemBindingKey::CanSetMute,
             bool_token(node.audio.can_set_mute).as_str().into(),
+        ),
+        (
+            ItemBindingKey::CanSetPreferredSink,
+            bool_token(can_set_preferred_sink).as_str().into(),
+        ),
+        (
+            ItemBindingKey::CanSetPreferredSource,
+            bool_token(can_set_preferred_source).as_str().into(),
         ),
         (
             ItemBindingKey::ChannelStatus,
@@ -1503,7 +1540,14 @@ mod tests {
             nodes: vec![sink.clone()],
             defaults: PipeWireDefaultsSnapshot {
                 metadata_available: true,
+                metadata_writable: true,
+                metadata_generation: 3,
                 actual_sink: PipeWireDefaultTarget {
+                    metadata_name: sink.name.clone(),
+                    node: Some(sink.id),
+                    ..PipeWireDefaultTarget::default()
+                },
+                configured_sink: PipeWireDefaultTarget {
                     metadata_name: sink.name.clone(),
                     node: Some(sink.id),
                     ..PipeWireDefaultTarget::default()
@@ -1555,6 +1599,14 @@ mod tests {
             repeat.items[0].tokens[&ItemBindingKey::CanSetVolume],
             StateToken::True.as_str()
         );
+        assert_eq!(
+            repeat.items[0].tokens[&ItemBindingKey::CanSetPreferredSink],
+            StateToken::True.as_str()
+        );
+        assert_eq!(
+            repeat.items[0].tokens[&ItemBindingKey::CanSetPreferredSource],
+            StateToken::False.as_str()
+        );
         let channels = repeat.items[0].channels.as_ref().unwrap();
         assert_eq!(channels.source_generation, 1);
         assert_eq!(channels.items.len(), 2);
@@ -1583,6 +1635,11 @@ mod tests {
             projections
                 .booleans
                 .contains(&(StateBindingKey::PipeWireDefaultSinkCanSetMute, Some(true)))
+        );
+        assert!(
+            projections
+                .booleans
+                .contains(&(StateBindingKey::PipeWireConfiguredSinkCanClear, Some(true)))
         );
 
         snapshot.connection_generation = 8;

@@ -36,6 +36,8 @@ Missing text uses the standard unavailable marker.
 | `item.direction` | `sink`, `source`, `bidirectional`, `absent`, `unknown` |
 | `item.default_role` | `none`, `default-sink`, `default-source`, `default-sink-and-source` |
 | `item.configured_role` | `none`, `configured-sink`, `configured-source`, `configured-sink-and-source` |
+| `item.can_set_preferred_sink` | `true`, `false` |
+| `item.can_set_preferred_source` | `true`, `false` |
 
 `item.node_type` and `item.node_state` also support token presentation.
 
@@ -46,6 +48,11 @@ Audio nodes add `item.audio_status`, `item.volume`, `item.mute_state`,
 Node connection tracking adds `item.link_group_count` and
 `item.link_group_status`, plus contextual `item.link_groups`. See
 [`NodeLinks`](NodeLinks.md).
+
+The preferred-default capability keys also support text and Boolean enable
+binding. They are independent from `item.is_sink` and `item.is_source` because
+metadata can be readable but not writable. See
+[`DefaultControls`](DefaultControls.md).
 
 ## Identity and ordering
 
@@ -60,3 +67,4 @@ Nodes are ordered by normalized type, media class, description, name, then raw I
 - [`AudioNode`](AudioNode.md)
 - [`Channels`](Channels.md)
 - [`NodeLinks`](NodeLinks.md)
+- [`DefaultControls`](DefaultControls.md)

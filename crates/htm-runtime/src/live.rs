@@ -125,6 +125,7 @@ pub enum LiveAction {
     PowerProfileSetBalanced,
     PowerProfileSetPerformance,
     PipeWireAudio(PipeWireControlRequest),
+    PipeWireDefault(PipeWireDefaultControlRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +204,28 @@ pub struct PipeWireControlRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipeWireDefaultRole {
+    Sink,
+    Source,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipeWireDefaultTarget {
+    NodeItem {
+        source_generation: u64,
+        item_key: String,
+    },
+    Clear,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeWireDefaultControlRequest {
+    pub control: PipeWireControlIdentity,
+    pub role: PipeWireDefaultRole,
+    pub target: PipeWireDefaultTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeWireControlState {
     Idle,
     Pending,
@@ -263,6 +286,26 @@ impl LiveAction {
             ShellAction::PipeWireAudioSetVolume | ShellAction::PipeWireAudioSetChannelVolume => {
                 return Err(RuntimeError::InvalidMutationTarget(
                     "set-volume is emitted by range interaction".into(),
+                ));
+            }
+            ShellAction::PipeWireDefaultsClearPreferredSink => {
+                Self::PipeWireDefault(PipeWireDefaultControlRequest {
+                    control,
+                    role: PipeWireDefaultRole::Sink,
+                    target: PipeWireDefaultTarget::Clear,
+                })
+            }
+            ShellAction::PipeWireDefaultsClearPreferredSource => {
+                Self::PipeWireDefault(PipeWireDefaultControlRequest {
+                    control,
+                    role: PipeWireDefaultRole::Source,
+                    target: PipeWireDefaultTarget::Clear,
+                })
+            }
+            ShellAction::PipeWireDefaultsSetPreferredSink
+            | ShellAction::PipeWireDefaultsSetPreferredSource => {
+                return Err(RuntimeError::InvalidMutationTarget(
+                    "preferred-default node selection requires a repeated item identity".into(),
                 ));
             }
         })
@@ -927,10 +970,10 @@ impl LiveDocument {
                 })?;
                 if declaration
                     .action
-                    .is_none_or(|action| !action.as_str().starts_with("pipewire.audio."))
+                    .is_none_or(|action| !action.as_str().starts_with("pipewire."))
                 {
                     return Err(RuntimeError::InvalidMutationTarget(format!(
-                        "`#{html_id}` is not a PipeWire audio control"
+                        "`#{html_id}` is not a PipeWire control"
                     )));
                 }
                 self.builtins.indexed_node(html_id).ok_or_else(|| {
@@ -1206,6 +1249,23 @@ impl LiveDocument {
                 demand.audio_state = true;
                 demand.audio_writes = true;
             }
+            match declaration.action {
+                Some(ShellAction::PipeWireDefaultsClearPreferredSink) => {
+                    demand.service = true;
+                    demand.nodes = true;
+                    demand.defaults = true;
+                    demand.configured_default_writes = true;
+                    demand.preferred_sink_writes = true;
+                }
+                Some(ShellAction::PipeWireDefaultsClearPreferredSource) => {
+                    demand.service = true;
+                    demand.nodes = true;
+                    demand.defaults = true;
+                    demand.configured_default_writes = true;
+                    demand.preferred_source_writes = true;
+                }
+                _ => {}
+            }
         }
         for repeat in self
             .repeats
@@ -1229,10 +1289,14 @@ impl LiveDocument {
                 if matches!(
                     descendant.binding,
                     Some(
-                        crate::ItemBindingKey::DefaultRole | crate::ItemBindingKey::ConfiguredRole
+                        crate::ItemBindingKey::DefaultRole
+                            | crate::ItemBindingKey::ConfiguredRole
+                            | crate::ItemBindingKey::CanSetPreferredSink
+                            | crate::ItemBindingKey::CanSetPreferredSource
                     )
                 ) {
                     demand.defaults = true;
+                    demand.node_details = true;
                 }
                 if matches!(
                     descendant.binding,
@@ -1267,9 +1331,24 @@ impl LiveDocument {
                     demand.link_group_collection = true;
                     demand.node_link_tracking = true;
                 }
-                if descendant.action.is_some() {
-                    demand.audio_state = true;
-                    demand.audio_writes = true;
+                match descendant.action {
+                    Some(ShellAction::PipeWireDefaultsSetPreferredSink) => {
+                        demand.defaults = true;
+                        demand.node_details = true;
+                        demand.configured_default_writes = true;
+                        demand.preferred_sink_writes = true;
+                    }
+                    Some(ShellAction::PipeWireDefaultsSetPreferredSource) => {
+                        demand.defaults = true;
+                        demand.node_details = true;
+                        demand.configured_default_writes = true;
+                        demand.preferred_source_writes = true;
+                    }
+                    Some(_) => {
+                        demand.audio_state = true;
+                        demand.audio_writes = true;
+                    }
+                    None => {}
                 }
                 if let Some(property_key) = &descendant.property_key {
                     demand.property_keys.insert(property_key.clone());
@@ -1711,7 +1790,7 @@ impl LiveDocument {
                 if declaration.kind == BuiltInElementKind::RangeControl
                     || declaration
                         .action
-                        .is_some_and(|action| action.as_str().starts_with("pipewire.audio."))
+                        .is_some_and(|action| action.as_str().starts_with("pipewire."))
                 {
                     let node = self.builtins.indexed_node(&html_id).ok_or_else(|| {
                         RuntimeError::InvalidMutationTarget(format!(
@@ -3104,21 +3183,43 @@ impl LiveDocument {
                                     local_id: element.declaration.local_id.clone(),
                                 },
                             };
-                            let operation = pipewire_mute_operation(action)?;
-                            return Ok(Some(PendingActivation {
-                                id: format!(
-                                    "{repeat_id}:{}:{}",
-                                    item_key, element.declaration.local_id
-                                ),
-                                action: LiveAction::PipeWireAudio(PipeWireControlRequest {
+                            let emitted = match action {
+                                ShellAction::PipeWireDefaultsSetPreferredSink => {
+                                    LiveAction::PipeWireDefault(PipeWireDefaultControlRequest {
+                                        control,
+                                        role: PipeWireDefaultRole::Sink,
+                                        target: PipeWireDefaultTarget::NodeItem {
+                                            source_generation: repeat.source_generation,
+                                            item_key: item_key.clone(),
+                                        },
+                                    })
+                                }
+                                ShellAction::PipeWireDefaultsSetPreferredSource => {
+                                    LiveAction::PipeWireDefault(PipeWireDefaultControlRequest {
+                                        control,
+                                        role: PipeWireDefaultRole::Source,
+                                        target: PipeWireDefaultTarget::NodeItem {
+                                            source_generation: repeat.source_generation,
+                                            item_key: item_key.clone(),
+                                        },
+                                    })
+                                }
+                                _ => LiveAction::PipeWireAudio(PipeWireControlRequest {
                                     control,
                                     target: PipeWireAudioTarget::NodeItem {
                                         source_generation: repeat.source_generation,
                                         item_key: item_key.clone(),
                                     },
-                                    operation,
+                                    operation: pipewire_mute_operation(action)?,
                                     volume: None,
                                 }),
+                            };
+                            return Ok(Some(PendingActivation {
+                                id: format!(
+                                    "{repeat_id}:{}:{}",
+                                    item_key, element.declaration.local_id
+                                ),
+                                action: emitted,
                             }));
                         }
                     }
@@ -3893,6 +3994,9 @@ mod tests {
         assert!(demand.audio_writes);
         assert!(demand.channel_projection);
         assert!(demand.channel_writes);
+        assert!(demand.configured_default_writes);
+        assert!(demand.preferred_sink_writes);
+        assert!(demand.preferred_source_writes);
         assert_eq!(
             demand.property_keys,
             BTreeSet::from(["application.name".into(), "media.title".into()])
@@ -3956,6 +4060,14 @@ mod tests {
                 (
                     crate::ItemBindingKey::CanSetMute,
                     StateToken::True.as_str().into(),
+                ),
+                (
+                    crate::ItemBindingKey::CanSetPreferredSink,
+                    StateToken::True.as_str().into(),
+                ),
+                (
+                    crate::ItemBindingKey::CanSetPreferredSource,
+                    StateToken::False.as_str().into(),
                 ),
             ]),
             values: BTreeMap::from([
@@ -4059,6 +4171,11 @@ mod tests {
             .find(|element| element.declaration.local_id == "volume-control")
             .unwrap()
             .node;
+        let prefer_output_node = repeated
+            .iter()
+            .find(|element| element.declaration.local_id == "prefer-output")
+            .unwrap()
+            .node;
         let mute_bounds = overlay.bounds_for_identity(mute_node).unwrap();
         let mute_action = click_action(&mut overlay, &mute_bounds);
         let LiveAction::PipeWireAudio(mute_request) = mute_action else {
@@ -4068,6 +4185,19 @@ mod tests {
         assert_eq!(
             mute_request.target,
             PipeWireAudioTarget::NodeItem {
+                source_generation: 7,
+                item_key: "7:42".into(),
+            }
+        );
+        let prefer_bounds = overlay.bounds_for_identity(prefer_output_node).unwrap();
+        let LiveAction::PipeWireDefault(preferred) = click_action(&mut overlay, &prefer_bounds)
+        else {
+            panic!("item-local preferred sink action was not emitted");
+        };
+        assert_eq!(preferred.role, PipeWireDefaultRole::Sink);
+        assert_eq!(
+            preferred.target,
+            PipeWireDefaultTarget::NodeItem {
                 source_generation: 7,
                 item_key: "7:42".into(),
             }
@@ -4472,8 +4602,20 @@ mod tests {
                     Some(true),
                 ),
                 (StateBindingKey::PipeWireDefaultSourceCanSetMute, Some(true)),
+                (StateBindingKey::PipeWireConfiguredSinkCanClear, Some(true)),
+                (
+                    StateBindingKey::PipeWireConfiguredSourceCanClear,
+                    Some(true),
+                ),
             ])
             .unwrap();
+
+        let clear_bounds = selector_bounds(&overlay, "#clear-configured-output");
+        let LiveAction::PipeWireDefault(clear) = click_action(&mut overlay, &clear_bounds) else {
+            panic!("configured sink clear did not emit a PipeWire default action");
+        };
+        assert_eq!(clear.role, PipeWireDefaultRole::Sink);
+        assert_eq!(clear.target, PipeWireDefaultTarget::Clear);
 
         let mute_bounds = selector_bounds(&overlay, "#default-output-toggle");
         let LiveAction::PipeWireAudio(mute) = click_action(&mut overlay, &mute_bounds) else {
