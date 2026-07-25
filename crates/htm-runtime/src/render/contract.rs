@@ -19,10 +19,22 @@ pub struct RenderTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendErrorKind {
+    BackendUnavailable,
+    AdapterUnavailable,
+    DeviceCreation,
+    UnsupportedCapability,
     InvalidPlan,
     TargetAllocation,
     ResourcePreparation,
+    PipelineCreation,
+    CommandEncoding,
+    Submission,
     Render,
+    DeviceLost,
+    Readback,
+    Timeout,
+    StaleGeneration,
+    FallbackRequired,
     BackendReset,
 }
 

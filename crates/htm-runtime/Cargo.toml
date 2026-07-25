@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+gpu-renderer = ["dep:vello"]
+
 [dependencies]
 anyrender.workspace = true
 anyrender_vello_cpu.workspace = true
@@ -21,3 +25,4 @@ serde_json.workspace = true
 skrifa.workspace = true
 stylo.workspace = true
 url.workspace = true
+vello = { workspace = true, optional = true }

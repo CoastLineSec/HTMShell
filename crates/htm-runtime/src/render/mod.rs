@@ -2,6 +2,9 @@ mod contract;
 mod cpu;
 mod damage;
 mod frame;
+#[cfg(feature = "gpu-renderer")]
+#[allow(dead_code)]
+mod gpu;
 mod scene;
 
 pub(crate) use cpu::CpuRenderSession;

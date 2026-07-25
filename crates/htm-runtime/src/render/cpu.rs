@@ -15,13 +15,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Clone)]
-struct CpuPreparedScene {
-    revision: SceneRevision,
-    recording: Scene,
+pub(super) struct CpuPreparedScene {
+    pub(super) revision: SceneRevision,
+    pub(super) recording: Scene,
 }
 
 #[derive(Default)]
-struct CpuReferenceRenderer {
+pub(super) struct CpuReferenceRenderer {
     prepared: BTreeMap<SceneRevision, CpuPreparedScene>,
     targets: BTreeMap<RenderSurfaceId, RenderTarget>,
 }
@@ -366,7 +366,7 @@ impl Drop for CpuRenderSession {
     }
 }
 
-fn prepare_scene(
+pub(super) fn prepare_scene(
     document: &mut HtmlDocument,
     revision: SceneRevision,
     viewport: ViewportSpec,
