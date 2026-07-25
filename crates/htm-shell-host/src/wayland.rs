@@ -8,16 +8,25 @@ use crate::pipewire::{PipeWireDemand, PipeWireSnapshot, PipeWireSource, duration
 use crate::power::{
     BatteryServiceSummary, PowerFanoutMetrics, PowerProfile, PowerService, PowerSnapshot,
 };
+#[cfg(feature = "gpu-renderer")]
+use crate::presenter::{PresenterState, SurfacePresenter};
 use crate::scale::{PresentationProfile, SurfaceScaleState};
 use crate::scheduler::{FrameScheduler, ScheduleDecision};
 use htm_runtime::{
-    ItemBindingKey, LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind, LiveFrame,
+    ItemBindingKey, LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind,
     MAX_PIPEWIRE_PEAK_DECLARATIONS_PER_TARGET, MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS,
     PipeWirePeakTarget, RepeatSource, StateBindingKey, StateToken,
+};
+#[cfg(feature = "gpu-renderer")]
+use htm_runtime::{
+    LiveFrame, LiveGpuConfiguration, LiveGpuError, LiveGpuErrorKind, LiveGpuPreparedFrame,
+    LiveGpuPresenter, LiveRenderRequest, LiveWaylandHandle, RenderSurfaceId,
 };
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::fd::BorrowedFd;
 use std::path::PathBuf;
+#[cfg(feature = "gpu-renderer")]
+use std::ptr::NonNull;
 use std::time::Instant;
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
@@ -53,6 +62,16 @@ const WL_SEAT_RELEASE_VERSION: u32 = 5;
 const WL_SHM_RELEASE_VERSION: u32 = 2;
 const FRACTIONAL_SCALE_VERSION: u32 = 1;
 const VIEWPORTER_VERSION: u32 = 1;
+
+#[cfg(feature = "gpu-renderer")]
+fn internal_gpu_renderer_requested() -> bool {
+    internal_gpu_renderer_value(std::env::var("HTMSHELL_INTERNAL_RENDERER").ok().as_deref())
+}
+
+#[cfg(feature = "gpu-renderer")]
+fn internal_gpu_renderer_value(value: Option<&str>) -> bool {
+    value == Some("vello")
+}
 
 #[derive(Debug, Clone)]
 pub struct LiveHostOptions {
@@ -98,6 +117,8 @@ pub struct LiveHostSummary {
     pub last_resolve_us: u64,
     pub last_render_us: u64,
     pub last_pixel_conversion_us: u64,
+    #[cfg(feature = "gpu-renderer")]
+    pub gpu: GpuSurfaceHostSummary,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +236,53 @@ pub struct SurfaceHostSummary {
     pub last_action_dispatch_to_state_mutation_us: u64,
     pub last_state_mutation_to_commit_us: u64,
     pub last_state_mutation_to_frame_callback_us: u64,
+    #[cfg(feature = "gpu-renderer")]
+    pub gpu: GpuSurfaceHostSummary,
+}
+
+#[cfg(feature = "gpu-renderer")]
+#[derive(Debug, Clone, Default)]
+pub struct GpuSurfaceHostSummary {
+    pub requested: bool,
+    pub successful_gpu_frame: bool,
+    pub adapter: String,
+    pub graphics_api: String,
+    pub device_type: String,
+    pub driver: String,
+    pub device_generation: u64,
+    pub presenter_state: String,
+    pub surface_format: String,
+    pub present_mode: String,
+    pub alpha_mode: String,
+    pub configuration_generation: u64,
+    pub presenter_creations: u64,
+    pub presenter_releases: u64,
+    pub configurations: u64,
+    pub reconfigurations: u64,
+    pub frames_planned: u64,
+    pub frames_rendered: u64,
+    pub frames_submitted: u64,
+    pub frames_presented: u64,
+    pub surface_acquisitions: u64,
+    pub acquisition_failures: u64,
+    pub conversion_passes: u64,
+    pub full_target_renders: u64,
+    pub cpu_fallbacks: u64,
+    pub shm_frames: u64,
+    pub frame_callbacks_requested: u64,
+    pub frame_callbacks_completed: u64,
+    pub surface_losses: u64,
+    pub surface_timeouts: u64,
+    pub surface_outdated: u64,
+    pub device_losses: u64,
+    pub target_recreations: u64,
+    pub closed_surface_suppressions: u64,
+    pub duplicate_frame_suppressions: u64,
+    pub resource_entries: usize,
+    pub resource_bytes: u64,
+    pub resource_uploads: u64,
+    pub cache_hits: u64,
+    pub last_error: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -531,6 +599,25 @@ struct ShellSurfaceState {
     scaled_commit_started: Option<Instant>,
     pending_binding_mutation_started: Option<Instant>,
     binding_commit_started: Option<Instant>,
+    #[cfg(feature = "gpu-renderer")]
+    presenter: SurfacePresenter,
+    #[cfg(feature = "gpu-renderer")]
+    gpu_consecutive_timeouts: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PresentedFrame {
+    buffer_width: u32,
+    buffer_height: u32,
+    render_us: u64,
+    conversion_us: u64,
+}
+
+#[cfg(feature = "gpu-renderer")]
+enum GpuFrameAttempt {
+    Presented(PresentedFrame),
+    CpuFallback(LiveFrame),
+    NoFrame,
 }
 
 impl ShellSurfaceState {
@@ -615,6 +702,14 @@ struct State {
     clock: ClockService,
     battery: PowerService,
     pipewire: PipeWireSource,
+    #[cfg(feature = "gpu-renderer")]
+    gpu_requested: bool,
+    #[cfg(feature = "gpu-renderer")]
+    wayland_display: Option<NonNull<std::ffi::c_void>>,
+    #[cfg(feature = "gpu-renderer")]
+    gpu: Option<LiveGpuPresenter>,
+    #[cfg(feature = "gpu-renderer")]
+    gpu_device_generation: u64,
 }
 
 impl State {
@@ -683,6 +778,14 @@ impl State {
             clock: ClockService::default(),
             battery: PowerService::default(),
             pipewire: PipeWireSource::default(),
+            #[cfg(feature = "gpu-renderer")]
+            gpu_requested: internal_gpu_renderer_requested(),
+            #[cfg(feature = "gpu-renderer")]
+            wayland_display: None,
+            #[cfg(feature = "gpu-renderer")]
+            gpu: None,
+            #[cfg(feature = "gpu-renderer")]
+            gpu_device_generation: 0,
         }
     }
 
@@ -835,7 +938,17 @@ impl State {
             scaled_commit_started: None,
             pending_binding_mutation_started: None,
             binding_commit_started: None,
+            #[cfg(feature = "gpu-renderer")]
+            presenter: SurfacePresenter::new(0),
+            #[cfg(feature = "gpu-renderer")]
+            gpu_consecutive_timeouts: 0,
         });
+        #[cfg(feature = "gpu-renderer")]
+        {
+            let state = self.surfaces.last_mut().expect("surface pushed above");
+            state.summary.gpu.requested = self.gpu_requested;
+            state.summary.gpu.presenter_state = "uninitialized".into();
+        }
         if desired_mapped && let Err(error) = self.ensure_surface_role(owner) {
             self.surfaces.retain(|surface| surface.owner != owner);
             return Err(error);
@@ -950,8 +1063,18 @@ impl State {
         state.viewport = viewport;
         state.fractional_scale = fractional_scale;
         state.role_generation = surface_generation;
+        #[cfg(feature = "gpu-renderer")]
+        {
+            state.presenter = SurfacePresenter::new(surface_generation);
+            state.summary.gpu.requested = self.gpu_requested;
+            state.summary.gpu.presenter_state = "uninitialized".into();
+        }
         state.scale_state = SurfaceScaleState::new(surface_generation, fractional_available);
         state.map_state = SurfaceMapState::AwaitingConfigure;
+        #[cfg(feature = "gpu-renderer")]
+        {
+            state.gpu_consecutive_timeouts = 0;
+        }
         Ok(true)
     }
 
@@ -974,6 +1097,8 @@ impl State {
         let Some(index) = self.surface_index_by_owner(owner) else {
             return;
         };
+        #[cfg(feature = "gpu-renderer")]
+        self.release_gpu_surface(index, true);
         let state = &mut self.surfaces[index];
         Self::destroy_surface_protocol_objects(state);
         state.lifecycle = LayerLifecycle::default();
@@ -985,6 +1110,10 @@ impl State {
         state.pending_scale_started = None;
         state.scaled_commit_started = None;
         state.mapped = false;
+        #[cfg(feature = "gpu-renderer")]
+        {
+            state.gpu_consecutive_timeouts = 0;
+        }
     }
 
     fn surface_index(&self, kind: SurfaceKind) -> Option<usize> {
@@ -997,6 +1126,287 @@ impl State {
         self.surfaces
             .iter()
             .position(|surface| surface.owner == owner)
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    fn gpu_surface_id(&self, index: usize) -> RenderSurfaceId {
+        RenderSurfaceId {
+            instance: self.surfaces[index].owner,
+            generation: self.surfaces[index].role_generation,
+        }
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    fn ensure_gpu_surface(
+        &mut self,
+        index: usize,
+        width: u32,
+        height: u32,
+    ) -> Result<bool, LiveGpuError> {
+        if !self.gpu_requested {
+            self.surfaces[index].presenter.select_cpu();
+            self.surfaces[index].summary.gpu.presenter_state = "cpu".into();
+            return Ok(false);
+        }
+        if self.surfaces[index].presenter.generation() != self.surfaces[index].role_generation {
+            return Err(LiveGpuError::host(
+                LiveGpuErrorKind::StaleGeneration,
+                "presenter generation does not match the layer surface",
+                false,
+            ));
+        }
+        match self.surfaces[index].presenter.state() {
+            PresenterState::GpuReady => {
+                let id = self.gpu_surface_id(index);
+                let needs_configuration = self
+                    .gpu
+                    .as_ref()
+                    .and_then(|gpu| gpu.configuration(id))
+                    .is_none_or(|configuration| {
+                        configuration.width != width || configuration.height != height
+                    });
+                if needs_configuration {
+                    let configuration = self
+                        .gpu
+                        .as_mut()
+                        .ok_or_else(|| {
+                            LiveGpuError::host(
+                                LiveGpuErrorKind::BackendUnavailable,
+                                "live GPU presenter disappeared",
+                                true,
+                            )
+                        })?
+                        .configure(id, width, height)?;
+                    self.record_gpu_configuration(index, &configuration);
+                }
+                self.sync_gpu_summary(index);
+                return Ok(true);
+            }
+            PresenterState::Cpu | PresenterState::FallingBack | PresenterState::Destroyed => {
+                return Ok(false);
+            }
+            PresenterState::GpuCreating | PresenterState::GpuRecovering => {
+                return Err(LiveGpuError::host(
+                    LiveGpuErrorKind::InvalidConfiguration,
+                    "live GPU presenter has an unfinished lifecycle transition",
+                    true,
+                ));
+            }
+            PresenterState::Uninitialized => {}
+        }
+        if !self.surfaces[index].presenter.begin_gpu() {
+            return Ok(false);
+        }
+        self.surfaces[index].summary.gpu.presenter_state = "gpu-creating".into();
+        let id = self.gpu_surface_id(index);
+        let display = self.wayland_display.ok_or_else(|| {
+            LiveGpuError::host(
+                LiveGpuErrorKind::SurfaceCreation,
+                "libwayland display handle is unavailable",
+                false,
+            )
+        })?;
+        let surface_pointer = self.surfaces[index]
+            .surface
+            .as_ref()
+            .map(|surface| surface.id().as_ptr().cast::<std::ffi::c_void>())
+            .ok_or_else(|| {
+                LiveGpuError::host(
+                    LiveGpuErrorKind::SurfaceCreation,
+                    "layer-shell surface is unavailable",
+                    false,
+                )
+            })?;
+        // SAFETY: the system wayland backend exposes pointers for the same
+        // live connection and wl_surface. Presenter teardown always precedes
+        // destruction of those protocol objects.
+        let handle = unsafe { LiveWaylandHandle::new(display.as_ptr(), surface_pointer) }?;
+        let result = if let Some(gpu) = &mut self.gpu {
+            // SAFETY: the handle lifetime is bounded by this surface
+            // generation and `release_gpu_surface`.
+            unsafe { gpu.create_surface(id, handle) }
+        } else {
+            let device_generation = self.gpu_device_generation.checked_add(1).ok_or_else(|| {
+                LiveGpuError::host(
+                    LiveGpuErrorKind::DeviceLost,
+                    "live GPU device generation exhausted",
+                    false,
+                )
+            })?;
+            // SAFETY: the connection outlives State and every presenter; the
+            // first surface is released before its wl_surface is destroyed.
+            unsafe { LiveGpuPresenter::new_with_generation(id, handle, device_generation) }.map(
+                |gpu| {
+                    self.gpu_device_generation = device_generation;
+                    self.gpu = Some(gpu);
+                },
+            )
+        };
+        if let Err(error) = result {
+            self.surfaces[index].presenter.fall_back();
+            self.surfaces[index].summary.gpu.presenter_state = "falling-back".into();
+            self.surfaces[index].summary.gpu.last_error = error.to_string();
+            return Err(error);
+        }
+        self.surfaces[index].summary.gpu.presenter_creations = self.surfaces[index]
+            .summary
+            .gpu
+            .presenter_creations
+            .saturating_add(1);
+        match self
+            .gpu
+            .as_mut()
+            .expect("created above")
+            .configure(id, width, height)
+        {
+            Ok(configuration) => {
+                self.surfaces[index].presenter.gpu_ready();
+                self.surfaces[index].summary.gpu.presenter_state = "gpu-ready".into();
+                self.record_gpu_configuration(index, &configuration);
+                self.sync_gpu_summary(index);
+                Ok(true)
+            }
+            Err(error) => {
+                self.gpu
+                    .as_mut()
+                    .expect("created above")
+                    .release_surface(id);
+                self.surfaces[index].presenter.fall_back();
+                self.surfaces[index].summary.gpu.presenter_state = "falling-back".into();
+                self.surfaces[index].summary.gpu.last_error = error.to_string();
+                self.sync_gpu_summary(index);
+                Err(error)
+            }
+        }
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    fn record_gpu_configuration(&mut self, index: usize, configuration: &LiveGpuConfiguration) {
+        let successful_gpu_frame = self.surfaces[index].presenter.gpu_succeeded();
+        let summary = &mut self.surfaces[index].summary.gpu;
+        summary.successful_gpu_frame = successful_gpu_frame;
+        if summary.configuration_generation == 0 {
+            summary.configurations = summary.configurations.saturating_add(1);
+        } else {
+            summary.reconfigurations = summary.reconfigurations.saturating_add(1);
+        }
+        summary.surface_format = configuration.format.clone();
+        summary.present_mode = configuration.present_mode.clone();
+        summary.alpha_mode = configuration.alpha_mode.clone();
+        summary.configuration_generation = configuration.generation;
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    fn sync_gpu_summary(&mut self, index: usize) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let backend = gpu.backend_info();
+        let (entries, bytes, uploads, hits) = gpu.resource_statistics();
+        let successful_gpu_frame = self.surfaces[index].presenter.gpu_succeeded();
+        let summary = &mut self.surfaces[index].summary.gpu;
+        summary.successful_gpu_frame = successful_gpu_frame;
+        summary.adapter = backend.adapter;
+        summary.graphics_api = backend.graphics_api;
+        summary.device_type = backend.device_type;
+        summary.driver = backend.driver;
+        summary.device_generation = backend.device_generation;
+        summary.resource_entries = entries;
+        summary.resource_bytes = bytes;
+        summary.resource_uploads = uploads;
+        summary.cache_hits = hits;
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    fn release_gpu_surface(&mut self, index: usize, destroyed: bool) {
+        let id = self.gpu_surface_id(index);
+        let had_gpu_target = matches!(
+            self.surfaces[index].presenter.state(),
+            PresenterState::GpuCreating | PresenterState::GpuReady | PresenterState::GpuRecovering
+        );
+        if let Some(gpu) = &mut self.gpu {
+            gpu.release_surface(id);
+        }
+        if had_gpu_target {
+            self.surfaces[index].summary.gpu.presenter_releases = self.surfaces[index]
+                .summary
+                .gpu
+                .presenter_releases
+                .saturating_add(1);
+        }
+        if destroyed {
+            self.surfaces[index].presenter.destroy();
+            self.surfaces[index].summary.gpu.presenter_state = "destroyed".into();
+        } else {
+            self.surfaces[index].presenter.fall_back();
+            self.surfaces[index].summary.gpu.presenter_state = "falling-back".into();
+        }
+        self.sync_gpu_summary(index);
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    fn fall_back_gpu_surface(&mut self, index: usize, error: &LiveGpuError) {
+        self.release_gpu_surface(index, false);
+        let summary = &mut self.surfaces[index].summary.gpu;
+        summary.cpu_fallbacks = summary.cpu_fallbacks.saturating_add(1);
+        summary.last_error = error.to_string();
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    fn record_gpu_render_error(&mut self, index: usize, error: &LiveGpuError) {
+        let summary = &mut self.surfaces[index].summary.gpu;
+        match error.kind {
+            LiveGpuErrorKind::SurfaceTimeout => {
+                summary.acquisition_failures = summary.acquisition_failures.saturating_add(1);
+                summary.surface_timeouts = summary.surface_timeouts.saturating_add(1);
+            }
+            LiveGpuErrorKind::SurfaceOccluded => {
+                summary.acquisition_failures = summary.acquisition_failures.saturating_add(1);
+            }
+            LiveGpuErrorKind::SurfaceLost => {
+                summary.acquisition_failures = summary.acquisition_failures.saturating_add(1);
+                summary.surface_losses = summary.surface_losses.saturating_add(1);
+            }
+            LiveGpuErrorKind::SurfaceOutdated => {
+                summary.acquisition_failures = summary.acquisition_failures.saturating_add(1);
+                summary.surface_outdated = summary.surface_outdated.saturating_add(1);
+            }
+            LiveGpuErrorKind::DeviceLost => {
+                summary.device_losses = summary.device_losses.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    fn handle_gpu_device_loss(&mut self, failing_index: usize, error: &LiveGpuError) {
+        if let Some(gpu) = &mut self.gpu {
+            gpu.model_device_loss();
+        }
+        // A real lost wgpu device cannot be reused. Drop the one process
+        // backend after invalidating its generation, targets, pipelines, and
+        // cache. Current surface generations remain on CPU; a later Wayland
+        // surface generation may construct one fresh process backend.
+        self.gpu.take();
+        for index in 0..self.surfaces.len() {
+            if matches!(
+                self.surfaces[index].presenter.state(),
+                PresenterState::GpuCreating
+                    | PresenterState::GpuReady
+                    | PresenterState::GpuRecovering
+            ) {
+                self.release_gpu_surface(index, false);
+                let summary = &mut self.surfaces[index].summary.gpu;
+                if index != failing_index {
+                    summary.device_losses = summary.device_losses.saturating_add(1);
+                }
+                summary.last_error = error.to_string();
+                if index != failing_index {
+                    summary.cpu_fallbacks = summary.cpu_fallbacks.saturating_add(1);
+                }
+                self.surfaces[index].scheduler.mark_dirty();
+            }
+        }
     }
 
     fn reconcile_all_outputs(&mut self, qh: &QueueHandle<Self>) {
@@ -1735,6 +2145,8 @@ impl State {
         let Some(index) = self.surface_index_by_owner(owner) else {
             return;
         };
+        #[cfg(feature = "gpu-renderer")]
+        self.release_gpu_surface(index, true);
         if self.pointer_focus == Some(owner) {
             self.clear_pointer_focus();
         }
@@ -1767,6 +2179,274 @@ impl State {
         Ok(())
     }
 
+    #[cfg(feature = "gpu-renderer")]
+    fn recover_gpu_surface_for_frame(
+        &mut self,
+        index: usize,
+        width: u32,
+        height: u32,
+    ) -> Result<(), LiveGpuError> {
+        if !self.surfaces[index].presenter.begin_recovery() {
+            return Err(LiveGpuError::host(
+                LiveGpuErrorKind::SurfaceLost,
+                "live GPU surface recovery limit was reached",
+                true,
+            ));
+        }
+        self.surfaces[index].summary.gpu.presenter_state = "gpu-recovering".into();
+        let id = self.gpu_surface_id(index);
+        let gpu = self.gpu.as_mut().ok_or_else(|| {
+            LiveGpuError::host(
+                LiveGpuErrorKind::BackendUnavailable,
+                "live GPU presenter disappeared during recovery",
+                true,
+            )
+        })?;
+        gpu.recover_surface(id)?;
+        self.surfaces[index].summary.gpu.target_recreations = self.surfaces[index]
+            .summary
+            .gpu
+            .target_recreations
+            .saturating_add(1);
+        let configuration = gpu.configure(id, width, height)?;
+        self.surfaces[index].presenter.gpu_ready();
+        self.surfaces[index].summary.gpu.presenter_state = "gpu-ready".into();
+        self.record_gpu_configuration(index, &configuration);
+        self.sync_gpu_summary(index);
+        Ok(())
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    fn gpu_frame_fallback(
+        &mut self,
+        index: usize,
+        prepared: LiveGpuPreparedFrame,
+        error: LiveGpuError,
+    ) -> Result<GpuFrameAttempt, ShellHostError> {
+        self.fall_back_gpu_surface(index, &error);
+        let frame = self.surfaces[index]
+            .runtime
+            .as_mut()
+            .expect("runtime initialized before presentation")
+            .render_gpu_frame_on_cpu(prepared)?;
+        Ok(GpuFrameAttempt::CpuFallback(frame))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "gpu-renderer")]
+    fn try_present_gpu_frame(
+        &mut self,
+        index: usize,
+        request: LiveRenderRequest,
+        logical_width: u32,
+        logical_height: u32,
+        compositor: &wl_compositor::WlCompositor,
+        wayland_surface: &wl_surface::WlSurface,
+        qh: &QueueHandle<Self>,
+    ) -> Result<GpuFrameAttempt, ShellHostError> {
+        let owner = self.surfaces[index].owner;
+        let generation = self.surfaces[index].role_generation;
+        let Some(prepared) = self.surfaces[index]
+            .runtime
+            .as_mut()
+            .expect("runtime initialized before presentation")
+            .prepare_gpu_pending_for(request, owner, generation)?
+        else {
+            self.surfaces[index].scheduler.mark_clean();
+            self.surfaces[index]
+                .summary
+                .gpu
+                .duplicate_frame_suppressions = self.surfaces[index]
+                .summary
+                .gpu
+                .duplicate_frame_suppressions
+                .saturating_add(1);
+            return Ok(GpuFrameAttempt::NoFrame);
+        };
+        self.surfaces[index].summary.gpu.frames_planned = self.surfaces[index]
+            .summary
+            .gpu
+            .frames_planned
+            .saturating_add(1);
+        let first = self
+            .gpu
+            .as_mut()
+            .expect("configured GPU presenter")
+            .render(&prepared);
+        let pending = match first {
+            Ok(pending) => pending,
+            Err(error)
+                if matches!(
+                    error.kind,
+                    LiveGpuErrorKind::SurfaceLost | LiveGpuErrorKind::SurfaceOutdated
+                ) =>
+            {
+                self.record_gpu_render_error(index, &error);
+                if let Err(recovery_error) = self.recover_gpu_surface_for_frame(
+                    index,
+                    request.buffer_width,
+                    request.buffer_height,
+                ) {
+                    self.record_gpu_render_error(index, &recovery_error);
+                    if recovery_error.kind == LiveGpuErrorKind::DeviceLost {
+                        self.handle_gpu_device_loss(index, &recovery_error);
+                    }
+                    return self.gpu_frame_fallback(index, prepared, recovery_error);
+                }
+                match self
+                    .gpu
+                    .as_mut()
+                    .expect("recovered GPU presenter")
+                    .render(&prepared)
+                {
+                    Ok(pending) => pending,
+                    Err(retry_error) => {
+                        self.record_gpu_render_error(index, &retry_error);
+                        if retry_error.kind == LiveGpuErrorKind::DeviceLost {
+                            self.handle_gpu_device_loss(index, &retry_error);
+                        }
+                        return self.gpu_frame_fallback(index, prepared, retry_error);
+                    }
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind,
+                    LiveGpuErrorKind::SurfaceTimeout | LiveGpuErrorKind::SurfaceOccluded
+                ) && self.surfaces[index].mapped
+                    && self.surfaces[index].gpu_consecutive_timeouts < 2 =>
+            {
+                self.record_gpu_render_error(index, &error);
+                self.surfaces[index].gpu_consecutive_timeouts = self.surfaces[index]
+                    .gpu_consecutive_timeouts
+                    .saturating_add(1);
+                self.surfaces[index]
+                    .runtime
+                    .as_mut()
+                    .expect("runtime initialized before presentation")
+                    .reject_gpu_frame(prepared, true);
+                // Keep the prior GPU buffer attached and ask the compositor
+                // for one later opportunity. This is not a presentation and
+                // retains the dirty visual state without a retry loop.
+                wayland_surface.frame(qh, CallbackData::Frame { owner, generation });
+                wayland_surface.commit();
+                self.surfaces[index].scheduler.frame_committed();
+                self.surfaces[index].scheduler.mark_dirty();
+                self.surfaces[index].summary.gpu.frame_callbacks_requested = self.surfaces[index]
+                    .summary
+                    .gpu
+                    .frame_callbacks_requested
+                    .saturating_add(1);
+                self.sync_gpu_summary(index);
+                return Ok(GpuFrameAttempt::NoFrame);
+            }
+            Err(error) => {
+                self.record_gpu_render_error(index, &error);
+                if error.kind == LiveGpuErrorKind::DeviceLost {
+                    self.handle_gpu_device_loss(index, &error);
+                }
+                return self.gpu_frame_fallback(index, prepared, error);
+            }
+        };
+        {
+            let summary = &mut self.surfaces[index].summary.gpu;
+            summary.frames_rendered = summary.frames_rendered.saturating_add(1);
+            summary.frames_submitted = summary.frames_submitted.saturating_add(1);
+            summary.surface_acquisitions = summary.surface_acquisitions.saturating_add(1);
+            summary.conversion_passes = summary.conversion_passes.saturating_add(1);
+            summary.full_target_renders = summary.full_target_renders.saturating_add(1);
+        }
+        update_input_region(
+            compositor,
+            wayland_surface,
+            prepared.logical_width,
+            prepared.logical_height,
+            &prepared.input_regions,
+            qh,
+        );
+        if self.surfaces[index].scale_state.profile() == PresentationProfile::FractionalViewport {
+            let viewport = self.surfaces[index].viewport.as_ref().ok_or_else(|| {
+                ShellHostError::Wayland("fractional profile has no viewport object".into())
+            })?;
+            viewport.set_destination(logical_width as i32, logical_height as i32);
+        }
+        // wgpu's Wayland present path attaches its wl_buffer and commits this
+        // wl_surface. All double-buffered state and the one frame callback must
+        // therefore be requested before SurfaceTexture::present().
+        wayland_surface.damage(
+            0,
+            0,
+            logical_width.min(i32::MAX as u32) as i32,
+            logical_height.min(i32::MAX as u32) as i32,
+        );
+        wayland_surface.frame(qh, CallbackData::Frame { owner, generation });
+        self.surfaces[index].summary.gpu.frame_callbacks_requested = self.surfaces[index]
+            .summary
+            .gpu
+            .frame_callbacks_requested
+            .saturating_add(1);
+        let rendered_micros = pending.rendered_micros();
+        let suboptimal = pending.suboptimal();
+        self.gpu
+            .as_mut()
+            .expect("configured GPU presenter")
+            .present(pending)
+            .map_err(|error| {
+                ShellHostError::Wayland(format!("live GPU present failed: {error}"))
+            })?;
+        self.surfaces[index].summary.gpu.frames_presented = self.surfaces[index]
+            .summary
+            .gpu
+            .frames_presented
+            .saturating_add(1);
+        if suboptimal {
+            let id = self.gpu_surface_id(index);
+            let reconfigured = self
+                .gpu
+                .as_mut()
+                .expect("configured GPU presenter")
+                .reconfigure(id)
+                .and_then(|()| {
+                    self.gpu
+                        .as_ref()
+                        .and_then(|gpu| gpu.configuration(id))
+                        .cloned()
+                        .ok_or_else(|| {
+                            LiveGpuError::host(
+                                LiveGpuErrorKind::InvalidConfiguration,
+                                "suboptimal surface reconfiguration was not retained",
+                                true,
+                            )
+                        })
+                });
+            match reconfigured {
+                Ok(configuration) => {
+                    self.record_gpu_configuration(index, &configuration);
+                    self.surfaces[index].scheduler.mark_dirty();
+                }
+                Err(error) => {
+                    self.record_gpu_render_error(index, &error);
+                    self.fall_back_gpu_surface(index, &error);
+                    self.surfaces[index].scheduler.mark_dirty();
+                }
+            }
+        }
+        let runtime_render_ms = self.surfaces[index]
+            .runtime
+            .as_mut()
+            .expect("runtime initialized before presentation")
+            .accept_gpu_frame(prepared);
+        self.surfaces[index].presenter.gpu_presented();
+        self.surfaces[index].gpu_consecutive_timeouts = 0;
+        self.sync_gpu_summary(index);
+        Ok(GpuFrameAttempt::Presented(PresentedFrame {
+            buffer_width: request.buffer_width,
+            buffer_height: request.buffer_height,
+            render_us: rendered_micros.max(milliseconds_to_microseconds(runtime_render_ms)),
+            conversion_us: 0,
+        }))
+    }
+
     fn maybe_render(&mut self, owner: u64, qh: &QueueHandle<Self>) -> Result<(), ShellHostError> {
         let Some(index) = self.surface_index_by_owner(owner) else {
             return Ok(());
@@ -1795,6 +2475,14 @@ impl State {
             .ok_or_else(|| ShellHostError::Buffer("combined mapped bytes overflow".into()))?;
         let surface_state = &mut self.surfaces[index];
         if surface_state.presentation_failed || !surface_state.desired_mapped {
+            #[cfg(feature = "gpu-renderer")]
+            if self.gpu_requested && !surface_state.desired_mapped {
+                surface_state.summary.gpu.closed_surface_suppressions = surface_state
+                    .summary
+                    .gpu
+                    .closed_surface_suppressions
+                    .saturating_add(1);
+            }
             return Ok(());
         }
         let wayland_surface = surface_state
@@ -1907,74 +2595,160 @@ impl State {
         }
         let buffer_width = render_request.buffer_width;
         let buffer_height = render_request.buffer_height;
-        if surface_state
-            .pool
-            .requires_resize(buffer_width, buffer_height)?
+        let mut presented = None;
+        #[cfg(feature = "gpu-renderer")]
+        let mut cpu_fallback_frame = None;
+        #[cfg(feature = "gpu-renderer")]
         {
-            let current_surface = surface_state.pool.stats().total_mapped_bytes;
-            let proposed = surface_state
-                .pool
-                .projected_total_mapped_bytes(buffer_width, buffer_height)?;
-            if current_total_mapped
-                .checked_sub(current_surface)
-                .and_then(|total| total.checked_add(proposed))
-                .is_none_or(|total| total > MAX_SESSION_MAPPED_BYTES)
-            {
-                return Err(ShellHostError::Buffer(format!(
-                    "surface instance {owner} would exceed the {MAX_SESSION_MAPPED_BYTES}-byte aggregate SHM limit"
-                )));
+            let use_gpu = match self.ensure_gpu_surface(index, buffer_width, buffer_height) {
+                Ok(use_gpu) => use_gpu,
+                Err(error) => {
+                    self.fall_back_gpu_surface(index, &error);
+                    false
+                }
+            };
+            if use_gpu {
+                match self.surfaces[index].scheduler.decision(true, true) {
+                    ScheduleDecision::Idle
+                    | ScheduleDecision::WaitForFrameCallback
+                    | ScheduleDecision::WaitForBuffer => return Ok(()),
+                    ScheduleDecision::Render => {}
+                }
+                match self.try_present_gpu_frame(
+                    index,
+                    render_request,
+                    logical_width,
+                    logical_height,
+                    &compositor,
+                    &wayland_surface,
+                    qh,
+                )? {
+                    GpuFrameAttempt::Presented(frame) => presented = Some(frame),
+                    GpuFrameAttempt::CpuFallback(frame) => cpu_fallback_frame = Some(frame),
+                    GpuFrameAttempt::NoFrame => return Ok(()),
+                }
             }
         }
+        if presented.is_none() {
+            let surface_state = &mut self.surfaces[index];
+            #[cfg(feature = "gpu-renderer")]
+            if surface_state.presenter.state() == PresenterState::FallingBack {
+                surface_state.presenter.cpu_ready();
+                surface_state.summary.gpu.presenter_state = "cpu".into();
+            }
+            if surface_state
+                .pool
+                .requires_resize(buffer_width, buffer_height)?
+            {
+                let current_surface = surface_state.pool.stats().total_mapped_bytes;
+                let proposed = surface_state
+                    .pool
+                    .projected_total_mapped_bytes(buffer_width, buffer_height)?;
+                if current_total_mapped
+                    .checked_sub(current_surface)
+                    .and_then(|total| total.checked_add(proposed))
+                    .is_none_or(|total| total > MAX_SESSION_MAPPED_BYTES)
+                {
+                    return Err(ShellHostError::Buffer(format!(
+                        "surface instance {owner} would exceed the {MAX_SESSION_MAPPED_BYTES}-byte aggregate SHM limit"
+                    )));
+                }
+            }
+            let size_ready =
+                surface_state
+                    .pool
+                    .ensure_size(&shm, qh, buffer_width, buffer_height)?;
+            let free_buffer = size_ready && surface_state.pool.has_free();
+            match surface_state.scheduler.decision(true, free_buffer) {
+                ScheduleDecision::Idle
+                | ScheduleDecision::WaitForFrameCallback
+                | ScheduleDecision::WaitForBuffer => return Ok(()),
+                ScheduleDecision::Render => {}
+            }
+            #[cfg(feature = "gpu-renderer")]
+            let frame = if let Some(frame) = cpu_fallback_frame {
+                frame
+            } else {
+                let Some(frame) = surface_state
+                    .runtime
+                    .as_mut()
+                    .expect("initialized above")
+                    .render_pending_for(render_request, owner, surface_state.role_generation)?
+                else {
+                    surface_state.scheduler.mark_clean();
+                    return Ok(());
+                };
+                frame
+            };
+            #[cfg(not(feature = "gpu-renderer"))]
+            let frame = {
+                let Some(frame) = surface_state
+                    .runtime
+                    .as_mut()
+                    .expect("initialized above")
+                    .render_pending_for(render_request, owner, surface_state.role_generation)?
+                else {
+                    surface_state.scheduler.mark_clean();
+                    return Ok(());
+                };
+                frame
+            };
+            let Some((_id, buffer, conversion_us)) = surface_state
+                .pool
+                .acquire_and_write(&frame.premultiplied_rgba)?
+            else {
+                surface_state.scheduler.mark_dirty();
+                return Ok(());
+            };
+            update_input_region(
+                &compositor,
+                &wayland_surface,
+                frame.logical_width,
+                frame.logical_height,
+                &frame.input_regions,
+                qh,
+            );
+            if surface_state.scale_state.profile() == PresentationProfile::FractionalViewport {
+                let viewport = surface_state.viewport.as_ref().ok_or_else(|| {
+                    ShellHostError::Wayland("fractional profile has no viewport object".into())
+                })?;
+                viewport.set_destination(logical_width as i32, logical_height as i32);
+            }
+            wayland_surface.attach(Some(&buffer), 0, 0);
+            // wl_surface.damage is expressed in surface-local logical coordinates.
+            wayland_surface.damage(
+                0,
+                0,
+                logical_width.min(i32::MAX as u32) as i32,
+                logical_height.min(i32::MAX as u32) as i32,
+            );
+            wayland_surface.frame(
+                qh,
+                CallbackData::Frame {
+                    owner,
+                    generation: surface_state.role_generation,
+                },
+            );
+            wayland_surface.commit();
+            #[cfg(feature = "gpu-renderer")]
+            {
+                surface_state.summary.gpu.shm_frames =
+                    surface_state.summary.gpu.shm_frames.saturating_add(1);
+                surface_state.summary.gpu.frame_callbacks_requested = surface_state
+                    .summary
+                    .gpu
+                    .frame_callbacks_requested
+                    .saturating_add(1);
+            }
+            presented = Some(PresentedFrame {
+                buffer_width: frame.buffer_width,
+                buffer_height: frame.buffer_height,
+                render_us: milliseconds_to_microseconds(frame.render_ms),
+                conversion_us,
+            });
+        }
+        let presented = presented.expect("a presenter completed the selected frame");
         let surface_state = &mut self.surfaces[index];
-        let size_ready = surface_state
-            .pool
-            .ensure_size(&shm, qh, buffer_width, buffer_height)?;
-        let free_buffer = size_ready && surface_state.pool.has_free();
-        match surface_state.scheduler.decision(true, free_buffer) {
-            ScheduleDecision::Idle
-            | ScheduleDecision::WaitForFrameCallback
-            | ScheduleDecision::WaitForBuffer => return Ok(()),
-            ScheduleDecision::Render => {}
-        }
-        let Some(frame) = surface_state
-            .runtime
-            .as_mut()
-            .expect("initialized above")
-            .render_pending_for(render_request, owner, surface_state.role_generation)?
-        else {
-            surface_state.scheduler.mark_clean();
-            return Ok(());
-        };
-        let Some((_id, buffer, conversion_us)) = surface_state
-            .pool
-            .acquire_and_write(&frame.premultiplied_rgba)?
-        else {
-            surface_state.scheduler.mark_dirty();
-            return Ok(());
-        };
-        update_input_region(&compositor, &wayland_surface, &frame, qh);
-        if surface_state.scale_state.profile() == PresentationProfile::FractionalViewport {
-            let viewport = surface_state.viewport.as_ref().ok_or_else(|| {
-                ShellHostError::Wayland("fractional profile has no viewport object".into())
-            })?;
-            viewport.set_destination(logical_width as i32, logical_height as i32);
-        }
-        wayland_surface.attach(Some(&buffer), 0, 0);
-        // wl_surface.damage is expressed in surface-local logical coordinates.
-        wayland_surface.damage(
-            0,
-            0,
-            logical_width.min(i32::MAX as u32) as i32,
-            logical_height.min(i32::MAX as u32) as i32,
-        );
-        wayland_surface.frame(
-            qh,
-            CallbackData::Frame {
-                owner,
-                generation: surface_state.role_generation,
-            },
-        );
-        wayland_surface.commit();
         surface_state.scheduler.frame_committed();
         surface_state.mapped = true;
         surface_state.map_state.mapped();
@@ -1984,15 +2758,15 @@ impl State {
             surface_state.summary.frames_committed.saturating_add(1);
         surface_state.summary.logical_width = logical_width;
         surface_state.summary.logical_height = logical_height;
-        surface_state.summary.buffer_width = frame.buffer_width;
-        surface_state.summary.buffer_height = frame.buffer_height;
+        surface_state.summary.buffer_width = presented.buffer_width;
+        surface_state.summary.buffer_height = presented.buffer_height;
         surface_state.summary.preferred_scale_numerator =
             surface_state.scale_state.preferred_numerator();
         surface_state.summary.scale_denominator = htm_runtime::LIVE_SCALE_DENOMINATOR;
         surface_state.summary.fractional_viewport_active =
             surface_state.scale_state.profile() == PresentationProfile::FractionalViewport;
-        surface_state.summary.last_render_us = milliseconds_to_microseconds(frame.render_ms);
-        surface_state.summary.last_pixel_conversion_us = conversion_us;
+        surface_state.summary.last_render_us = presented.render_us;
+        surface_state.summary.last_pixel_conversion_us = presented.conversion_us;
         if let Some(scale_started) = surface_state.pending_scale_started.take() {
             surface_state.summary.last_scale_change_to_commit_us = elapsed_us(scale_started);
             surface_state.scaled_commit_started = Some(scale_started);
@@ -2636,6 +3410,8 @@ impl State {
             self.clear_pointer_focus();
         }
         if let Some(index) = self.surface_index_by_owner(overlay_owner) {
+            #[cfg(feature = "gpu-renderer")]
+            self.release_gpu_surface(index, true);
             let surface = &mut self.surfaces[index];
             if surface
                 .runtime
@@ -2776,7 +3552,13 @@ impl State {
         if self.pointer_focus == Some(OVERLAY_OWNER) {
             self.clear_pointer_focus();
         }
+        #[cfg(feature = "gpu-renderer")]
+        let replace_gpu_surface_generation = self
+            .surface_index(SurfaceKind::Overlay)
+            .is_some_and(|index| self.surfaces[index].presenter.gpu_succeeded());
         if let Some(index) = self.surface_index(SurfaceKind::Overlay) {
+            #[cfg(feature = "gpu-renderer")]
+            self.release_gpu_surface(index, true);
             let surface = &mut self.surfaces[index];
             if surface
                 .runtime
@@ -2807,6 +3589,13 @@ impl State {
             }
             surface.pool.deactivate();
             surface.refresh_pool_summary();
+        }
+        #[cfg(feature = "gpu-renderer")]
+        if replace_gpu_surface_generation {
+            // A closed retained overlay releases its swapchain completely.
+            // Recreate the Wayland role on the next open so stale wgpu
+            // surfaces and frame callbacks cannot cross presenter generations.
+            self.destroy_transient_surface_role(OVERLAY_OWNER);
         }
         self.update_panel_document()?;
         self.reconcile_pipewire_demand()
@@ -2856,6 +3645,14 @@ impl State {
             .summary
             .frame_callbacks
             .saturating_add(1);
+        #[cfg(feature = "gpu-renderer")]
+        {
+            self.surfaces[index].summary.gpu.frame_callbacks_completed = self.surfaces[index]
+                .summary
+                .gpu
+                .frame_callbacks_completed
+                .saturating_add(1);
+        }
         if let Some(scale_started) = self.surfaces[index].scaled_commit_started.take() {
             self.surfaces[index]
                 .summary
@@ -2920,6 +3717,12 @@ impl State {
                 self.auto_cycles_remaining = self.auto_cycles_remaining.saturating_sub(1);
                 self.auto_cycles_completed = self.auto_cycles_completed.saturating_add(1);
                 self.auto_reopen_after_release = self.auto_cycles_remaining > 0;
+                // A GPU-presented overlay has no SHM release event. Its target
+                // is dropped synchronously during close, so the same bounded
+                // release gate may reopen immediately when no pool buffer is
+                // outstanding. CPU presentation continues to wait for the
+                // compositor's wl_buffer.release event.
+                self.maybe_reopen_automatic_overlay();
             }
         } else if kind == SurfaceKind::Panel
             && self.auto_started
@@ -3023,6 +3826,10 @@ impl State {
             self.fail(format!("clock shutdown failed: {error}"));
         }
         self.clear_pointer_focus();
+        #[cfg(feature = "gpu-renderer")]
+        for index in 0..self.surfaces.len() {
+            self.release_gpu_surface(index, true);
+        }
         for surface in &mut self.surfaces {
             if surface.mapped || surface.desired_mapped {
                 if let Some(wayland_surface) = &surface.surface {
@@ -3043,6 +3850,13 @@ impl State {
     }
 
     fn destroy_objects(&mut self) {
+        #[cfg(feature = "gpu-renderer")]
+        {
+            for index in 0..self.surfaces.len() {
+                self.release_gpu_surface(index, true);
+            }
+            self.gpu.take();
+        }
         for surface in &mut self.surfaces {
             surface.pool.destroy_all();
             Self::destroy_surface_protocol_objects(surface);
@@ -3163,6 +3977,10 @@ impl State {
                 .unwrap_or_default(),
             last_pixel_conversion_us: summary
                 .map(|summary| summary.last_pixel_conversion_us)
+                .unwrap_or_default(),
+            #[cfg(feature = "gpu-renderer")]
+            gpu: summary
+                .map(|summary| summary.gpu.clone())
                 .unwrap_or_default(),
         }
     }
@@ -3388,6 +4206,15 @@ fn run_session(options: SessionOptions) -> Result<State, ShellHostError> {
     let qh = event_queue.handle();
     connection.display().get_registry(&qh, ());
     let mut state = State::new(options, started, wayland_connection_us);
+    #[cfg(feature = "gpu-renderer")]
+    {
+        state.wayland_display = NonNull::new(
+            connection
+                .backend()
+                .display_ptr()
+                .cast::<std::ffi::c_void>(),
+        );
+    }
     state.queue_handle = Some(qh.clone());
     event_queue
         .roundtrip(&mut state)
@@ -3630,14 +4457,14 @@ fn pipewire_poll_ready(events: PollFlags) -> Result<bool, String> {
 fn update_input_region(
     compositor: &wl_compositor::WlCompositor,
     surface: &wl_surface::WlSurface,
-    frame: &LiveFrame,
+    logical_width: u32,
+    logical_height: u32,
+    input_regions: &[htm_runtime::LiveFrameRect],
     qh: &QueueHandle<State>,
 ) {
     let region = compositor.create_region(qh, ());
-    for rect in &frame.input_regions {
-        if let Some((x, y, width, height)) =
-            rounded_region(rect, frame.logical_width, frame.logical_height)
-        {
+    for rect in input_regions {
+        if let Some((x, y, width, height)) = rounded_region(rect, logical_width, logical_height) {
             region.add(x, y, width, height);
         }
     }
@@ -4584,5 +5411,14 @@ mod tests {
             .validate(true),
             Err(ShellHostError::MissingPointerCapability)
         ));
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    #[test]
+    fn live_gpu_activation_is_exact_and_internal() {
+        assert!(internal_gpu_renderer_value(Some("vello")));
+        for value in [None, Some(""), Some("cpu"), Some("Vello"), Some("vello ")] {
+            assert!(!internal_gpu_renderer_value(value));
+        }
     }
 }

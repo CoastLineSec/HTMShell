@@ -69,6 +69,8 @@ pub use incremental::{
     MutationPhase, MutationPhaseMeasurement, ScaleBaseline, SceneDiffSummary, SceneNodeChange,
     SceneNodeSnapshot, SlotReuseEvidence, StylesheetReloadAttempt,
 };
+#[cfg(feature = "gpu-renderer")]
+pub use live::LiveGpuPreparedFrame;
 pub use live::{
     ClockMutation, LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind, LiveFrame,
     LiveFrameRect, LiveInteractionState, LiveRenderRequest, LiveRuntimeMeasurements,
@@ -84,6 +86,11 @@ pub use model::{
     InteractionEvidence, Phase, ResourceRecord, RunMeasurements, ViewportSpec,
 };
 pub use mutation::run_incremental_experiment;
+#[cfg(feature = "gpu-renderer")]
+pub use render::{
+    LiveGpuBackendInfo, LiveGpuConfiguration, LiveGpuError, LiveGpuErrorKind, LiveGpuPresenter,
+    LiveGpuStatistics, LiveWaylandHandle, PendingLiveGpuFrame, RenderSurfaceId,
+};
 
 pub const BLITZ_REVISION: &str = "389e3762fc0ac19f6de7c0cec7201d0c8bde393a";
 pub const DIAGNOSTIC_SCHEMA_VERSION: &str = "htmshell.experimental-diagnostic.v1";

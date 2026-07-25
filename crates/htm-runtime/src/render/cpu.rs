@@ -15,9 +15,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Clone)]
-pub(super) struct CpuPreparedScene {
-    pub(super) revision: SceneRevision,
-    pub(super) recording: Scene,
+pub(crate) struct CpuPreparedScene {
+    pub(crate) revision: SceneRevision,
+    pub(crate) recording: Scene,
 }
 
 #[derive(Default)]
@@ -143,11 +143,27 @@ impl Renderer for CpuReferenceRenderer {
     }
 }
 
+impl CpuReferenceRenderer {
+    fn has_target(&self, surface: RenderSurfaceId) -> bool {
+        self.targets.contains_key(&surface)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CpuFrame {
     pub plan: Arc<FramePlan>,
     pub pixels: Vec<u8>,
     pub full_raster: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedRender {
+    pub(crate) plan: Arc<FramePlan>,
+    pub(crate) prepared: CpuPreparedScene,
+    scene: Arc<RetainedScene>,
+    surface: RenderSurfaceId,
+    size: [u32; 4],
+    scale: [u32; 2],
 }
 
 #[derive(Default)]
@@ -174,9 +190,45 @@ impl CpuRenderSession {
         physical_height: u32,
         scale_numerator: u32,
         scale_denominator: u32,
-        mut reasons: FrameReasonSet,
+        reasons: FrameReasonSet,
         force: bool,
     ) -> Result<Option<CpuFrame>, RuntimeError> {
+        let Some(prepared) = self.prepare_document(
+            document,
+            identities,
+            document_identity,
+            viewport,
+            surface,
+            physical_width,
+            physical_height,
+            scale_numerator,
+            scale_denominator,
+            reasons,
+            force,
+        )?
+        else {
+            return Ok(None);
+        };
+        let frame = self.render_prepared_cpu(&prepared)?;
+        self.accept_prepared(&prepared);
+        Ok(Some(frame))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_document(
+        &mut self,
+        document: &mut HtmlDocument,
+        identities: &IdentityRegistry,
+        document_identity: ExperimentalDocumentIdentity,
+        viewport: ViewportSpec,
+        surface: RenderSurfaceId,
+        physical_width: u32,
+        physical_height: u32,
+        scale_numerator: u32,
+        scale_denominator: u32,
+        mut reasons: FrameReasonSet,
+        force: bool,
+    ) -> Result<Option<PreparedRender>, RuntimeError> {
         if scale_numerator == 0 || scale_denominator == 0 {
             return Err(RuntimeError::InvalidPackage(
                 "renderer scale numerator and denominator must be nonzero".into(),
@@ -273,38 +325,66 @@ impl CpuRenderSession {
             reasons,
             presentation_eligible: true,
         });
+        let prepared = prepare_scene(document, plan.scene_revision, viewport)?;
+        Ok(Some(PreparedRender {
+            plan,
+            prepared,
+            scene,
+            surface,
+            size,
+            scale,
+        }))
+    }
+
+    pub(crate) fn render_prepared_cpu(
+        &mut self,
+        prepared: &PreparedRender,
+    ) -> Result<CpuFrame, RuntimeError> {
+        let plan = &prepared.plan;
         let target = RenderTarget {
-            width: physical_width,
-            height: physical_height,
+            width: plan.physical_width,
+            height: plan.physical_height,
             pixel_format: PixelFormat::PremultipliedRgba8,
         };
+        let surface_changed = self
+            .current_surface
+            .is_some_and(|prior| prior != prepared.surface);
+        let size_changed = self
+            .current_size
+            .is_some_and(|prior| prior != prepared.size);
+        let scale_changed = self
+            .current_scale
+            .is_some_and(|prior| prior != prepared.scale);
         if surface_changed {
             if let Some(previous_surface) = self.current_surface {
                 self.renderer.release_target(previous_surface);
             }
             self.renderer
-                .create_target(surface, target)
+                .create_target(prepared.surface, target)
+                .map_err(runtime_backend_error)?;
+        } else if !self.renderer.has_target(prepared.surface) {
+            // Retained state may have advanced through a successful GPU
+            // presentation before this presenter ever needed a CPU target.
+            // Backend targets are intentionally independent from neutral
+            // scene identity and must be created on the first CPU fallback.
+            self.renderer
+                .create_target(prepared.surface, target)
                 .map_err(runtime_backend_error)?;
         } else if size_changed || scale_changed {
             self.renderer
-                .resize_target(surface, target)
-                .map_err(runtime_backend_error)?;
-        } else if self.current_surface.is_none() {
-            self.renderer
-                .create_target(surface, target)
+                .resize_target(prepared.surface, target)
                 .map_err(runtime_backend_error)?;
         }
-        let prepared = prepare_scene(document, plan.scene_revision, viewport)?;
         self.renderer
-            .prepare(&plan, prepared)
+            .prepare(plan, prepared.prepared.clone())
             .map_err(runtime_backend_error)?;
-        let result = self.renderer.render(&plan, target).map_err(|error| {
+        let result = self.renderer.render(plan, target).map_err(|error| {
             self.recovery_pending = error.recoverable;
             runtime_backend_error(error)
         })?;
         if result.scene_revision != plan.scene_revision
             || result.applied_damage != plan.damage
-            || result.prepared_resources != scene.live_resources()
+            || result.prepared_resources != prepared.scene.live_resources()
         {
             self.recovery_pending = true;
             return Err(RuntimeError::InvalidPackage(
@@ -332,18 +412,25 @@ impl CpuRenderSession {
             .readback(result)
             .map_err(runtime_backend_error)?;
         self.renderer
-            .release_resources(&scene.live_resources())
+            .release_resources(&prepared.scene.live_resources())
             .map_err(runtime_backend_error)?;
-        self.current_scene = Some(scene);
-        self.current_surface = Some(surface);
-        self.current_size = Some(size);
-        self.current_scale = Some(scale);
-        self.recovery_pending = false;
-        Ok(Some(CpuFrame {
-            plan,
+        Ok(CpuFrame {
+            plan: Arc::clone(plan),
             pixels,
             full_raster,
-        }))
+        })
+    }
+
+    pub(crate) fn accept_prepared(&mut self, prepared: &PreparedRender) {
+        self.current_scene = Some(Arc::clone(&prepared.scene));
+        self.current_surface = Some(prepared.surface);
+        self.current_size = Some(prepared.size);
+        self.current_scale = Some(prepared.scale);
+        self.recovery_pending = false;
+    }
+
+    pub(crate) fn reject_prepared(&mut self, recoverable: bool) {
+        self.recovery_pending |= recoverable;
     }
 
     pub(crate) fn reset_backend(&mut self) -> Result<(), RuntimeError> {

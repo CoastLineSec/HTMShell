@@ -1,4 +1,10 @@
+mod live;
 mod painter;
+
+pub use live::{
+    LiveGpuBackendInfo, LiveGpuConfiguration, LiveGpuError, LiveGpuErrorKind, LiveGpuPresenter,
+    LiveGpuStatistics, LiveWaylandHandle, PendingLiveGpuFrame,
+};
 
 use super::cpu::{CpuPreparedScene, CpuReferenceRenderer};
 use super::{
@@ -251,6 +257,7 @@ struct OffscreenTarget {
 
 pub(crate) struct VelloOffscreenRenderer {
     instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     renderer: vello::Renderer,
@@ -267,6 +274,14 @@ pub(crate) struct VelloOffscreenRenderer {
 impl VelloOffscreenRenderer {
     pub(crate) fn new(force_software_adapter: bool) -> Result<Self, BackendError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        Self::new_with_instance(instance, force_software_adapter, None)
+    }
+
+    fn new_with_instance(
+        instance: wgpu::Instance,
+        force_software_adapter: bool,
+        compatible_surface: Option<&wgpu::Surface<'_>>,
+    ) -> Result<Self, BackendError> {
         let adapter_selection_started = Instant::now();
         let mut adapters = bounded_block_on(
             instance.enumerate_adapters(wgpu::Backends::VULKAN | wgpu::Backends::GL),
@@ -279,6 +294,28 @@ impl VelloOffscreenRenderer {
                 wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC;
             format.allowed_usages.contains(required_usage)
                 && (!force_software_adapter || info.device_type == wgpu::DeviceType::Cpu)
+                && compatible_surface.is_none_or(|surface| {
+                    let capabilities = surface.get_capabilities(adapter);
+                    capabilities.formats.iter().any(|format| {
+                        matches!(
+                            format,
+                            wgpu::TextureFormat::Rgba8Unorm
+                                | wgpu::TextureFormat::Bgra8Unorm
+                                | wgpu::TextureFormat::Rgba8UnormSrgb
+                                | wgpu::TextureFormat::Bgra8UnormSrgb
+                        )
+                    }) && capabilities
+                        .present_modes
+                        .contains(&wgpu::PresentMode::Fifo)
+                        && capabilities.alpha_modes.iter().any(|mode| {
+                            matches!(
+                                mode,
+                                wgpu::CompositeAlphaMode::PreMultiplied
+                                    | wgpu::CompositeAlphaMode::PostMultiplied
+                                    | wgpu::CompositeAlphaMode::Inherit
+                            )
+                        })
+                })
         });
         adapters.sort_by_key(|adapter| adapter_rank(&adapter.get_info()));
         let adapter = adapters.into_iter().next().ok_or_else(|| {
@@ -351,6 +388,7 @@ impl VelloOffscreenRenderer {
         };
         Ok(Self {
             instance,
+            adapter,
             device,
             queue,
             renderer,

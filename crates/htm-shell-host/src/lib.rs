@@ -12,6 +12,8 @@ mod output;
 mod pipewire;
 mod pixel;
 mod power;
+#[cfg(feature = "gpu-renderer")]
+mod presenter;
 mod scale;
 mod scheduler;
 mod wayland;
@@ -39,6 +41,8 @@ pub use power::{
 };
 pub use scale::{PresentationProfile, SurfaceScaleState};
 pub use scheduler::{FrameScheduler, ScheduleDecision};
+#[cfg(feature = "gpu-renderer")]
+pub use wayland::GpuSurfaceHostSummary;
 pub use wayland::{
     LiveHostOptions, LiveHostSummary, ManifestHostOptions, ManifestHostSummary,
     ManifestOutputHostSummary, ManifestSurfaceHostSummary, MultiSurfaceHostOptions,

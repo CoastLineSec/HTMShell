@@ -98,6 +98,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         "last_pixel_conversion_us={}",
         summary.last_pixel_conversion_us
     );
+    #[cfg(feature = "gpu-renderer")]
+    print_gpu_metrics("surface", &summary.gpu);
     Ok(())
 }
 
@@ -955,4 +957,70 @@ fn print_built_in_metrics(prefix: &str, summary: &SurfaceHostSummary) {
         summary.last_state_mutation_to_commit_us,
         summary.last_state_mutation_to_frame_callback_us,
     );
+    #[cfg(feature = "gpu-renderer")]
+    print_gpu_metrics(prefix, &summary.gpu);
+}
+
+#[cfg(feature = "gpu-renderer")]
+fn print_gpu_metrics(prefix: &str, summary: &htm_shell_host::GpuSurfaceHostSummary) {
+    println!(
+        "{prefix}_gpu=requested:{} success:{} state:{} format:{} present_mode:{} alpha_mode:{} configuration_generation:{}",
+        summary.requested,
+        summary.successful_gpu_frame,
+        summary.presenter_state,
+        summary.surface_format,
+        summary.present_mode,
+        summary.alpha_mode,
+        summary.configuration_generation,
+    );
+    println!(
+        "{prefix}_gpu_backend=adapter:{} api:{} device_type:{} driver:{} device_generation:{}",
+        summary.adapter,
+        summary.graphics_api,
+        summary.device_type,
+        summary.driver,
+        summary.device_generation,
+    );
+    println!(
+        "{prefix}_gpu_presenters=created:{} released:{} configurations:{} reconfigurations:{} target_recreations:{}",
+        summary.presenter_creations,
+        summary.presenter_releases,
+        summary.configurations,
+        summary.reconfigurations,
+        summary.target_recreations,
+    );
+    println!(
+        "{prefix}_gpu_frames=planned:{} rendered:{} submitted:{} presented:{} acquisitions:{} acquisition_failures:{} conversion_passes:{} full_target:{} cpu_fallbacks:{} shm:{}",
+        summary.frames_planned,
+        summary.frames_rendered,
+        summary.frames_submitted,
+        summary.frames_presented,
+        summary.surface_acquisitions,
+        summary.acquisition_failures,
+        summary.conversion_passes,
+        summary.full_target_renders,
+        summary.cpu_fallbacks,
+        summary.shm_frames,
+    );
+    println!(
+        "{prefix}_gpu_callbacks=requested:{} completed:{} losses:{} timeouts:{} outdated:{} device_losses:{} closed_suppressions:{} duplicate_suppressions:{}",
+        summary.frame_callbacks_requested,
+        summary.frame_callbacks_completed,
+        summary.surface_losses,
+        summary.surface_timeouts,
+        summary.surface_outdated,
+        summary.device_losses,
+        summary.closed_surface_suppressions,
+        summary.duplicate_frame_suppressions,
+    );
+    println!(
+        "{prefix}_gpu_resources=entries:{} bytes:{} uploads:{} cache_hits:{}",
+        summary.resource_entries,
+        summary.resource_bytes,
+        summary.resource_uploads,
+        summary.cache_hits,
+    );
+    if !summary.last_error.is_empty() {
+        println!("{prefix}_gpu_last_error={}", summary.last_error);
+    }
 }

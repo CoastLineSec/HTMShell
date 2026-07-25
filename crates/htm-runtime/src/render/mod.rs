@@ -7,7 +7,12 @@ mod frame;
 mod gpu;
 mod scene;
 
-pub(crate) use cpu::CpuRenderSession;
+pub(crate) use cpu::{CpuRenderSession, PreparedRender};
+#[cfg(feature = "gpu-renderer")]
+pub use gpu::{
+    LiveGpuBackendInfo, LiveGpuConfiguration, LiveGpuError, LiveGpuErrorKind, LiveGpuPresenter,
+    LiveGpuStatistics, LiveWaylandHandle, PendingLiveGpuFrame,
+};
 pub(crate) use scene::build_retained_scene;
 
 pub use contract::{

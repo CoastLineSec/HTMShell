@@ -5,6 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+gpu-renderer = [
+    "htm-runtime/gpu-renderer",
+    "wayland-client/system",
+]
+
 [dependencies]
 dbus.workspace = true
 htm-runtime = { path = "../htm-runtime" }

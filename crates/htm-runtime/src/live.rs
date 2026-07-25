@@ -9,7 +9,11 @@ use crate::builtin::{
 };
 use crate::identity::IdentityRegistry;
 use crate::model::{DiagnosticMessage, LogicalRect, ViewportSpec};
-use crate::render::{CpuRenderSession, DamageRegion, FrameReason, FrameReasonSet, RenderSurfaceId};
+#[cfg(feature = "gpu-renderer")]
+use crate::render::PreparedRender;
+use crate::render::{
+    CpuRenderSession, DamageRegion, FramePlan, FrameReason, FrameReasonSet, RenderSurfaceId,
+};
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
 use crate::{
     ExperimentalDocumentIdentity, ExperimentalNodeIdentity, MAX_CLONED_NODES_PER_DOCUMENT,
@@ -94,6 +98,38 @@ pub struct LiveFrame {
     pub interactive_region: LogicalRect,
     pub generation: u64,
     pub render_ms: f64,
+}
+
+/// Opaque feature-gated work item used by the internal live Vello presenter.
+///
+/// It is not an author-facing frame or renderer-selection API.
+#[cfg(feature = "gpu-renderer")]
+pub struct LiveGpuPreparedFrame {
+    prepared: PreparedRender,
+    pub logical_width: u32,
+    pub logical_height: u32,
+    pub buffer_width: u32,
+    pub buffer_height: u32,
+    pub damage_estimate: LogicalRect,
+    pub input_regions: Vec<LogicalRect>,
+    pub interactive_region: LogicalRect,
+    generation: u64,
+    started: Instant,
+}
+
+#[cfg(feature = "gpu-renderer")]
+impl LiveGpuPreparedFrame {
+    pub(crate) fn plan(&self) -> &FramePlan {
+        &self.prepared.plan
+    }
+
+    pub(crate) fn prepared(&self) -> &PreparedRender {
+        &self.prepared
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1203,33 +1239,109 @@ impl LiveDocument {
         )
     }
 
+    /// Builds one immutable live frame without CPU rasterization.
+    ///
+    /// The returned work remains provisional until `accept_gpu_frame` or
+    /// `render_gpu_frame_on_cpu` consumes it.
+    #[cfg(feature = "gpu-renderer")]
+    pub fn prepare_gpu_pending_for(
+        &mut self,
+        request: LiveRenderRequest,
+        surface_instance: u64,
+        surface_generation: u64,
+    ) -> Result<Option<LiveGpuPreparedFrame>, RuntimeError> {
+        self.validate_render_request(request)?;
+        let started = Instant::now();
+        let Some(prepared) = self.render_session.prepare_document(
+            &mut self.document,
+            &self.identities,
+            self.document_identity,
+            self.viewport,
+            RenderSurfaceId {
+                instance: surface_instance,
+                generation: surface_generation,
+            },
+            request.buffer_width,
+            request.buffer_height,
+            request.scale_numerator,
+            request.scale_denominator,
+            FrameReasonSet::new(),
+            false,
+        )?
+        else {
+            return Ok(None);
+        };
+        let (damage_estimate, input_regions, interactive_region) =
+            self.live_frame_geometry(&prepared.plan)?;
+        Ok(Some(LiveGpuPreparedFrame {
+            prepared,
+            logical_width: request.logical_width,
+            logical_height: request.logical_height,
+            buffer_width: request.buffer_width,
+            buffer_height: request.buffer_height,
+            damage_estimate,
+            input_regions,
+            interactive_region,
+            generation: self.frame_generation.saturating_add(1),
+            started,
+        }))
+    }
+
+    /// Accepts a directly presented GPU frame and advances retained identity.
+    #[cfg(feature = "gpu-renderer")]
+    pub fn accept_gpu_frame(&mut self, frame: LiveGpuPreparedFrame) -> f64 {
+        self.render_session.accept_prepared(frame.prepared());
+        self.frame_generation = frame.generation;
+        let render_ms = elapsed_ms(frame.started);
+        self.measurements.last_render_ms = render_ms;
+        render_ms
+    }
+
+    /// Renders the same provisional frame through the authoritative CPU path.
+    #[cfg(feature = "gpu-renderer")]
+    pub fn render_gpu_frame_on_cpu(
+        &mut self,
+        frame: LiveGpuPreparedFrame,
+    ) -> Result<LiveFrame, RuntimeError> {
+        let rendered = self.render_session.render_prepared_cpu(frame.prepared())?;
+        let expected = pixel_len(frame.buffer_width, frame.buffer_height)?;
+        if rendered.pixels.len() != expected {
+            return Err(RuntimeError::InvalidPackage(format!(
+                "CPU fallback returned {} bytes; expected {expected}",
+                rendered.pixels.len()
+            )));
+        }
+        self.render_session.accept_prepared(frame.prepared());
+        self.frame_generation = frame.generation;
+        let render_ms = elapsed_ms(frame.started);
+        self.measurements.last_render_ms = render_ms;
+        Ok(LiveFrame {
+            logical_width: frame.logical_width,
+            logical_height: frame.logical_height,
+            buffer_width: frame.buffer_width,
+            buffer_height: frame.buffer_height,
+            premultiplied_rgba: rendered.pixels,
+            damage_estimate: frame.damage_estimate,
+            input_regions: frame.input_regions,
+            interactive_region: frame.interactive_region,
+            generation: frame.generation,
+            render_ms,
+        })
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    pub fn reject_gpu_frame(&mut self, frame: LiveGpuPreparedFrame, recoverable: bool) {
+        let _ = frame;
+        self.render_session.reject_prepared(recoverable);
+    }
+
     fn render_internal(
         &mut self,
         request: LiveRenderRequest,
         surface: RenderSurfaceId,
         force: bool,
     ) -> Result<Option<LiveFrame>, RuntimeError> {
-        if request.logical_width != self.viewport.logical_width
-            || request.logical_height != self.viewport.logical_height
-        {
-            return Err(RuntimeError::InvalidPackage(format!(
-                "render request logical size {}x{} does not match live viewport {}x{}",
-                request.logical_width,
-                request.logical_height,
-                self.viewport.logical_width,
-                self.viewport.logical_height
-            )));
-        }
-        let checked = LiveRenderRequest::new(
-            request.logical_width,
-            request.logical_height,
-            request.scale_numerator,
-        )?;
-        if checked != request {
-            return Err(RuntimeError::InvalidPackage(
-                "render request contains inconsistent physical dimensions".into(),
-            ));
-        }
+        self.validate_render_request(request)?;
         let render_started = Instant::now();
         let mut reasons = FrameReasonSet::new();
         if force {
@@ -1262,11 +1374,57 @@ impl LiveDocument {
         let render_ms = elapsed_ms(render_started);
         self.measurements.last_render_ms = render_ms;
         self.frame_generation = self.frame_generation.saturating_add(1);
+        let (damage_estimate, input_regions, interactive_region) =
+            self.live_frame_geometry(&frame.plan)?;
+        debug_assert!(frame.full_raster);
+        Ok(Some(LiveFrame {
+            logical_width: request.logical_width,
+            logical_height: request.logical_height,
+            buffer_width: request.buffer_width,
+            buffer_height: request.buffer_height,
+            premultiplied_rgba,
+            damage_estimate,
+            input_regions,
+            interactive_region,
+            generation: self.frame_generation,
+            render_ms,
+        }))
+    }
+
+    fn validate_render_request(&self, request: LiveRenderRequest) -> Result<(), RuntimeError> {
+        if request.logical_width != self.viewport.logical_width
+            || request.logical_height != self.viewport.logical_height
+        {
+            return Err(RuntimeError::InvalidPackage(format!(
+                "render request logical size {}x{} does not match live viewport {}x{}",
+                request.logical_width,
+                request.logical_height,
+                self.viewport.logical_width,
+                self.viewport.logical_height
+            )));
+        }
+        let checked = LiveRenderRequest::new(
+            request.logical_width,
+            request.logical_height,
+            request.scale_numerator,
+        )?;
+        if checked != request {
+            return Err(RuntimeError::InvalidPackage(
+                "render request contains inconsistent physical dimensions".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn live_frame_geometry(
+        &self,
+        plan: &FramePlan,
+    ) -> Result<(LogicalRect, Vec<LogicalRect>, LogicalRect), RuntimeError> {
         let card = self.bounds_for(self.kind.region_selector())?;
         let action = self.bounds_for(self.kind.primary_action_selector())?;
         validate_rect(&card)?;
         validate_rect(&action)?;
-        let damage_estimate = match &frame.plan.damage {
+        let damage_estimate = match &plan.damage {
             DamageRegion::Empty => LogicalRect {
                 x: 0.0,
                 y: 0.0,
@@ -1276,8 +1434,8 @@ impl LiveDocument {
             DamageRegion::Full => LogicalRect {
                 x: 0.0,
                 y: 0.0,
-                width: request.logical_width as f32,
-                height: request.logical_height as f32,
+                width: plan.logical_width as f32,
+                height: plan.logical_height as f32,
             },
             DamageRegion::Rects(rects) => rects
                 .iter()
@@ -1301,19 +1459,7 @@ impl LiveDocument {
                     height: 0.0,
                 }),
         };
-        debug_assert!(frame.full_raster);
-        Ok(Some(LiveFrame {
-            logical_width: request.logical_width,
-            logical_height: request.logical_height,
-            buffer_width: request.buffer_width,
-            buffer_height: request.buffer_height,
-            premultiplied_rgba,
-            damage_estimate,
-            input_regions: vec![card.clone()],
-            interactive_region: action,
-            generation: self.frame_generation,
-            render_ms,
-        }))
+        Ok((damage_estimate, vec![card], action))
     }
 
     pub fn snapshot(&self) -> Result<LiveRuntimeSnapshot, RuntimeError> {
@@ -6308,6 +6454,90 @@ mod tests {
             .unwrap()
             .is_none()
         );
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    #[test]
+    fn live_gpu_preparation_is_provisional_and_cpu_fallback_is_complete() {
+        let mut live = LiveDocument::load(fixture(), 640, 480).unwrap();
+        let request = LiveRenderRequest::new(640, 480, LIVE_SCALE_DENOMINATOR).unwrap();
+        let prepared = live
+            .prepare_gpu_pending_for(request, 51, 7)
+            .unwrap()
+            .expect("initial GPU plan");
+        assert_eq!(prepared.generation(), 1);
+        assert_eq!(live.frame_generation, 0);
+        assert!(matches!(prepared.plan().damage, DamageRegion::Full));
+        live.reject_gpu_frame(prepared, true);
+        assert_eq!(live.frame_generation, 0);
+
+        let replacement = live
+            .prepare_gpu_pending_for(request, 51, 7)
+            .unwrap()
+            .expect("recovery plan");
+        assert!(
+            replacement
+                .plan()
+                .reasons
+                .contains(&FrameReason::RendererRecovery)
+        );
+        let frame = live.render_gpu_frame_on_cpu(replacement).unwrap();
+        assert_eq!(frame.generation, 1);
+        assert_eq!(frame.premultiplied_rgba.len(), 640 * 480 * 4);
+        assert_eq!(live.frame_generation, 1);
+        assert!(
+            live.prepare_gpu_pending_for(request, 51, 7)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    #[test]
+    fn accepted_live_gpu_plan_advances_retained_state_without_cpu_pixels() {
+        let mut live = LiveDocument::load(fixture(), 320, 240).unwrap();
+        let request = LiveRenderRequest::new(320, 240, 150).unwrap();
+        let prepared = live
+            .prepare_gpu_pending_for(request, 52, 9)
+            .unwrap()
+            .expect("initial GPU plan");
+        assert_eq!((prepared.buffer_width, prepared.buffer_height), (400, 300));
+        live.accept_gpu_frame(prepared);
+        assert_eq!(live.frame_generation, 1);
+        assert!(
+            live.prepare_gpu_pending_for(request, 52, 9)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    #[test]
+    fn cpu_fallback_creates_its_target_after_a_successful_gpu_frame() {
+        let mut live = LiveDocument::load(fixture(), 320, 240).unwrap();
+        let request = LiveRenderRequest::new(320, 240, LIVE_SCALE_DENOMINATOR).unwrap();
+        let initial = live
+            .prepare_gpu_pending_for(request, 53, 11)
+            .unwrap()
+            .expect("initial GPU plan");
+        live.accept_gpu_frame(initial);
+
+        let action = live.snapshot().unwrap().action_bounds;
+        assert!(
+            live.pointer_move(
+                f64::from(action.x + action.width / 2.0),
+                f64::from(action.y + action.height / 2.0),
+            )
+            .unwrap()
+        );
+        let changed = live
+            .prepare_gpu_pending_for(request, 53, 11)
+            .unwrap()
+            .expect("visual mutation after GPU presentation");
+        let fallback = live.render_gpu_frame_on_cpu(changed).unwrap();
+        assert_eq!(fallback.generation, 2);
+        assert_eq!(fallback.premultiplied_rgba.len(), 320 * 240 * 4);
+        assert_eq!(live.frame_generation, 2);
     }
 
     #[test]
