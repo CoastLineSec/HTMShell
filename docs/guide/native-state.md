@@ -18,6 +18,6 @@ See the [power guide](power.md) and [`HTMShell.Services.UPower`](../types/HTMShe
 
 ## PipeWire
 
-PipeWire provides a process-scoped node collection, actual and configured default relationships, audio state, and typed volume and mute controls. Documents request node and audio details automatically through their bindings and controls. See [PipeWire audio](audio.md) and [`HTMShell.Services.PipeWire`](../types/HTMShell.Services.PipeWire/README.md).
+PipeWire provides process-scoped nodes, read-only links and link groups, actual and configured default relationships, audio state, and typed volume and mute controls. Documents request graph, relation, node, and audio details automatically through their bindings and controls. See [PipeWire audio](audio.md) and [`HTMShell.Services.PipeWire`](../types/HTMShell.Services.PipeWire/README.md).
 
 Clock, power, and PipeWire updates are event-driven. They do not use state polling or per-output sources.

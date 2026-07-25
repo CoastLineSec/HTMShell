@@ -188,6 +188,24 @@ pub struct SurfaceHostSummary {
     pub contextual_subtree_clones: u64,
     pub retained_channel_identities: u64,
     pub duplicate_channel_suppressions: u64,
+    pub link_insertions: u64,
+    pub link_removals: u64,
+    pub link_state_mutations: u64,
+    pub link_relation_mutations: u64,
+    pub link_moves: u64,
+    pub group_insertions: u64,
+    pub group_removals: u64,
+    pub group_member_insertions: u64,
+    pub group_member_removals: u64,
+    pub representative_changes: u64,
+    pub group_state_mutations: u64,
+    pub node_tracker_insertions: u64,
+    pub node_tracker_removals: u64,
+    pub peer_relation_mutations: u64,
+    pub retained_link_identities: u64,
+    pub retained_group_identities: u64,
+    pub retained_tracker_identities: u64,
+    pub duplicate_graph_suppressions: u64,
     pub last_reconciliation_us: u64,
     pub last_state_projection_us: u64,
     pub last_attribute_mutation_us: u64,
@@ -1963,6 +1981,32 @@ impl State {
             runtime_measurements.retained_channel_identities;
         surface_state.summary.duplicate_channel_suppressions =
             runtime_measurements.duplicate_channel_suppressions;
+        surface_state.summary.link_insertions = runtime_measurements.link_insertions;
+        surface_state.summary.link_removals = runtime_measurements.link_removals;
+        surface_state.summary.link_state_mutations = runtime_measurements.link_state_mutations;
+        surface_state.summary.link_relation_mutations =
+            runtime_measurements.link_relation_mutations;
+        surface_state.summary.link_moves = runtime_measurements.link_moves;
+        surface_state.summary.group_insertions = runtime_measurements.group_insertions;
+        surface_state.summary.group_removals = runtime_measurements.group_removals;
+        surface_state.summary.group_member_insertions =
+            runtime_measurements.group_member_insertions;
+        surface_state.summary.group_member_removals = runtime_measurements.group_member_removals;
+        surface_state.summary.representative_changes = runtime_measurements.representative_changes;
+        surface_state.summary.group_state_mutations = runtime_measurements.group_state_mutations;
+        surface_state.summary.node_tracker_insertions =
+            runtime_measurements.node_tracker_insertions;
+        surface_state.summary.node_tracker_removals = runtime_measurements.node_tracker_removals;
+        surface_state.summary.peer_relation_mutations =
+            runtime_measurements.peer_relation_mutations;
+        surface_state.summary.retained_link_identities =
+            runtime_measurements.retained_link_identities;
+        surface_state.summary.retained_group_identities =
+            runtime_measurements.retained_group_identities;
+        surface_state.summary.retained_tracker_identities =
+            runtime_measurements.retained_tracker_identities;
+        surface_state.summary.duplicate_graph_suppressions =
+            runtime_measurements.duplicate_graph_suppressions;
         surface_state.summary.last_reconciliation_us =
             milliseconds_to_microseconds(runtime_measurements.last_reconciliation_ms);
         surface_state.summary.last_state_projection_us =
@@ -3088,6 +3132,28 @@ impl State {
                                 measurements.retained_channel_identities;
                             metrics.duplicate_channel_suppressions =
                                 measurements.duplicate_channel_suppressions;
+                            metrics.link_insertions = measurements.link_insertions;
+                            metrics.link_removals = measurements.link_removals;
+                            metrics.link_state_mutations = measurements.link_state_mutations;
+                            metrics.link_relation_mutations = measurements.link_relation_mutations;
+                            metrics.link_moves = measurements.link_moves;
+                            metrics.group_insertions = measurements.group_insertions;
+                            metrics.group_removals = measurements.group_removals;
+                            metrics.group_member_insertions = measurements.group_member_insertions;
+                            metrics.group_member_removals = measurements.group_member_removals;
+                            metrics.representative_changes = measurements.representative_changes;
+                            metrics.group_state_mutations = measurements.group_state_mutations;
+                            metrics.node_tracker_insertions = measurements.node_tracker_insertions;
+                            metrics.node_tracker_removals = measurements.node_tracker_removals;
+                            metrics.peer_relation_mutations = measurements.peer_relation_mutations;
+                            metrics.retained_link_identities =
+                                measurements.retained_link_identities;
+                            metrics.retained_group_identities =
+                                measurements.retained_group_identities;
+                            metrics.retained_tracker_identities =
+                                measurements.retained_tracker_identities;
+                            metrics.duplicate_graph_suppressions =
+                                measurements.duplicate_graph_suppressions;
                             metrics.last_reconciliation_us =
                                 milliseconds_to_microseconds(measurements.last_reconciliation_ms);
                             metrics.last_state_projection_us =

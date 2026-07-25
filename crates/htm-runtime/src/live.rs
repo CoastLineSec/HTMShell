@@ -11,9 +11,8 @@ use crate::model::{DiagnosticMessage, LogicalRect, ViewportSpec};
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
 use crate::{
     ExperimentalDocumentIdentity, ExperimentalNodeIdentity, MAX_CLONED_NODES_PER_DOCUMENT,
-    MAX_CLONED_NODES_PER_REPEAT, MAX_ITEMS_PER_REPEAT, MAX_PIPEWIRE_CHANNELS_PER_NODE,
-    NumericValue, PipeWireDocumentDemand, RepeatItemSnapshot, RepeatSource, RepeatSourceSnapshot,
-    RuntimeError, StateValueFormat,
+    MAX_CLONED_NODES_PER_REPEAT, MAX_ITEMS_PER_REPEAT, NumericValue, PipeWireDocumentDemand,
+    RepeatItemSnapshot, RepeatSource, RepeatSourceSnapshot, RuntimeError, StateValueFormat,
 };
 use blitz_dom::node::NodeData;
 use blitz_dom::{Document, DocumentConfig, LocalName, QualName, StyleThreading, local_name, ns};
@@ -337,6 +336,24 @@ pub struct LiveRuntimeMeasurements {
     pub contextual_subtree_clones: u64,
     pub retained_channel_identities: u64,
     pub duplicate_channel_suppressions: u64,
+    pub link_insertions: u64,
+    pub link_removals: u64,
+    pub link_state_mutations: u64,
+    pub link_relation_mutations: u64,
+    pub link_moves: u64,
+    pub group_insertions: u64,
+    pub group_removals: u64,
+    pub group_member_insertions: u64,
+    pub group_member_removals: u64,
+    pub representative_changes: u64,
+    pub group_state_mutations: u64,
+    pub node_tracker_insertions: u64,
+    pub node_tracker_removals: u64,
+    pub peer_relation_mutations: u64,
+    pub retained_link_identities: u64,
+    pub retained_group_identities: u64,
+    pub retained_tracker_identities: u64,
+    pub duplicate_graph_suppressions: u64,
     pub last_reconciliation_ms: f64,
     pub last_state_projection_ms: f64,
     pub last_attribute_mutation_ms: f64,
@@ -1139,6 +1156,13 @@ impl LiveDocument {
             if key == StateBindingKey::PipeWireNodeCount {
                 demand.nodes = true;
             }
+            if key == StateBindingKey::PipeWireLinkCount {
+                demand.link_collection = true;
+            }
+            if key == StateBindingKey::PipeWireLinkGroupCount {
+                demand.link_collection = true;
+                demand.link_group_collection = true;
+            }
             if key.as_str().starts_with("pipewire.default_")
                 || key.as_str().starts_with("pipewire.configured_")
             {
@@ -1232,6 +1256,17 @@ impl LiveDocument {
                 ) {
                     demand.channel_projection = true;
                 }
+                if matches!(
+                    descendant.binding,
+                    Some(
+                        crate::ItemBindingKey::LinkGroupCount
+                            | crate::ItemBindingKey::LinkGroupStatus
+                    )
+                ) {
+                    demand.link_collection = true;
+                    demand.link_group_collection = true;
+                    demand.node_link_tracking = true;
+                }
                 if descendant.action.is_some() {
                     demand.audio_state = true;
                     demand.audio_writes = true;
@@ -1240,18 +1275,71 @@ impl LiveDocument {
                     demand.property_keys.insert(property_key.clone());
                 }
             }
-            if !repeat.declaration.contextual_repeats.is_empty() {
-                demand.audio_state = true;
-                demand.channel_projection = true;
-                for contextual in &repeat.declaration.contextual_repeats {
-                    if contextual
+            for contextual in &repeat.declaration.contextual_repeats {
+                match contextual.source {
+                    crate::ContextualRepeatSource::Channels => {
+                        demand.audio_state = true;
+                        demand.channel_projection = true;
+                    }
+                    crate::ContextualRepeatSource::NodeLinkGroups => {
+                        demand.link_collection = true;
+                        demand.link_group_collection = true;
+                        demand.node_link_tracking = true;
+                    }
+                    crate::ContextualRepeatSource::GroupLinks => {}
+                }
+                if contextual.descendants.iter().any(|descendant| {
+                    descendant
+                        .binding
+                        .is_some_and(crate::ItemBindingKey::is_relation)
+                }) {
+                    demand.relation_projection = true;
+                    demand.node_details = true;
+                }
+                if contextual.source == crate::ContextualRepeatSource::Channels
+                    && contextual
                         .descendants
                         .iter()
                         .any(|descendant| descendant.range.is_some())
-                    {
-                        demand.audio_writes = true;
-                        demand.channel_writes = true;
-                    }
+                {
+                    demand.audio_writes = true;
+                    demand.channel_writes = true;
+                }
+            }
+        }
+        for repeat in self.repeats.values().filter(|repeat| {
+            matches!(
+                repeat.declaration.source,
+                RepeatSource::PipeWireLinks | RepeatSource::PipeWireLinkGroups
+            )
+        }) {
+            demand.service = true;
+            demand.nodes = true;
+            demand.link_collection = true;
+            demand.link_details = true;
+            if repeat.declaration.source == RepeatSource::PipeWireLinkGroups {
+                demand.link_group_collection = true;
+            }
+            if repeat.declaration.descendants.iter().any(|descendant| {
+                descendant
+                    .binding
+                    .is_some_and(crate::ItemBindingKey::is_relation)
+            }) {
+                demand.relation_projection = true;
+                demand.node_details = true;
+            }
+            for contextual in &repeat.declaration.contextual_repeats {
+                if contextual.source == crate::ContextualRepeatSource::GroupLinks {
+                    demand.group_members = true;
+                    demand.link_group_collection = true;
+                }
+                if contextual.descendants.iter().any(|descendant| {
+                    descendant
+                        .binding
+                        .is_some_and(crate::ItemBindingKey::is_relation)
+                }) {
+                    demand.relation_projection = true;
+                    demand.node_details = true;
                 }
             }
         }
@@ -1696,7 +1784,7 @@ impl LiveDocument {
             let desired = Self::desired_repeat_node_count(&repeat.declaration, snapshot)?;
             if desired > MAX_CLONED_NODES_PER_REPEAT {
                 return Err(RuntimeError::LimitExceeded(format!(
-                    "repeat `#{repeat_id}` would exceed the per-repeat node limit of {MAX_CLONED_NODES_PER_REPEAT}"
+                    "repeat `#{repeat_id}` would clone {desired} nodes; the per-repeat limit is {MAX_CLONED_NODES_PER_REPEAT}"
                 )));
             }
             projected_document_nodes = projected_document_nodes
@@ -1756,6 +1844,61 @@ impl LiveDocument {
             .measurements
             .repeat_identity_reuses
             .saturating_add(total.identity_reuses as u64);
+        match snapshot.source {
+            RepeatSource::PipeWireLinks => {
+                self.measurements.link_insertions = self
+                    .measurements
+                    .link_insertions
+                    .saturating_add(total.insertions as u64);
+                self.measurements.link_removals = self
+                    .measurements
+                    .link_removals
+                    .saturating_add(total.removals as u64);
+                self.measurements.link_moves = self
+                    .measurements
+                    .link_moves
+                    .saturating_add(total.moves as u64);
+                self.measurements.link_state_mutations = self
+                    .measurements
+                    .link_state_mutations
+                    .saturating_add(total.property_updates as u64);
+                self.measurements.link_relation_mutations = self
+                    .measurements
+                    .link_relation_mutations
+                    .saturating_add(total.property_updates as u64);
+                self.measurements.retained_link_identities = self
+                    .measurements
+                    .retained_link_identities
+                    .saturating_add(total.identity_reuses as u64);
+                self.measurements.duplicate_graph_suppressions = self
+                    .measurements
+                    .duplicate_graph_suppressions
+                    .saturating_add(total.unchanged_items as u64);
+            }
+            RepeatSource::PipeWireLinkGroups => {
+                self.measurements.group_insertions = self
+                    .measurements
+                    .group_insertions
+                    .saturating_add(total.insertions as u64);
+                self.measurements.group_removals = self
+                    .measurements
+                    .group_removals
+                    .saturating_add(total.removals as u64);
+                self.measurements.group_state_mutations = self
+                    .measurements
+                    .group_state_mutations
+                    .saturating_add(total.property_updates as u64);
+                self.measurements.retained_group_identities = self
+                    .measurements
+                    .retained_group_identities
+                    .saturating_add(total.identity_reuses as u64);
+                self.measurements.duplicate_graph_suppressions = self
+                    .measurements
+                    .duplicate_graph_suppressions
+                    .saturating_add(total.unchanged_items as u64);
+            }
+            _ => {}
+        }
         self.measurements.repeated_item_count = self
             .repeats
             .values()
@@ -2060,21 +2203,22 @@ impl LiveDocument {
             .checked_mul(declaration.prototype_nodes)
             .ok_or_else(|| RuntimeError::LimitExceeded("repeat node count overflow".into()))?;
         snapshot.items.iter().try_fold(outer, |nodes, item| {
-            let channel_count = item
-                .channels
-                .as_ref()
-                .map_or(0, |channels| channels.items.len());
-            if channel_count > MAX_PIPEWIRE_CHANNELS_PER_NODE {
-                return Err(RuntimeError::LimitExceeded(format!(
-                    "PipeWire node `{}` has {channel_count} public channels; limit is {MAX_PIPEWIRE_CHANNELS_PER_NODE}",
-                    item.key
-                )));
-            }
             declaration
                 .contextual_repeats
                 .iter()
                 .try_fold(nodes, |nodes, nested| {
-                    channel_count
+                    let item_count = item
+                        .contextual(nested.source)
+                        .map_or(0, |snapshot| snapshot.items.len());
+                    if item_count > nested.source.item_limit() {
+                        return Err(RuntimeError::LimitExceeded(format!(
+                            "`{}` for item `{}` has {item_count} items; limit is {}",
+                            nested.source.as_str(),
+                            item.key,
+                            nested.source.item_limit()
+                        )));
+                    }
+                    item_count
                         .checked_mul(nested.prototype_nodes)
                         .and_then(|nested_nodes| nodes.checked_add(nested_nodes))
                         .ok_or_else(|| {
@@ -2212,17 +2356,18 @@ impl LiveDocument {
         if !live.contextual_repeats.is_empty() {
             for contextual in live.contextual_repeats.values_mut() {
                 let empty;
-                let channels = if let Some(channels) = item.channels.as_ref() {
-                    channels
-                } else {
-                    empty = crate::ContextualRepeatSnapshot {
-                        source_generation: contextual.source_generation,
-                        items: Vec::new(),
+                let snapshot =
+                    if let Some(snapshot) = item.contextual(contextual.declaration.source) {
+                        snapshot
+                    } else {
+                        empty = crate::ContextualRepeatSnapshot {
+                            source_generation: contextual.source_generation,
+                            items: Vec::new(),
+                        };
+                        &empty
                     };
-                    &empty
-                };
                 changed =
-                    changed.saturating_add(self.reconcile_contextual_repeat(contextual, channels)?);
+                    changed.saturating_add(self.reconcile_contextual_repeat(contextual, snapshot)?);
             }
         }
         Ok(changed)
@@ -2377,6 +2522,13 @@ impl LiveDocument {
                     ));
                 }
             };
+            if element_changed
+                && element.declaration.binding
+                    == Some(crate::ItemBindingKey::RepresentativeLinkRawId)
+            {
+                self.measurements.representative_changes =
+                    self.measurements.representative_changes.saturating_add(1);
+            }
             changed = changed.saturating_add(usize::from(element_changed));
         }
         Ok(changed)
@@ -2388,11 +2540,12 @@ impl LiveDocument {
         snapshot: &crate::ContextualRepeatSnapshot,
     ) -> Result<usize, RuntimeError> {
         let was_empty = repeat.items.is_empty();
-        if snapshot.items.len() > crate::MAX_PIPEWIRE_CHANNELS_PER_NODE {
+        if snapshot.items.len() > repeat.declaration.source.item_limit() {
             return Err(RuntimeError::LimitExceeded(format!(
-                "`item.channels` contains {} items; limit is {}",
+                "`{}` contains {} items; limit is {}",
+                repeat.declaration.source.as_str(),
                 snapshot.items.len(),
-                crate::MAX_PIPEWIRE_CHANNELS_PER_NODE
+                repeat.declaration.source.item_limit()
             )));
         }
         let mut keys = BTreeSet::new();
@@ -2401,26 +2554,42 @@ impl LiveDocument {
             .iter()
             .any(|item| item.key.is_empty() || !keys.insert(item.key.clone()))
         {
-            return Err(RuntimeError::InvalidMutationTarget(
-                "`item.channels` contains an empty or duplicate key".into(),
-            ));
+            return Err(RuntimeError::InvalidMutationTarget(format!(
+                "`{}` contains an empty or duplicate key",
+                repeat.declaration.source.as_str()
+            )));
         }
         if snapshot.source_generation < repeat.source_generation {
-            return Err(RuntimeError::InvalidMutationTarget(
-                "stale channel-layout generation".into(),
-            ));
+            return Err(RuntimeError::InvalidMutationTarget(format!(
+                "stale `{}` source generation",
+                repeat.declaration.source.as_str()
+            )));
         }
         let mut changed = 0usize;
         if repeat.source_generation != 0 && repeat.source_generation != snapshot.source_generation {
-            self.measurements.channel_layout_replacements = self
-                .measurements
-                .channel_layout_replacements
-                .saturating_add(1);
+            if repeat.declaration.source == crate::ContextualRepeatSource::Channels {
+                self.measurements.channel_layout_replacements = self
+                    .measurements
+                    .channel_layout_replacements
+                    .saturating_add(1);
+            }
             for key in repeat.order.clone() {
                 self.remove_contextual_item(repeat, &key)?;
                 changed = changed.saturating_add(1);
-                self.measurements.channel_removals =
-                    self.measurements.channel_removals.saturating_add(1);
+                match repeat.declaration.source {
+                    crate::ContextualRepeatSource::Channels => {
+                        self.measurements.channel_removals =
+                            self.measurements.channel_removals.saturating_add(1);
+                    }
+                    crate::ContextualRepeatSource::GroupLinks => {
+                        self.measurements.group_member_removals =
+                            self.measurements.group_member_removals.saturating_add(1);
+                    }
+                    crate::ContextualRepeatSource::NodeLinkGroups => {
+                        self.measurements.node_tracker_removals =
+                            self.measurements.node_tracker_removals.saturating_add(1);
+                    }
+                }
             }
         }
         repeat.source_generation = snapshot.source_generation;
@@ -2438,34 +2607,106 @@ impl LiveDocument {
         {
             self.remove_contextual_item(repeat, &key)?;
             changed = changed.saturating_add(1);
-            self.measurements.channel_removals =
-                self.measurements.channel_removals.saturating_add(1);
+            match repeat.declaration.source {
+                crate::ContextualRepeatSource::Channels => {
+                    self.measurements.channel_removals =
+                        self.measurements.channel_removals.saturating_add(1);
+                }
+                crate::ContextualRepeatSource::GroupLinks => {
+                    self.measurements.group_member_removals =
+                        self.measurements.group_member_removals.saturating_add(1);
+                }
+                crate::ContextualRepeatSource::NodeLinkGroups => {
+                    self.measurements.node_tracker_removals =
+                        self.measurements.node_tracker_removals.saturating_add(1);
+                }
+            }
         }
         for item in &snapshot.items {
             if let Some(live) = repeat.items.get(&item.key) {
-                self.measurements.retained_channel_identities = self
-                    .measurements
-                    .retained_channel_identities
-                    .saturating_add(1);
+                match repeat.declaration.source {
+                    crate::ContextualRepeatSource::Channels => {
+                        self.measurements.retained_channel_identities = self
+                            .measurements
+                            .retained_channel_identities
+                            .saturating_add(1);
+                    }
+                    crate::ContextualRepeatSource::GroupLinks => {
+                        self.measurements.retained_link_identities =
+                            self.measurements.retained_link_identities.saturating_add(1);
+                    }
+                    crate::ContextualRepeatSource::NodeLinkGroups => {
+                        self.measurements.retained_tracker_identities = self
+                            .measurements
+                            .retained_tracker_identities
+                            .saturating_add(1);
+                    }
+                }
                 let elements = live.elements.clone();
                 let mutations = self.update_repeated_elements(&elements, item)?;
                 if mutations == 0 {
-                    self.measurements.duplicate_channel_suppressions = self
-                        .measurements
-                        .duplicate_channel_suppressions
-                        .saturating_add(1);
+                    match repeat.declaration.source {
+                        crate::ContextualRepeatSource::Channels => {
+                            self.measurements.duplicate_channel_suppressions = self
+                                .measurements
+                                .duplicate_channel_suppressions
+                                .saturating_add(1);
+                        }
+                        _ => {
+                            self.measurements.duplicate_graph_suppressions = self
+                                .measurements
+                                .duplicate_graph_suppressions
+                                .saturating_add(1);
+                        }
+                    }
                 } else {
-                    self.measurements.channel_value_mutations = self
-                        .measurements
-                        .channel_value_mutations
-                        .saturating_add(mutations as u64);
+                    match repeat.declaration.source {
+                        crate::ContextualRepeatSource::Channels => {
+                            self.measurements.channel_value_mutations = self
+                                .measurements
+                                .channel_value_mutations
+                                .saturating_add(mutations as u64);
+                        }
+                        crate::ContextualRepeatSource::GroupLinks => {
+                            self.measurements.link_state_mutations = self
+                                .measurements
+                                .link_state_mutations
+                                .saturating_add(mutations as u64);
+                            self.measurements.link_relation_mutations = self
+                                .measurements
+                                .link_relation_mutations
+                                .saturating_add(mutations as u64);
+                        }
+                        crate::ContextualRepeatSource::NodeLinkGroups => {
+                            self.measurements.group_state_mutations = self
+                                .measurements
+                                .group_state_mutations
+                                .saturating_add(mutations as u64);
+                            self.measurements.peer_relation_mutations = self
+                                .measurements
+                                .peer_relation_mutations
+                                .saturating_add(mutations as u64);
+                        }
+                    }
                 }
                 changed = changed.saturating_add(mutations);
             } else {
                 self.insert_contextual_item(repeat, item)?;
                 changed = changed.saturating_add(1);
-                self.measurements.channel_insertions =
-                    self.measurements.channel_insertions.saturating_add(1);
+                match repeat.declaration.source {
+                    crate::ContextualRepeatSource::Channels => {
+                        self.measurements.channel_insertions =
+                            self.measurements.channel_insertions.saturating_add(1);
+                    }
+                    crate::ContextualRepeatSource::GroupLinks => {
+                        self.measurements.group_member_insertions =
+                            self.measurements.group_member_insertions.saturating_add(1);
+                    }
+                    crate::ContextualRepeatSource::NodeLinkGroups => {
+                        self.measurements.node_tracker_insertions =
+                            self.measurements.node_tracker_insertions.saturating_add(1);
+                    }
+                }
                 self.measurements.contextual_subtree_clones = self
                     .measurements
                     .contextual_subtree_clones
@@ -2478,13 +2719,22 @@ impl LiveDocument {
             .map(|item| item.key.clone())
             .collect::<Vec<_>>();
         if repeat.order != desired_order {
-            self.measurements.channel_moves = self.measurements.channel_moves.saturating_add(
-                desired_order
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, key)| repeat.order.get(*index) != Some(*key))
-                    .count() as u64,
-            );
+            let moves = desired_order
+                .iter()
+                .enumerate()
+                .filter(|(index, key)| repeat.order.get(*index) != Some(*key))
+                .count() as u64;
+            match repeat.declaration.source {
+                crate::ContextualRepeatSource::Channels => {
+                    self.measurements.channel_moves =
+                        self.measurements.channel_moves.saturating_add(moves);
+                }
+                crate::ContextualRepeatSource::GroupLinks => {
+                    self.measurements.link_moves =
+                        self.measurements.link_moves.saturating_add(moves);
+                }
+                crate::ContextualRepeatSource::NodeLinkGroups => {}
+            }
             let marker = self
                 .identities
                 .resolve(&self.document, repeat.template_node)?;
@@ -2501,12 +2751,18 @@ impl LiveDocument {
             changed = changed.saturating_add(1);
         }
         let is_empty = repeat.items.is_empty();
-        if was_empty && !is_empty {
+        if repeat.declaration.source == crate::ContextualRepeatSource::Channels
+            && was_empty
+            && !is_empty
+        {
             self.measurements.channel_source_activations = self
                 .measurements
                 .channel_source_activations
                 .saturating_add(1);
-        } else if !was_empty && is_empty {
+        } else if repeat.declaration.source == crate::ContextualRepeatSource::Channels
+            && !was_empty
+            && is_empty
+        {
             self.measurements.channel_source_releases =
                 self.measurements.channel_source_releases.saturating_add(1);
         }
@@ -3538,6 +3794,8 @@ mod tests {
             ]),
             properties: BTreeMap::new(),
             channels: None,
+            links: None,
+            link_groups: None,
         }
     }
 
@@ -3726,6 +3984,8 @@ mod tests {
                         ]),
                         properties: BTreeMap::new(),
                         channels: None,
+                        links: None,
+                        link_groups: None,
                     },
                     RepeatItemSnapshot {
                         key: "1:1:4".into(),
@@ -3745,16 +4005,20 @@ mod tests {
                         ]),
                         properties: BTreeMap::new(),
                         channels: None,
+                        links: None,
+                        link_groups: None,
                     },
                 ],
             }),
+            links: None,
+            link_groups: None,
         };
         let first = RepeatSourceSnapshot {
             source: RepeatSource::PipeWireNodes,
             source_generation: 7,
             items: vec![item.clone()],
         };
-        assert_eq!(overlay.apply_repeat_source(&first).unwrap().insertions, 1);
+        assert_eq!(overlay.apply_repeat_source(&first).unwrap().insertions, 2);
         let identity = overlay.repeats["node-card"].items["7:42"].root;
         let contextual =
             &overlay.repeats["node-card"].items["7:42"].contextual_repeats["channels-0"];
@@ -3910,6 +4174,271 @@ mod tests {
         assert_eq!(measurements.channel_insertions, 4);
         assert_eq!(measurements.channel_removals, 2);
         assert!(measurements.retained_channel_identities >= 2);
+    }
+
+    #[test]
+    fn pipewire_graph_reconciles_links_groups_members_and_node_trackers_incrementally() {
+        let mut overlay = LiveDocument::load_surface_document(
+            audio_fixture(),
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            1100,
+            800,
+        )
+        .unwrap();
+        let demand = overlay.pipewire_demand();
+        assert!(demand.nodes);
+        assert!(demand.link_collection);
+        assert!(demand.link_details);
+        assert!(demand.link_group_collection);
+        assert!(demand.group_members);
+        assert!(demand.node_link_tracking);
+        assert!(demand.relation_projection);
+
+        let link = RepeatItemSnapshot {
+            key: "7:20".into(),
+            text: BTreeMap::from([
+                (crate::ItemBindingKey::Ready, "Ready".into()),
+                (crate::ItemBindingKey::State, "Active".into()),
+                (crate::ItemBindingKey::SourceDescription, "Player".into()),
+                (crate::ItemBindingKey::TargetDescription, "Speakers".into()),
+                (crate::ItemBindingKey::IsMonitor, "false".into()),
+            ]),
+            tokens: BTreeMap::from([
+                (crate::ItemBindingKey::Ready, "ready".into()),
+                (crate::ItemBindingKey::State, "active".into()),
+                (crate::ItemBindingKey::IsMonitor, "false".into()),
+            ]),
+            values: BTreeMap::from([
+                (crate::ItemBindingKey::RawId, NumericValue::Integer(20)),
+                (
+                    crate::ItemBindingKey::SourcePortId,
+                    NumericValue::Integer(30),
+                ),
+                (
+                    crate::ItemBindingKey::TargetPortId,
+                    NumericValue::Integer(40),
+                ),
+            ]),
+            properties: BTreeMap::new(),
+            channels: None,
+            links: None,
+            link_groups: None,
+        };
+        let group = RepeatItemSnapshot {
+            key: "7:1:2".into(),
+            text: BTreeMap::from([
+                (crate::ItemBindingKey::State, "Active".into()),
+                (crate::ItemBindingKey::SourceDescription, "Player".into()),
+                (crate::ItemBindingKey::TargetDescription, "Speakers".into()),
+                (crate::ItemBindingKey::SourceStatus, "Available".into()),
+                (crate::ItemBindingKey::TargetStatus, "Available".into()),
+                (crate::ItemBindingKey::IsMonitor, "false".into()),
+                (
+                    crate::ItemBindingKey::ConnectionDirection,
+                    "Outgoing".into(),
+                ),
+                (crate::ItemBindingKey::PeerDescription, "Speakers".into()),
+                (crate::ItemBindingKey::PeerStatus, "Available".into()),
+            ]),
+            tokens: BTreeMap::from([
+                (crate::ItemBindingKey::State, "active".into()),
+                (crate::ItemBindingKey::SourceStatus, "available".into()),
+                (crate::ItemBindingKey::TargetStatus, "available".into()),
+                (crate::ItemBindingKey::IsMonitor, "false".into()),
+                (
+                    crate::ItemBindingKey::ConnectionDirection,
+                    "outgoing".into(),
+                ),
+                (crate::ItemBindingKey::PeerStatus, "available".into()),
+            ]),
+            values: BTreeMap::from([(
+                crate::ItemBindingKey::MemberCount,
+                NumericValue::Integer(1),
+            )]),
+            properties: BTreeMap::new(),
+            channels: None,
+            links: Some(crate::ContextualRepeatSnapshot {
+                source_generation: 7,
+                items: vec![link.clone()],
+            }),
+            link_groups: None,
+        };
+        let node = RepeatItemSnapshot {
+            key: "7:1".into(),
+            text: BTreeMap::from([(crate::ItemBindingKey::LinkGroupStatus, "Ready".into())]),
+            tokens: BTreeMap::from([(crate::ItemBindingKey::LinkGroupStatus, "ready".into())]),
+            values: BTreeMap::from([(
+                crate::ItemBindingKey::LinkGroupCount,
+                NumericValue::Integer(1),
+            )]),
+            properties: BTreeMap::new(),
+            channels: None,
+            links: None,
+            link_groups: Some(crate::ContextualRepeatSnapshot {
+                source_generation: 7,
+                items: vec![group.clone()],
+            }),
+        };
+
+        overlay
+            .apply_repeat_source(&RepeatSourceSnapshot {
+                source: RepeatSource::PipeWireNodes,
+                source_generation: 7,
+                items: vec![node.clone()],
+            })
+            .unwrap();
+        overlay
+            .apply_repeat_source(&RepeatSourceSnapshot {
+                source: RepeatSource::PipeWireLinks,
+                source_generation: 7,
+                items: vec![link.clone()],
+            })
+            .unwrap();
+        overlay
+            .apply_repeat_source(&RepeatSourceSnapshot {
+                source: RepeatSource::PipeWireLinkGroups,
+                source_generation: 7,
+                items: vec![group.clone()],
+            })
+            .unwrap();
+
+        let link_root = overlay.repeats["link-row"].items["7:20"].root;
+        let group_root = overlay.repeats["link-group-card"].items["7:1:2"].root;
+        let member_root = overlay.repeats["link-group-card"].items["7:1:2"]
+            .contextual_repeats["links-0"]
+            .items["7:20"]
+            .root;
+        let tracker_root =
+            overlay.repeats["node-route-card"].items["7:1"].contextual_repeats["link_groups-0"]
+                .items["7:1:2"]
+                .root;
+
+        let mut updated_link = link;
+        updated_link
+            .text
+            .insert(crate::ItemBindingKey::State, "Paused".into());
+        updated_link
+            .tokens
+            .insert(crate::ItemBindingKey::State, "paused".into());
+        let mut updated_group = group;
+        updated_group
+            .text
+            .insert(crate::ItemBindingKey::State, "Paused".into());
+        updated_group
+            .tokens
+            .insert(crate::ItemBindingKey::State, "paused".into());
+        updated_group.links.as_mut().unwrap().items[0] = updated_link.clone();
+        let mut updated_node = node;
+        let tracked = &mut updated_node.link_groups.as_mut().unwrap().items[0];
+        tracked
+            .text
+            .insert(crate::ItemBindingKey::State, "Paused".into());
+        tracked
+            .tokens
+            .insert(crate::ItemBindingKey::State, "paused".into());
+        tracked.text.insert(
+            crate::ItemBindingKey::PeerDescription,
+            "New speakers".into(),
+        );
+
+        overlay
+            .apply_repeat_source(&RepeatSourceSnapshot {
+                source: RepeatSource::PipeWireLinks,
+                source_generation: 7,
+                items: vec![updated_link],
+            })
+            .unwrap();
+        overlay
+            .apply_repeat_source(&RepeatSourceSnapshot {
+                source: RepeatSource::PipeWireLinkGroups,
+                source_generation: 7,
+                items: vec![updated_group],
+            })
+            .unwrap();
+        overlay
+            .apply_repeat_source(&RepeatSourceSnapshot {
+                source: RepeatSource::PipeWireNodes,
+                source_generation: 7,
+                items: vec![updated_node],
+            })
+            .unwrap();
+
+        assert_eq!(overlay.repeats["link-row"].items["7:20"].root, link_root);
+        assert_eq!(
+            overlay.repeats["link-group-card"].items["7:1:2"].root,
+            group_root
+        );
+        assert_eq!(
+            overlay.repeats["link-group-card"].items["7:1:2"].contextual_repeats["links-0"]
+                .items["7:20"]
+                .root,
+            member_root
+        );
+        assert_eq!(
+            overlay.repeats["node-route-card"].items["7:1"].contextual_repeats["link_groups-0"]
+                .items["7:1:2"]
+                .root,
+            tracker_root
+        );
+    }
+
+    #[test]
+    fn graph_only_relations_request_nodes_without_audio_or_write_demand() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "htmshell-pipewire-graph-demand-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("graph.html"),
+            r#"
+            <main id="overlay-card">
+              <button id="overlay-close"
+                      data-htm-element="action-button"
+                      data-htm-action="overlay.close">Close</button>
+              <button id="overlay-action"
+                      data-htm-element="action-button"
+                      data-htm-action="overlay.activate">Refresh</button>
+              <span id="overlay-status"
+                    data-htm-element="state-text"
+                    data-htm-bind="overlay.status"></span>
+              <template id="links" data-htm-element="repeat" data-htm-source="pipewire.links">
+                <div>
+                  <span data-htm-element="state-text"
+                        data-htm-local-id="source"
+                        data-htm-bind="item.source.description"></span>
+                </div>
+              </template>
+            </main>
+            "#,
+        )
+        .unwrap();
+        let live = LiveDocument::load_surface_document(
+            &root,
+            "graph.html",
+            LiveDocumentKind::TransientOverlay,
+            640,
+            480,
+        )
+        .unwrap();
+        let demand = live.pipewire_demand();
+        let _ = std::fs::remove_dir_all(root);
+
+        assert!(demand.service);
+        assert!(demand.nodes);
+        assert!(demand.node_details);
+        assert!(demand.link_collection);
+        assert!(demand.link_details);
+        assert!(demand.relation_projection);
+        assert!(!demand.audio_state);
+        assert!(!demand.audio_writes);
+        assert!(!demand.channel_projection);
+        assert!(!demand.channel_writes);
     }
 
     #[test]

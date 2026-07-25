@@ -78,6 +78,7 @@ pub struct PipeWireNodeClassification {
     pub device_related: bool,
     pub accepts_input: bool,
     pub produces_output: bool,
+    pub monitor: bool,
 }
 
 impl PipeWireNodeClassification {
@@ -92,6 +93,10 @@ impl PipeWireNodeClassification {
             produces_output: output_ports > 0,
             device_related: properties.contains_key("device.id")
                 || media_class.is_some_and(|class| class.starts_with("Device/")),
+            monitor: matches!(
+                properties.get("media.category").map(String::as_str),
+                Some("Monitor" | "Manager")
+            ),
             ..Self::default()
         };
         match properties.get("media.type").map(String::as_str) {

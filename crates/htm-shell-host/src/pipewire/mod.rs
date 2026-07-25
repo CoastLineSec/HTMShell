@@ -1015,6 +1015,7 @@ pub(crate) fn run_pipewire_graph_diagnostic() -> Result<PipeWireSnapshot, String
         channel_projection: false,
         channel_writes: false,
         property_keys: Default::default(),
+        ..PipeWireDemand::default()
     });
     loop {
         let now = Instant::now();

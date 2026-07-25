@@ -1,6 +1,6 @@
 use super::model::{
-    PipeWireAvailability, PipeWireDefaultTarget, PipeWireNodeSnapshot, PipeWireNodeState,
-    PipeWireSnapshot,
+    PipeWireAvailability, PipeWireDefaultTarget, PipeWireLinkGroupSnapshot, PipeWireLinkSnapshot,
+    PipeWireLinkState, PipeWireNodeId, PipeWireNodeSnapshot, PipeWireNodeState, PipeWireSnapshot,
 };
 use htm_runtime::{
     ContextualRepeatSnapshot, ItemBindingKey, NumericValue, PipeWireDocumentDemand,
@@ -29,6 +29,12 @@ pub(crate) struct PipeWireDemand {
     pub audio_writes: bool,
     pub channel_projection: bool,
     pub channel_writes: bool,
+    pub link_collection: bool,
+    pub link_details: bool,
+    pub link_group_collection: bool,
+    pub group_members: bool,
+    pub node_link_tracking: bool,
+    pub relation_projection: bool,
     pub property_keys: std::collections::BTreeSet<String>,
 }
 
@@ -46,6 +52,16 @@ impl PipeWireDemand {
         self.audio_writes |= demand.audio_writes;
         self.channel_projection |= demand.channel_projection;
         self.channel_writes |= demand.channel_writes;
+        self.link_collection |= demand.link_collection;
+        self.link_details |= demand.link_details;
+        self.link_group_collection |= demand.link_group_collection;
+        self.group_members |= demand.group_members;
+        self.node_link_tracking |= demand.node_link_tracking;
+        self.relation_projection |= demand.relation_projection;
+        self.links |= demand.link_collection
+            || demand.link_group_collection
+            || demand.node_link_tracking
+            || demand.group_members;
         self.property_keys
             .extend(demand.property_keys.iter().cloned());
     }
@@ -278,6 +294,22 @@ impl PipeWireSnapshot {
                 0
             }),
         ));
+        projections.values.push((
+            StateBindingKey::PipeWireLinkCount,
+            NumericValue::Integer(if self.ready {
+                self.links.len() as i64
+            } else {
+                0
+            }),
+        ));
+        projections.values.push((
+            StateBindingKey::PipeWireLinkGroupCount,
+            NumericValue::Integer(if self.ready {
+                self.link_groups.len() as i64
+            } else {
+                0
+            }),
+        ));
 
         project_default(
             self,
@@ -311,6 +343,30 @@ impl PipeWireSnapshot {
                 self.nodes
                     .iter()
                     .map(|node| project_node(self, node, demand))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        });
+        projections.repeats.push(RepeatSourceSnapshot {
+            source: RepeatSource::PipeWireLinks,
+            source_generation: self.connection_generation,
+            items: if self.ready && demand.link_collection {
+                self.links
+                    .iter()
+                    .map(|link| project_link(self, link))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        });
+        projections.repeats.push(RepeatSourceSnapshot {
+            source: RepeatSource::PipeWireLinkGroups,
+            source_generation: self.connection_generation,
+            items: if self.ready && demand.link_group_collection {
+                self.link_groups
+                    .iter()
+                    .map(|group| project_group(self, group, demand, None))
                     .collect()
             } else {
                 Vec::new()
@@ -467,6 +523,11 @@ fn project_node(
 ) -> RepeatItemSnapshot {
     let node_type = PipeWireNodeType::from_node(node);
     let direction = PipeWireNodeDirection::from_node(node);
+    let tracked_groups = if demand.node_link_tracking {
+        tracked_groups(snapshot, node)
+    } else {
+        Vec::new()
+    };
     let mut text = BTreeMap::from([
         (ItemBindingKey::Ready, bool_text(node.ready)),
         (ItemBindingKey::Name, option_text(node.name.as_deref())),
@@ -524,6 +585,15 @@ fn project_node(
         (
             ItemBindingKey::ChannelStatus,
             channel_status(node).text().into(),
+        ),
+        (
+            ItemBindingKey::LinkGroupStatus,
+            if snapshot.ready {
+                "Ready"
+            } else {
+                "Unavailable"
+            }
+            .into(),
         ),
     ]);
     let actual_role = default_role(snapshot, node, false);
@@ -585,6 +655,16 @@ fn project_node(
             channel_status(node).token().as_str().into(),
         ),
         (
+            ItemBindingKey::LinkGroupStatus,
+            if snapshot.ready {
+                StateToken::Ready
+            } else {
+                StateToken::Unavailable
+            }
+            .as_str()
+            .into(),
+        ),
+        (
             ItemBindingKey::DefaultRole,
             actual_role.token(false).as_str().into(),
         ),
@@ -622,9 +702,21 @@ fn project_node(
                 ItemBindingKey::ChannelCount,
                 NumericValue::Integer(node.audio.channels.len() as i64),
             ),
+            (
+                ItemBindingKey::LinkGroupCount,
+                NumericValue::Integer(tracked_groups.len() as i64),
+            ),
         ]),
         properties,
         channels: demand.channel_projection.then(|| project_channels(node)),
+        links: None,
+        link_groups: demand.node_link_tracking.then(|| ContextualRepeatSnapshot {
+            source_generation: snapshot.connection_generation,
+            items: tracked_groups
+                .into_iter()
+                .map(|group| project_group(snapshot, group, demand, Some(node.id)))
+                .collect(),
+        }),
     }
 }
 
@@ -679,6 +771,8 @@ fn project_channels(node: &PipeWireNodeSnapshot) -> ContextualRepeatSnapshot {
                 ]),
                 properties: BTreeMap::new(),
                 channels: None,
+                links: None,
+                link_groups: None,
             }
         })
         .collect();
@@ -686,6 +780,475 @@ fn project_channels(node: &PipeWireNodeSnapshot) -> ContextualRepeatSnapshot {
         source_generation: node.audio.channel_layout_generation,
         items,
     }
+}
+
+fn project_link(snapshot: &PipeWireSnapshot, link: &PipeWireLinkSnapshot) -> RepeatItemSnapshot {
+    let readiness = link_readiness(snapshot, link);
+    let is_monitor =
+        relation_node(snapshot, link.target_node).is_some_and(|node| node.classification.monitor);
+    let mut text = BTreeMap::from([
+        (ItemBindingKey::Ready, readiness.text().into()),
+        (ItemBindingKey::State, link_state_text(link.state).into()),
+        (ItemBindingKey::IsMonitor, bool_text(is_monitor)),
+    ]);
+    let mut tokens = BTreeMap::from([
+        (ItemBindingKey::Ready, readiness.token().as_str().into()),
+        (
+            ItemBindingKey::State,
+            link_state_token(link.state).as_str().into(),
+        ),
+        (
+            ItemBindingKey::IsMonitor,
+            bool_token(is_monitor).as_str().into(),
+        ),
+    ]);
+    let mut values = BTreeMap::from([
+        (
+            ItemBindingKey::RawId,
+            NumericValue::Integer(link.raw_global_id as i64),
+        ),
+        (
+            ItemBindingKey::SourcePortId,
+            optional_id(link.source_port_id),
+        ),
+        (
+            ItemBindingKey::TargetPortId,
+            optional_id(link.target_port_id),
+        ),
+    ]);
+    project_relation(
+        snapshot,
+        link.source_node,
+        RelationKeys::SOURCE,
+        &mut text,
+        &mut tokens,
+        &mut values,
+    );
+    project_relation(
+        snapshot,
+        link.target_node,
+        RelationKeys::TARGET,
+        &mut text,
+        &mut tokens,
+        &mut values,
+    );
+    RepeatItemSnapshot {
+        key: format!("{}:{}", link.id.connection_generation, link.id.global_id),
+        text,
+        tokens,
+        values,
+        properties: BTreeMap::new(),
+        channels: None,
+        links: None,
+        link_groups: None,
+    }
+}
+
+fn project_group(
+    snapshot: &PipeWireSnapshot,
+    group: &PipeWireLinkGroupSnapshot,
+    demand: &PipeWireDemand,
+    tracked_node: Option<PipeWireNodeId>,
+) -> RepeatItemSnapshot {
+    let readiness = group_readiness(snapshot, group);
+    let is_monitor =
+        relation_node(snapshot, group.target_node).is_some_and(|node| node.classification.monitor);
+    let mut text = BTreeMap::from([
+        (ItemBindingKey::Ready, readiness.text().into()),
+        (ItemBindingKey::State, link_state_text(group.state).into()),
+        (ItemBindingKey::IsMonitor, bool_text(is_monitor)),
+    ]);
+    let mut tokens = BTreeMap::from([
+        (ItemBindingKey::Ready, readiness.token().as_str().into()),
+        (
+            ItemBindingKey::State,
+            link_state_token(group.state).as_str().into(),
+        ),
+        (
+            ItemBindingKey::IsMonitor,
+            bool_token(is_monitor).as_str().into(),
+        ),
+    ]);
+    let mut values = BTreeMap::from([
+        (
+            ItemBindingKey::MemberCount,
+            NumericValue::Integer(group.members.len() as i64),
+        ),
+        (
+            ItemBindingKey::RepresentativeLinkRawId,
+            NumericValue::Integer(group.representative.global_id as i64),
+        ),
+    ]);
+    project_relation(
+        snapshot,
+        group.source_node,
+        RelationKeys::SOURCE,
+        &mut text,
+        &mut tokens,
+        &mut values,
+    );
+    project_relation(
+        snapshot,
+        group.target_node,
+        RelationKeys::TARGET,
+        &mut text,
+        &mut tokens,
+        &mut values,
+    );
+    if let Some(node_id) = tracked_node {
+        let connection = connection_direction(group, node_id);
+        text.insert(
+            ItemBindingKey::ConnectionDirection,
+            connection.text().into(),
+        );
+        tokens.insert(
+            ItemBindingKey::ConnectionDirection,
+            connection.token().as_str().into(),
+        );
+        let peer = match connection {
+            ConnectionDirection::Incoming => group.source_node,
+            ConnectionDirection::Outgoing => group.target_node,
+            ConnectionDirection::SelfConnection => Some(node_id),
+            ConnectionDirection::Unknown => None,
+        };
+        project_relation(
+            snapshot,
+            peer,
+            RelationKeys::PEER,
+            &mut text,
+            &mut tokens,
+            &mut values,
+        );
+    }
+    RepeatItemSnapshot {
+        key: format!(
+            "{}:{}:{}",
+            group.id.connection_generation, group.id.source_node, group.id.target_node
+        ),
+        text,
+        tokens,
+        values,
+        properties: BTreeMap::new(),
+        channels: None,
+        links: (tracked_node.is_none() && demand.group_members).then(|| ContextualRepeatSnapshot {
+            source_generation: snapshot.connection_generation,
+            items: group
+                .members
+                .iter()
+                .filter_map(|member| {
+                    snapshot
+                        .links
+                        .iter()
+                        .find(|link| link.id == *member)
+                        .map(|link| project_link(snapshot, link))
+                })
+                .collect(),
+        }),
+        link_groups: None,
+    }
+}
+
+fn tracked_groups<'a>(
+    snapshot: &'a PipeWireSnapshot,
+    node: &PipeWireNodeSnapshot,
+) -> Vec<&'a PipeWireLinkGroupSnapshot> {
+    snapshot
+        .link_groups
+        .iter()
+        .filter(|group| {
+            let selected = if node.classification.sink {
+                group.target_node == Some(node.id)
+            } else {
+                group.source_node == Some(node.id)
+            };
+            selected
+                && !relation_node(snapshot, group.target_node)
+                    .is_some_and(|target| target.classification.monitor)
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+struct RelationKeys {
+    status: ItemBindingKey,
+    name: ItemBindingKey,
+    nickname: ItemBindingKey,
+    description: ItemBindingKey,
+    media_class: ItemBindingKey,
+    node_type: ItemBindingKey,
+    node_state: ItemBindingKey,
+    direction: ItemBindingKey,
+    raw_id: ItemBindingKey,
+}
+
+impl RelationKeys {
+    const SOURCE: Self = Self {
+        status: ItemBindingKey::SourceStatus,
+        name: ItemBindingKey::SourceName,
+        nickname: ItemBindingKey::SourceNickname,
+        description: ItemBindingKey::SourceDescription,
+        media_class: ItemBindingKey::SourceMediaClass,
+        node_type: ItemBindingKey::SourceNodeType,
+        node_state: ItemBindingKey::SourceNodeState,
+        direction: ItemBindingKey::SourceDirection,
+        raw_id: ItemBindingKey::SourceRawId,
+    };
+    const TARGET: Self = Self {
+        status: ItemBindingKey::TargetStatus,
+        name: ItemBindingKey::TargetName,
+        nickname: ItemBindingKey::TargetNickname,
+        description: ItemBindingKey::TargetDescription,
+        media_class: ItemBindingKey::TargetMediaClass,
+        node_type: ItemBindingKey::TargetNodeType,
+        node_state: ItemBindingKey::TargetNodeState,
+        direction: ItemBindingKey::TargetDirection,
+        raw_id: ItemBindingKey::TargetRawId,
+    };
+    const PEER: Self = Self {
+        status: ItemBindingKey::PeerStatus,
+        name: ItemBindingKey::PeerName,
+        nickname: ItemBindingKey::PeerNickname,
+        description: ItemBindingKey::PeerDescription,
+        media_class: ItemBindingKey::PeerMediaClass,
+        node_type: ItemBindingKey::PeerNodeType,
+        node_state: ItemBindingKey::PeerNodeState,
+        direction: ItemBindingKey::PeerDirection,
+        raw_id: ItemBindingKey::PeerRawId,
+    };
+}
+
+fn project_relation(
+    snapshot: &PipeWireSnapshot,
+    id: Option<PipeWireNodeId>,
+    keys: RelationKeys,
+    text: &mut BTreeMap<ItemBindingKey, String>,
+    tokens: &mut BTreeMap<ItemBindingKey, String>,
+    values: &mut BTreeMap<ItemBindingKey, NumericValue>,
+) {
+    let node = relation_node(snapshot, id);
+    let status = match (id, node) {
+        (None, _) => RelationStatus::Unavailable,
+        (Some(_), None) => RelationStatus::Unresolved,
+        (Some(_), Some(_)) => RelationStatus::Available,
+    };
+    text.insert(keys.status, status.text().into());
+    tokens.insert(keys.status, status.token().as_str().into());
+    text.insert(
+        keys.name,
+        option_text(node.and_then(|node| node.name.as_deref())),
+    );
+    text.insert(
+        keys.nickname,
+        option_text(node.and_then(|node| node.nickname.as_deref())),
+    );
+    text.insert(
+        keys.description,
+        option_text(node.and_then(|node| node.description.as_deref())),
+    );
+    text.insert(
+        keys.media_class,
+        option_text(node.and_then(|node| node.media_class.as_deref())),
+    );
+    let node_type = node.map(PipeWireNodeType::from_node);
+    text.insert(
+        keys.node_type,
+        node_type.map_or("Unknown", PipeWireNodeType::text).into(),
+    );
+    tokens.insert(
+        keys.node_type,
+        node_type
+            .map_or(StateToken::Unknown, PipeWireNodeType::token)
+            .as_str()
+            .into(),
+    );
+    text.insert(
+        keys.node_state,
+        node.map_or("Unknown", |node| node_state_text(node.state))
+            .into(),
+    );
+    tokens.insert(
+        keys.node_state,
+        node.map_or(StateToken::Unknown, |node| node_state_token(node.state))
+            .as_str()
+            .into(),
+    );
+    let direction = node.map(PipeWireNodeDirection::from_node);
+    text.insert(
+        keys.direction,
+        direction
+            .map_or("Unknown", PipeWireNodeDirection::text)
+            .into(),
+    );
+    tokens.insert(
+        keys.direction,
+        direction
+            .map_or(StateToken::Unknown, PipeWireNodeDirection::token)
+            .as_str()
+            .into(),
+    );
+    values.insert(
+        keys.raw_id,
+        node.map(|node| NumericValue::Integer(node.raw_global_id as i64))
+            .unwrap_or(NumericValue::Unknown),
+    );
+}
+
+fn relation_node(
+    snapshot: &PipeWireSnapshot,
+    id: Option<PipeWireNodeId>,
+) -> Option<&PipeWireNodeSnapshot> {
+    id.and_then(|id| snapshot.nodes.iter().find(|node| node.id == id))
+}
+
+#[derive(Clone, Copy)]
+enum RelationStatus {
+    Unavailable,
+    Unresolved,
+    Available,
+}
+
+impl RelationStatus {
+    const fn text(self) -> &'static str {
+        match self {
+            Self::Unavailable => "Unavailable",
+            Self::Unresolved => "Unresolved",
+            Self::Available => "Available",
+        }
+    }
+
+    const fn token(self) -> StateToken {
+        match self {
+            Self::Unavailable => StateToken::Unavailable,
+            Self::Unresolved => StateToken::Unresolved,
+            Self::Available => StateToken::Available,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GraphReadiness {
+    Unavailable,
+    Partial,
+    Ready,
+}
+
+impl GraphReadiness {
+    const fn text(self) -> &'static str {
+        match self {
+            Self::Unavailable => "Unavailable",
+            Self::Partial => "Partial",
+            Self::Ready => "Ready",
+        }
+    }
+
+    const fn token(self) -> StateToken {
+        match self {
+            Self::Unavailable => StateToken::Unavailable,
+            Self::Partial => StateToken::Partial,
+            Self::Ready => StateToken::Ready,
+        }
+    }
+}
+
+fn link_readiness(snapshot: &PipeWireSnapshot, link: &PipeWireLinkSnapshot) -> GraphReadiness {
+    if !link.ready {
+        GraphReadiness::Unavailable
+    } else if relation_node(snapshot, link.source_node).is_some()
+        && relation_node(snapshot, link.target_node).is_some()
+    {
+        GraphReadiness::Ready
+    } else {
+        GraphReadiness::Partial
+    }
+}
+
+fn group_readiness(
+    snapshot: &PipeWireSnapshot,
+    group: &PipeWireLinkGroupSnapshot,
+) -> GraphReadiness {
+    if group.members.is_empty() {
+        GraphReadiness::Unavailable
+    } else if relation_node(snapshot, group.source_node).is_some()
+        && relation_node(snapshot, group.target_node).is_some()
+    {
+        GraphReadiness::Ready
+    } else {
+        GraphReadiness::Partial
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ConnectionDirection {
+    Incoming,
+    Outgoing,
+    SelfConnection,
+    Unknown,
+}
+
+impl ConnectionDirection {
+    const fn text(self) -> &'static str {
+        match self {
+            Self::Incoming => "Incoming",
+            Self::Outgoing => "Outgoing",
+            Self::SelfConnection => "Self",
+            Self::Unknown => "Unknown",
+        }
+    }
+
+    const fn token(self) -> StateToken {
+        match self {
+            Self::Incoming => StateToken::Incoming,
+            Self::Outgoing => StateToken::Outgoing,
+            Self::SelfConnection => StateToken::SelfConnection,
+            Self::Unknown => StateToken::Unknown,
+        }
+    }
+}
+
+fn connection_direction(
+    group: &PipeWireLinkGroupSnapshot,
+    node: PipeWireNodeId,
+) -> ConnectionDirection {
+    match (
+        group.source_node == Some(node),
+        group.target_node == Some(node),
+    ) {
+        (true, true) => ConnectionDirection::SelfConnection,
+        (true, false) => ConnectionDirection::Outgoing,
+        (false, true) => ConnectionDirection::Incoming,
+        (false, false) => ConnectionDirection::Unknown,
+    }
+}
+
+const fn link_state_text(state: PipeWireLinkState) -> &'static str {
+    match state {
+        PipeWireLinkState::Unknown => "Unknown",
+        PipeWireLinkState::Error => "Error",
+        PipeWireLinkState::Unlinked => "Unlinked",
+        PipeWireLinkState::Init => "Init",
+        PipeWireLinkState::Negotiating => "Negotiating",
+        PipeWireLinkState::Allocating => "Allocating",
+        PipeWireLinkState::Paused => "Paused",
+        PipeWireLinkState::Active => "Active",
+    }
+}
+
+const fn link_state_token(state: PipeWireLinkState) -> StateToken {
+    match state {
+        PipeWireLinkState::Unknown => StateToken::Unknown,
+        PipeWireLinkState::Error => StateToken::Error,
+        PipeWireLinkState::Unlinked => StateToken::Unlinked,
+        PipeWireLinkState::Init => StateToken::Init,
+        PipeWireLinkState::Negotiating => StateToken::Negotiating,
+        PipeWireLinkState::Allocating => StateToken::Allocating,
+        PipeWireLinkState::Paused => StateToken::Paused,
+        PipeWireLinkState::Active => StateToken::Active,
+    }
+}
+
+fn optional_id(id: Option<u32>) -> NumericValue {
+    id.map(|id| NumericValue::Integer(id as i64))
+        .unwrap_or(NumericValue::Unknown)
 }
 
 #[derive(Clone, Copy)]
@@ -889,8 +1452,8 @@ const fn bool_token(value: bool) -> StateToken {
 mod tests {
     use super::*;
     use crate::pipewire::model::{
-        PipeWireDefaultsSnapshot, PipeWireNodeAudioSnapshot, PipeWireNodeClassification,
-        PipeWireNodeId,
+        PipeWireDefaultsSnapshot, PipeWireLinkGroupId, PipeWireLinkId, PipeWireNodeAudioSnapshot,
+        PipeWireNodeClassification, PipeWireNodeId,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1152,6 +1715,7 @@ mod tests {
             channel_projection: true,
             channel_writes: true,
             property_keys: BTreeSet::from(["media.title".into()]),
+            ..PipeWireDocumentDemand::default()
         };
         let mut demand = PipeWireDemand::default();
         demand.add_document(&document);
@@ -1162,5 +1726,376 @@ mod tests {
         assert!(!demand.defaults);
         assert!(demand.channel_projection);
         assert!(demand.channel_writes);
+    }
+
+    #[test]
+    fn link_states_and_missing_endpoint_statuses_are_finite() {
+        for (state, text, token) in [
+            (PipeWireLinkState::Unknown, "Unknown", StateToken::Unknown),
+            (PipeWireLinkState::Error, "Error", StateToken::Error),
+            (
+                PipeWireLinkState::Unlinked,
+                "Unlinked",
+                StateToken::Unlinked,
+            ),
+            (PipeWireLinkState::Init, "Init", StateToken::Init),
+            (
+                PipeWireLinkState::Negotiating,
+                "Negotiating",
+                StateToken::Negotiating,
+            ),
+            (
+                PipeWireLinkState::Allocating,
+                "Allocating",
+                StateToken::Allocating,
+            ),
+            (PipeWireLinkState::Paused, "Paused", StateToken::Paused),
+            (PipeWireLinkState::Active, "Active", StateToken::Active),
+        ] {
+            assert_eq!(link_state_text(state), text);
+            assert_eq!(link_state_token(state), token);
+        }
+
+        let sink = node(2, "Audio/Sink");
+        let missing_source = PipeWireNodeId {
+            connection_generation: 7,
+            global_id: 1,
+        };
+        let mut link = PipeWireLinkSnapshot {
+            id: PipeWireLinkId {
+                connection_generation: 7,
+                global_id: 20,
+            },
+            raw_global_id: 20,
+            source_node: Some(missing_source),
+            target_node: Some(sink.id),
+            source_node_present: false,
+            target_node_present: true,
+            source_port_id: None,
+            target_port_id: Some(40),
+            state: PipeWireLinkState::Active,
+            raw_state: 5,
+            ready: true,
+        };
+        let snapshot = PipeWireSnapshot {
+            availability: PipeWireAvailability::Ready,
+            connection_generation: 7,
+            ready: true,
+            nodes: vec![sink],
+            links: vec![link.clone()],
+            ..PipeWireSnapshot::default()
+        };
+        let projected = project_link(&snapshot, &link);
+        assert_eq!(
+            projected.tokens[&ItemBindingKey::Ready],
+            StateToken::Partial.as_str()
+        );
+        assert_eq!(
+            projected.tokens[&ItemBindingKey::SourceStatus],
+            StateToken::Unresolved.as_str()
+        );
+        assert_eq!(
+            projected.tokens[&ItemBindingKey::TargetStatus],
+            StateToken::Available.as_str()
+        );
+        assert_eq!(
+            projected.values[&ItemBindingKey::SourcePortId],
+            NumericValue::Unknown
+        );
+
+        link.source_node = None;
+        let projected = project_link(&snapshot, &link);
+        assert_eq!(
+            projected.tokens[&ItemBindingKey::SourceStatus],
+            StateToken::Unavailable.as_str()
+        );
+    }
+
+    #[test]
+    fn monitor_groups_remain_top_level_but_are_excluded_from_node_tracking() {
+        let source = node(1, "Audio/Source");
+        let sink = node(2, "Audio/Sink");
+        let mut monitor = node(3, "Audio/Sink");
+        monitor
+            .properties
+            .insert("media.category".into(), "Monitor".into());
+        monitor.classification = PipeWireNodeClassification::from_properties(
+            monitor.media_class.as_deref(),
+            &monitor.properties,
+            monitor.input_ports,
+            monitor.output_ports,
+        );
+        assert!(monitor.classification.monitor);
+
+        let links = [(20, sink.id), (21, monitor.id)]
+            .into_iter()
+            .map(|(raw_id, target)| PipeWireLinkSnapshot {
+                id: PipeWireLinkId {
+                    connection_generation: 7,
+                    global_id: raw_id,
+                },
+                raw_global_id: raw_id,
+                source_node: Some(source.id),
+                target_node: Some(target),
+                source_node_present: true,
+                target_node_present: true,
+                source_port_id: Some(raw_id + 10),
+                target_port_id: Some(raw_id + 20),
+                state: PipeWireLinkState::Active,
+                raw_state: 5,
+                ready: true,
+            })
+            .collect::<Vec<_>>();
+        let groups = links
+            .iter()
+            .map(|link| PipeWireLinkGroupSnapshot {
+                id: PipeWireLinkGroupId {
+                    connection_generation: 7,
+                    source_node: source.id.global_id,
+                    target_node: link.target_node.unwrap().global_id,
+                },
+                source_node: Some(source.id),
+                target_node: link.target_node,
+                source_node_present: true,
+                target_node_present: true,
+                members: vec![link.id],
+                representative: link.id,
+                state: link.state,
+            })
+            .collect::<Vec<_>>();
+        let snapshot = PipeWireSnapshot {
+            availability: PipeWireAvailability::Ready,
+            connection_generation: 7,
+            ready: true,
+            node_count: 3,
+            link_count: 2,
+            link_group_count: 2,
+            nodes: vec![source, sink, monitor],
+            links,
+            link_groups: groups,
+            ..PipeWireSnapshot::default()
+        };
+        let demand = PipeWireDemand {
+            documents: 1,
+            service: true,
+            nodes: true,
+            links: true,
+            link_collection: true,
+            link_group_collection: true,
+            node_link_tracking: true,
+            ..PipeWireDemand::default()
+        };
+        let projections = snapshot.public_projections(&demand);
+        let top_links = projections
+            .repeats
+            .iter()
+            .find(|repeat| repeat.source == RepeatSource::PipeWireLinks)
+            .unwrap();
+        assert_eq!(top_links.items.len(), 2);
+        assert_eq!(
+            top_links.items[1].tokens[&ItemBindingKey::IsMonitor],
+            StateToken::True.as_str()
+        );
+        let top_groups = projections
+            .repeats
+            .iter()
+            .find(|repeat| repeat.source == RepeatSource::PipeWireLinkGroups)
+            .unwrap();
+        assert_eq!(top_groups.items.len(), 2);
+
+        let nodes = projections
+            .repeats
+            .iter()
+            .find(|repeat| repeat.source == RepeatSource::PipeWireNodes)
+            .unwrap();
+        let source = nodes
+            .items
+            .iter()
+            .find(|item| item.key.ends_with(":1"))
+            .unwrap();
+        assert_eq!(
+            source.values[&ItemBindingKey::LinkGroupCount],
+            NumericValue::Integer(1)
+        );
+        let monitor = nodes
+            .items
+            .iter()
+            .find(|item| item.key.ends_with(":3"))
+            .unwrap();
+        assert_eq!(
+            monitor.values[&ItemBindingKey::LinkGroupCount],
+            NumericValue::Integer(0)
+        );
+    }
+
+    #[test]
+    fn node_tracking_uses_sink_incoming_and_otherwise_outgoing_selection() {
+        let source = node(1, "Audio/Source");
+        let sink = node(2, "Audio/Sink");
+        let duplex = node(3, "Audio/Duplex");
+        let unknown = node(4, "Other");
+        let pairs = [
+            (10, source.id, sink.id),
+            (11, source.id, duplex.id),
+            (12, duplex.id, sink.id),
+            (13, unknown.id, sink.id),
+            (14, source.id, source.id),
+        ];
+        let groups = pairs
+            .into_iter()
+            .map(
+                |(raw_id, source_node, target_node)| PipeWireLinkGroupSnapshot {
+                    id: PipeWireLinkGroupId {
+                        connection_generation: 7,
+                        source_node: source_node.global_id,
+                        target_node: target_node.global_id,
+                    },
+                    source_node: Some(source_node),
+                    target_node: Some(target_node),
+                    source_node_present: true,
+                    target_node_present: true,
+                    members: vec![PipeWireLinkId {
+                        connection_generation: 7,
+                        global_id: raw_id,
+                    }],
+                    representative: PipeWireLinkId {
+                        connection_generation: 7,
+                        global_id: raw_id,
+                    },
+                    state: PipeWireLinkState::Active,
+                },
+            )
+            .collect();
+        let snapshot = PipeWireSnapshot {
+            availability: PipeWireAvailability::Ready,
+            connection_generation: 7,
+            ready: true,
+            nodes: vec![
+                source.clone(),
+                sink.clone(),
+                duplex.clone(),
+                unknown.clone(),
+            ],
+            link_groups: groups,
+            ..PipeWireSnapshot::default()
+        };
+
+        assert_eq!(tracked_groups(&snapshot, &source).len(), 3);
+        assert_eq!(tracked_groups(&snapshot, &sink).len(), 3);
+        assert_eq!(tracked_groups(&snapshot, &duplex).len(), 1);
+        assert_eq!(tracked_groups(&snapshot, &unknown).len(), 1);
+        let self_group = tracked_groups(&snapshot, &source)
+            .into_iter()
+            .find(|group| group.source_node == group.target_node)
+            .unwrap();
+        assert!(matches!(
+            connection_direction(self_group, source.id),
+            ConnectionDirection::SelfConnection
+        ));
+    }
+
+    #[test]
+    fn links_groups_relations_members_and_node_trackers_are_typed() {
+        let source = node(1, "Audio/Source");
+        let sink = node(2, "Audio/Sink");
+        let link = PipeWireLinkSnapshot {
+            id: PipeWireLinkId {
+                connection_generation: 7,
+                global_id: 20,
+            },
+            raw_global_id: 20,
+            source_node: Some(source.id),
+            target_node: Some(sink.id),
+            source_node_present: true,
+            target_node_present: true,
+            source_port_id: Some(30),
+            target_port_id: Some(40),
+            state: PipeWireLinkState::Negotiating,
+            raw_state: 3,
+            ready: true,
+        };
+        let group = PipeWireLinkGroupSnapshot {
+            id: PipeWireLinkGroupId {
+                connection_generation: 7,
+                source_node: 1,
+                target_node: 2,
+            },
+            source_node: Some(source.id),
+            target_node: Some(sink.id),
+            source_node_present: true,
+            target_node_present: true,
+            members: vec![link.id],
+            representative: link.id,
+            state: link.state,
+        };
+        let snapshot = PipeWireSnapshot {
+            availability: PipeWireAvailability::Ready,
+            connection_generation: 7,
+            ready: true,
+            node_count: 2,
+            link_count: 1,
+            link_group_count: 1,
+            nodes: vec![source, sink],
+            links: vec![link],
+            link_groups: vec![group],
+            ..PipeWireSnapshot::default()
+        };
+        let demand = PipeWireDemand {
+            documents: 1,
+            service: true,
+            nodes: true,
+            node_details: true,
+            links: true,
+            link_collection: true,
+            link_details: true,
+            link_group_collection: true,
+            group_members: true,
+            node_link_tracking: true,
+            relation_projection: true,
+            ..PipeWireDemand::default()
+        };
+        let projections = snapshot.public_projections(&demand);
+        let links = projections
+            .repeats
+            .iter()
+            .find(|repeat| repeat.source == RepeatSource::PipeWireLinks)
+            .unwrap();
+        assert_eq!(links.items.len(), 1);
+        assert_eq!(
+            links.items[0].tokens[&ItemBindingKey::State],
+            StateToken::Negotiating.as_str()
+        );
+        assert_eq!(links.items[0].text[&ItemBindingKey::SourceName], "node-1");
+        let groups = projections
+            .repeats
+            .iter()
+            .find(|repeat| repeat.source == RepeatSource::PipeWireLinkGroups)
+            .unwrap();
+        assert_eq!(
+            groups.items[0].values[&ItemBindingKey::MemberCount],
+            NumericValue::Integer(1)
+        );
+        assert_eq!(groups.items[0].links.as_ref().unwrap().items.len(), 1);
+        let nodes = projections
+            .repeats
+            .iter()
+            .find(|repeat| repeat.source == RepeatSource::PipeWireNodes)
+            .unwrap();
+        for item in &nodes.items {
+            assert_eq!(
+                item.values[&ItemBindingKey::LinkGroupCount],
+                NumericValue::Integer(1)
+            );
+            let tracked = &item.link_groups.as_ref().unwrap().items[0];
+            let expected = if item.key.ends_with(":1") {
+                StateToken::Outgoing
+            } else {
+                StateToken::Incoming
+            };
+            assert_eq!(
+                tracked.tokens[&ItemBindingKey::ConnectionDirection],
+                expected.as_str()
+            );
+        }
     }
 }

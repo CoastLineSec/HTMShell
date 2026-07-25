@@ -43,6 +43,10 @@ Audio nodes add `item.audio_status`, `item.volume`, `item.mute_state`,
 `item.can_set_volume`, `item.can_set_mute`, `item.channel_count`, and
 `item.channel_status`. See [`AudioNode`](AudioNode.md).
 
+Node connection tracking adds `item.link_group_count` and
+`item.link_group_status`, plus contextual `item.link_groups`. See
+[`NodeLinks`](NodeLinks.md).
+
 ## Identity and ordering
 
 Identity combines the connection generation and node global ID. Updates and keyed moves preserve the repeated subtree. Removal invalidates it.
@@ -55,3 +59,4 @@ Nodes are ordered by normalized type, media class, description, name, then raw I
 - [`Defaults`](Defaults.md)
 - [`AudioNode`](AudioNode.md)
 - [`Channels`](Channels.md)
+- [`NodeLinks`](NodeLinks.md)

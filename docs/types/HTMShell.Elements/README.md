@@ -15,7 +15,8 @@ The `HTMShell.Elements` module contains seven immutable built-in behavior declar
 Declarations use ordinary HTML. Registered descendants inside a repeat use `data-htm-local-id` instead of `id`. Unknown HTMShell behavior attributes are rejected.
 
 User-defined kinds, dynamic loading, recursive repetition, scripting, and a
-general event model are unavailable. `item.channels` provides one narrow
-contextual repeat level inside `pipewire.nodes`.
+general event model are unavailable. `item.channels`, `item.links`, and
+`item.link_groups` provide one narrow contextual repeat level under their
+documented PipeWire parents.
 
 See [state and actions](../../guide/state-and-actions.md).

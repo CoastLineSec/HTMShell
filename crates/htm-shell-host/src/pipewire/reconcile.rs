@@ -217,9 +217,6 @@ impl PipeWireReconciler {
                 }
                 PipeWireDelta::NodeRemoved(raw_id) => {
                     self.nodes.remove(&raw_id);
-                    self.links.retain(|_, link| {
-                        link.source_node != Some(raw_id) && link.target_node != Some(raw_id)
-                    });
                 }
                 PipeWireDelta::LinkAdded {
                     raw_id,
@@ -441,6 +438,8 @@ impl PipeWireReconciler {
             (
                 link.source_node.map(|id| id.global_id).unwrap_or(u32::MAX),
                 link.target_node.map(|id| id.global_id).unwrap_or(u32::MAX),
+                link.source_port_id.unwrap_or(u32::MAX),
+                link.target_port_id.unwrap_or(u32::MAX),
                 link.raw_global_id,
             )
         });
@@ -926,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn node_removal_removes_related_links_and_groups() {
+    fn node_removal_preserves_partial_links_until_the_link_is_removed() {
         let mut reconciler = PipeWireReconciler::default();
         reconciler.begin_generation(1).unwrap();
         let mut deltas = add_node(1, "source", "Audio/Source");
@@ -936,6 +935,14 @@ mod tests {
         assert_eq!(snapshot.link_group_count, 1);
         let removed = reconciler
             .apply([PipeWireDelta::NodeRemoved(1)])
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed.links.len(), 1);
+        assert!(!removed.links[0].source_node_present);
+        assert_eq!(removed.link_groups.len(), 1);
+        assert!(!removed.link_groups[0].source_node_present);
+        let removed = reconciler
+            .apply([PipeWireDelta::LinkRemoved(10)])
             .unwrap()
             .unwrap();
         assert!(removed.links.is_empty());

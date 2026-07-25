@@ -1,6 +1,8 @@
 # PipeWire audio
 
-HTMShell presents PipeWire nodes, default audio relationships, volume, mute state, and typed audio controls. One process connection serves every output.
+HTMShell presents PipeWire nodes, default audio relationships, volume, mute
+state, channels, and the read-only link graph. One process connection serves
+every output.
 
 ## Service state
 
@@ -209,6 +211,110 @@ Inside `pipewire.nodes`, `item.property` reads one static key:
 
 Common keys include `application.name`, `application.icon-name`, `media.name`, `media.title`, and `media.artist`. Presence is not guaranteed.
 
+## Links and grouped connections
+
+`pipewire.link_count` and `pipewire.link_group_count` report the authoritative
+collection sizes after synchronization. Repeat over individual port links with
+`pipewire.links`:
+
+```html
+<template id="links"
+          data-htm-element="repeat"
+          data-htm-source="pipewire.links">
+  <div>
+    <span data-htm-element="state-text"
+          data-htm-local-id="source"
+          data-htm-bind="item.source.description"></span>
+    <span data-htm-element="state-token"
+          data-htm-local-id="state"
+          data-htm-bind="item.state"></span>
+    <span data-htm-element="state-text"
+          data-htm-local-id="target"
+          data-htm-bind="item.target.description"></span>
+  </div>
+</template>
+```
+
+Each link represents one source port to one target port. Stereo routing
+usually has two links. Link readiness is `unavailable`, `partial`, or `ready`.
+The seven PipeWire states are `error`, `unlinked`, `init`, `negotiating`,
+`allocating`, `paused`, and `active`; unrecognized future states are
+`unknown`.
+
+Source and target relations support only the documented fields. Relation
+status is `available`, `unresolved`, or `unavailable`. A missing endpoint does
+not hide a link. Endpoint labels can update while the link clone retains its
+identity. Relation paths are not expressions, cannot be chained, and cannot be
+used as action targets.
+
+Raw link, node, and port IDs are session-local diagnostics. They are not DOM
+identities, persistent references, joins, or action targets.
+
+`pipewire.link_groups` groups links with the same source and target node:
+
+```html
+<template id="groups"
+          data-htm-element="repeat"
+          data-htm-source="pipewire.link_groups">
+  <article>
+    <data data-htm-element="state-value"
+          data-htm-local-id="members"
+          data-htm-bind="item.member_count"></data>
+    <template data-htm-element="repeat"
+              data-htm-source="item.links">
+      <div>
+        <span data-htm-element="state-token"
+              data-htm-local-id="member-state"
+              data-htm-bind="item.state"></span>
+      </div>
+    </template>
+  </article>
+</template>
+```
+
+The group state is the state of one retained representative link, not a
+best-state, worst-state, or all-channel aggregate. The representative remains
+until that link disappears. Its replacement is the lowest remaining
+session-local link ID. Group identity depends only on the connection
+generation and source-target pair.
+
+Top-level links and groups include monitor routes. `item.is_monitor` is true
+when the target node has PipeWire media category `Monitor` or `Manager`.
+
+## Node connection tracking
+
+Inside `pipewire.nodes`, `item.link_group_count`,
+`item.link_group_status`, and contextual `item.link_groups` provide the
+HTMShell equivalent of a node link tracker:
+
+```html
+<template data-htm-element="repeat"
+          data-htm-source="item.link_groups">
+  <div>
+    <span data-htm-element="state-token"
+          data-htm-local-id="direction"
+          data-htm-bind="item.connection_direction"></span>
+    <span data-htm-element="state-text"
+          data-htm-local-id="peer"
+          data-htm-bind="item.peer.description"></span>
+  </div>
+</template>
+```
+
+For a sink node, tracking selects incoming groups. For every other node type,
+including source and untracked nodes, it selects outgoing groups. A
+bidirectional node is a sink for this selection rule. Self-links use `self`;
+other direction tokens are `incoming`, `outgoing`, and `unknown`.
+
+Node tracking excludes groups whose target is a PipeWire monitor or manager
+node. The complete top-level collections still include those groups.
+`item.peer.*` resolves the endpoint opposite the tracked node.
+
+`item.channels`, group `item.links`, and node `item.link_groups` are sibling
+forms of one contextual level. The inner `item.*` shadows the outer scope.
+They cannot be nested inside one another and there is no `parent.*`, `../`,
+selector, interpolation, or arbitrary relation syntax.
+
 ## Demand and limits
 
 Documents activate only the PipeWire state they consume. Audio parameter subscriptions and write coordinators are shared process-wide. Removing the final audio consumer releases audio demand. Closed retained overlays may update without receiving a frame.
@@ -218,9 +324,17 @@ contextual repeats and outputs share one normalized channel vector per node.
 Removing the last channel consumer releases public channel projection when no
 average-volume consumer still needs the internal vector.
 
+Link collection, link detail, group collection, member projection, node
+tracking, and relation projection are separate demand classes. Documents and
+outputs share the process graph. Removing the last graph consumer releases
+link proxies and graph-detail demand without disturbing independent audio or
+channel consumers.
+
 Limits include:
 
 - 16 `pipewire.nodes` repeats per document
+- 16 `pipewire.links` repeats per document
+- 16 `pipewire.link_groups` repeats per document
 - 64 registered PipeWire bindings per repeated item
 - 32 property lookups per item
 - 128 PipeWire audio controls per document
@@ -229,6 +343,11 @@ Limits include:
 - 8 range controls per repeated item
 - 8 `item.channels` repeats per outer node template
 - 32 contextual repeats per document
+- 8 `item.links` repeats per group template
+- 8 `item.link_groups` repeats per node template
+- 32 contextual graph repeats per document
+- 64 relation bindings per item
+- 16,384 public links and 4,096 public link groups process-wide
 - 64 public channels per node
 - 64 registered bindings per channel item
 - 8 channel range controls per channel item
@@ -240,8 +359,8 @@ Limits include:
 
 ## Current limitations
 
-Channel mute, channel-map writes, preferred-default writes, links, link groups,
-peak monitoring, stream movement, and spatial graph rendering are not
-available.
+Channel mute, channel-map writes, preferred-default writes, link mutation,
+peak monitoring, stream movement, arbitrary graph queries, and spatial graph
+rendering are not available.
 
 See the tracked [audio inspector dashboard](../../examples/audio-inspector/shell.json).

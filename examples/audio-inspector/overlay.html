@@ -34,6 +34,18 @@
               data-htm-bind="pipewire.node_count"></data>
       </div>
       <div>
+        <span>Links</span>
+        <data id="link-count"
+              data-htm-element="state-value"
+              data-htm-bind="pipewire.link_count"></data>
+      </div>
+      <div>
+        <span>Connection groups</span>
+        <data id="link-group-count"
+              data-htm-element="state-value"
+              data-htm-bind="pipewire.link_group_count"></data>
+      </div>
+      <div>
         <span>Actual output</span>
         <span id="actual-output"
               data-htm-element="state-text"
@@ -275,6 +287,163 @@
                     data-htm-local-id="stream"
                     data-htm-bind="item.is_stream"></span>
             </footer>
+          </div>
+        </template>
+      </div>
+    </section>
+
+    <section class="routing">
+      <header>
+        <div>
+          <p class="eyebrow">Node perspective</p>
+          <h2>Non-monitor connections</h2>
+        </div>
+        <p>Sink nodes show incoming groups; other nodes show outgoing groups.</p>
+      </header>
+      <div class="node-route-list">
+        <template id="node-route-card"
+                  data-htm-element="repeat"
+                  data-htm-source="pipewire.nodes">
+          <div class="node-links"
+               data-htm-element="state-token"
+               data-htm-local-id="link-group-status"
+               data-htm-bind="item.link_group_status">
+            <header>
+              <span data-htm-element="state-text"
+                    data-htm-local-id="node-description"
+                    data-htm-bind="item.description"></span>
+              <data data-htm-element="state-value"
+                    data-htm-local-id="link-group-count"
+                    data-htm-bind="item.link_group_count"></data>
+            </header>
+            <div class="node-connections">
+              <template data-htm-element="repeat"
+                        data-htm-source="item.link_groups">
+                <div class="node-connection"
+                     data-htm-element="state-token"
+                     data-htm-local-id="connection-direction"
+                     data-htm-bind="item.connection_direction">
+                  <span data-htm-element="state-text"
+                        data-htm-local-id="peer-description"
+                        data-htm-bind="item.peer.description"></span>
+                  <span data-htm-element="state-token"
+                        data-htm-local-id="peer-status"
+                        data-htm-bind="item.peer.status"></span>
+                  <span data-htm-element="state-token"
+                        data-htm-local-id="connection-state"
+                        data-htm-bind="item.state"></span>
+                  <data data-htm-element="state-value"
+                        data-htm-local-id="connection-members"
+                        data-htm-bind="item.member_count"></data>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </section>
+
+    <section class="routing">
+      <header>
+        <div>
+          <p class="eyebrow">Read-only routing</p>
+          <h2>Grouped connections</h2>
+        </div>
+        <p>Group state follows one retained representative link.</p>
+      </header>
+      <div class="route-grid">
+        <template id="link-group-card"
+                  data-htm-element="repeat"
+                  data-htm-source="pipewire.link_groups">
+          <div class="route-group"
+               data-htm-element="state-token"
+               data-htm-local-id="group-state"
+               data-htm-bind="item.state">
+            <header>
+              <div>
+                <span data-htm-element="state-text"
+                      data-htm-local-id="source"
+                      data-htm-bind="item.source.description"></span>
+                <span aria-hidden="true">to</span>
+                <span data-htm-element="state-text"
+                      data-htm-local-id="target"
+                      data-htm-bind="item.target.description"></span>
+              </div>
+              <data data-htm-element="state-value"
+                    data-htm-local-id="member-count"
+                    data-htm-bind="item.member_count"></data>
+              <data data-htm-element="state-value"
+                    data-htm-local-id="representative-link"
+                    data-htm-bind="item.representative_link_raw_id"></data>
+            </header>
+            <div class="relation-status">
+              <span data-htm-element="state-token"
+                    data-htm-local-id="source-status"
+                    data-htm-bind="item.source.status"></span>
+              <span data-htm-element="state-token"
+                    data-htm-local-id="target-status"
+                    data-htm-bind="item.target.status"></span>
+              <span data-htm-element="state-token"
+                    data-htm-local-id="monitor"
+                    data-htm-bind="item.is_monitor"></span>
+            </div>
+            <div class="member-links">
+              <template data-htm-element="repeat"
+                        data-htm-source="item.links">
+                <div class="member-link"
+                     data-htm-element="state-token"
+                     data-htm-local-id="state"
+                     data-htm-bind="item.state">
+                  <data data-htm-element="state-value"
+                        data-htm-local-id="raw-id"
+                        data-htm-bind="item.raw_id"></data>
+                  <data data-htm-element="state-value"
+                        data-htm-local-id="source-port"
+                        data-htm-bind="item.source_port_id"></data>
+                  <data data-htm-element="state-value"
+                        data-htm-local-id="target-port"
+                        data-htm-bind="item.target_port_id"></data>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </section>
+
+    <section class="routing">
+      <header>
+        <div>
+          <p class="eyebrow">Port connections</p>
+          <h2>Individual links</h2>
+        </div>
+      </header>
+      <div class="link-list">
+        <template id="link-row"
+                  data-htm-element="repeat"
+                  data-htm-source="pipewire.links">
+          <div class="link-row"
+               data-htm-element="state-token"
+               data-htm-local-id="ready"
+               data-htm-bind="item.ready">
+            <span data-htm-element="state-text"
+                  data-htm-local-id="source"
+                  data-htm-bind="item.source.description"></span>
+            <data data-htm-element="state-value"
+                  data-htm-local-id="source-port"
+                  data-htm-bind="item.source_port_id"></data>
+            <span data-htm-element="state-token"
+                  data-htm-local-id="state"
+                  data-htm-bind="item.state"></span>
+            <data data-htm-element="state-value"
+                  data-htm-local-id="target-port"
+                  data-htm-bind="item.target_port_id"></data>
+            <span data-htm-element="state-text"
+                  data-htm-local-id="target"
+                  data-htm-bind="item.target.description"></span>
+            <span data-htm-element="state-token"
+                  data-htm-local-id="monitor"
+                  data-htm-bind="item.is_monitor"></span>
           </div>
         </template>
       </div>

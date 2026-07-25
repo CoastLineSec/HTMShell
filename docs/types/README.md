@@ -55,7 +55,7 @@ Process-scoped UPower devices and power-profile state.
 
 ## `HTMShell.Services.PipeWire`
 
-Process-scoped PipeWire node and audio state.
+Process-scoped PipeWire graph and audio state.
 
 - [`PipeWire`](HTMShell.Services.PipeWire/PipeWire.md)
 - [`Node`](HTMShell.Services.PipeWire/Node.md)
@@ -69,3 +69,8 @@ Process-scoped PipeWire node and audio state.
 - [`AudioChannel`](HTMShell.Services.PipeWire/AudioChannel.md)
 - [`Channels`](HTMShell.Services.PipeWire/Channels.md)
 - [`ChannelControls`](HTMShell.Services.PipeWire/ChannelControls.md)
+- [`Link`](HTMShell.Services.PipeWire/Link.md)
+- [`LinkGroup`](HTMShell.Services.PipeWire/LinkGroup.md)
+- [`LinkState`](HTMShell.Services.PipeWire/LinkState.md)
+- [`Relations`](HTMShell.Services.PipeWire/Relations.md)
+- [`NodeLinks`](HTMShell.Services.PipeWire/NodeLinks.md)

@@ -1,12 +1,17 @@
 use htm_runtime::{
     CLOCK_FORMAT_CONVERSIONS, CLOCK_FORMAT_FLAGS, CLOCK_PUBLIC_ATTRIBUTES, ClockFormat,
-    ItemBindingKey, MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT, MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE,
-    MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM,
-    MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM, MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_DOCUMENT,
-    MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM, MAX_PIPEWIRE_CHANNELS_PER_NODE,
-    MAX_PIPEWIRE_PERCEPTUAL_VOLUME, MAX_RANGE_CONTROLS_PER_DOCUMENT, MAX_RANGE_CONTROLS_PER_ITEM,
-    RepeatSource, ShellAction, StateBindingKey, StateToken, StateValueFormat,
-    built_in_registry_names,
+    ContextualRepeatSource, ItemBindingKey, MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT,
+    MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
+    MAX_CONTEXTUAL_LINK_REPEATS_PER_GROUP_TEMPLATE, MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT,
+    MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT,
+    MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM, MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM,
+    MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_DOCUMENT, MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM,
+    MAX_PIPEWIRE_CHANNELS_PER_NODE, MAX_PIPEWIRE_GRAPH_BINDINGS_PER_ITEM,
+    MAX_PIPEWIRE_LINK_GROUP_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_PIPEWIRE_LINK_GROUPS_PER_PROCESS,
+    MAX_PIPEWIRE_LINK_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_PIPEWIRE_LINKS_PER_PROCESS,
+    MAX_PIPEWIRE_PERCEPTUAL_VOLUME, MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM,
+    MAX_RANGE_CONTROLS_PER_DOCUMENT, MAX_RANGE_CONTROLS_PER_ITEM, RepeatSource, ShellAction,
+    StateBindingKey, StateToken, StateValueFormat, built_in_registry_names,
 };
 use htm_shell_host::{
     PerformanceDegradationReason, PipeWireAudioChannelPosition, PipeWireNodeDirection,
@@ -216,6 +221,13 @@ fn typed_public_names_are_covered_by_the_reference() {
             source.as_str()
         );
     }
+    for source in ContextualRepeatSource::ALL {
+        assert!(
+            documented_name(&reference, source.as_str()),
+            "contextual repeat source is undocumented: {}",
+            source.as_str()
+        );
+    }
     for binding in ItemBindingKey::ALL {
         assert!(
             documented_name(&reference, binding.as_str()),
@@ -286,6 +298,39 @@ fn typed_public_names_are_covered_by_the_reference() {
         (
             MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_DOCUMENT,
             "channel range controls per document",
+        ),
+        (
+            MAX_PIPEWIRE_LINK_REPEAT_DECLARATIONS_PER_DOCUMENT,
+            "PipeWire link repeats per document",
+        ),
+        (
+            MAX_PIPEWIRE_LINK_GROUP_REPEAT_DECLARATIONS_PER_DOCUMENT,
+            "PipeWire link-group repeats per document",
+        ),
+        (
+            MAX_CONTEXTUAL_LINK_REPEATS_PER_GROUP_TEMPLATE,
+            "member-link repeats per group template",
+        ),
+        (
+            MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
+            "link-group repeats per node template",
+        ),
+        (
+            MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT,
+            "contextual graph repeats per document",
+        ),
+        (
+            MAX_PIPEWIRE_GRAPH_BINDINGS_PER_ITEM,
+            "PipeWire graph bindings per item",
+        ),
+        (
+            MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM,
+            "PipeWire relation bindings per item",
+        ),
+        (MAX_PIPEWIRE_LINKS_PER_PROCESS, "public PipeWire links"),
+        (
+            MAX_PIPEWIRE_LINK_GROUPS_PER_PROCESS,
+            "public PipeWire link groups",
         ),
     ] {
         assert!(
@@ -441,6 +486,16 @@ fn audio_example_uses_only_the_typed_control_surface() {
         "item.is_auxiliary",
         "item.is_custom",
         "pipewire.audio.set_channel_volume",
+        "pipewire.link_count",
+        "pipewire.link_group_count",
+        "pipewire.links",
+        "pipewire.link_groups",
+        "item.links",
+        "item.link_groups",
+        "item.source.description",
+        "item.target.description",
+        "item.peer.description",
+        "item.connection_direction",
         "pending",
         "failed",
     ] {
@@ -449,7 +504,6 @@ fn audio_example_uses_only_the_typed_control_surface() {
     for forbidden in [
         "pipewire.configured_sink\"",
         "pipewire.configured_source\"",
-        "pipewire.links",
         "pipewire.peaks",
     ] {
         assert!(

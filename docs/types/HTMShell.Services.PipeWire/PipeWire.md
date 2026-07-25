@@ -3,8 +3,8 @@
 **Module:** `HTMShell.Services.PipeWire`
 **Scope:** Process
 
-`PipeWire` exposes connection state, the current node collection, default audio
-state, ordered channels, and typed volume and mute controls.
+`PipeWire` exposes connection state, nodes, the read-only link graph, default
+audio state, ordered channels, and typed volume and mute controls.
 
 ## State
 
@@ -13,14 +13,22 @@ state, ordered channels, and typed volume and mute controls.
 | `pipewire.availability` | text, token | `unavailable`, `synchronizing`, `ready` |
 | `pipewire.ready` | text, token, Boolean enable binding | `true`, `false` |
 | `pipewire.node_count` | numeric | Nonnegative integer |
+| `pipewire.link_count` | numeric | Public link collection length |
+| `pipewire.link_group_count` | numeric | Public source-target group count |
 
-`pipewire.ready` becomes true only after the initial registry synchronization barrier. The node count is zero before that point.
+`pipewire.ready` becomes true only after the initial registry synchronization
+barrier. Graph counts are zero before that point.
 
 ## Collection
 
-`pipewire.nodes` is a keyed [`repeat`](../HTMShell.Elements/repeat.md) source. One source serves all live documents and output instances. The first consumer activates PipeWire. Removing the last consumer releases its connection and reconnect deadline.
+`pipewire.nodes`, `pipewire.links`, and `pipewire.link_groups` are keyed
+[`repeat`](../HTMShell.Elements/repeat.md) sources. One process graph serves
+all live documents and output instances. The first consumer activates
+PipeWire. Removing the last consumer releases its connection and reconnect
+deadline.
 
-Node updates are event-driven. Insertions, removals, property changes, and ordering changes mutate only affected document instances.
+Graph updates are event-driven. Insertions, removals, state changes, relation
+changes, and keyed moves mutate only affected document instances.
 
 ## Audio demand
 
@@ -31,9 +39,15 @@ final audio consumer releases audio tracking. `item.channels` adds
 document-driven channel projection and channel-write demand without creating
 link or peak demand.
 
+Link collection, link detail, group collection, group-member, node-tracker,
+and relation demand are tracked separately. Declaring graph bindings does not
+create PipeWire write or peak-monitor demand.
+
 ## Lifecycle
 
-PipeWire absence is valid. On disconnect, current nodes and defaults are cleared. Reconnection creates a fresh collection generation, so a reused session-local node ID cannot alias an old item.
+PipeWire absence is valid. On disconnect, the current graph and defaults are
+cleared. Reconnection creates a fresh collection generation, so reused
+session-local node or link IDs cannot alias old items.
 
 ## See also
 
@@ -44,4 +58,8 @@ PipeWire absence is valid. On disconnect, current nodes and defaults are cleared
 - [`AudioChannel`](AudioChannel.md)
 - [`Channels`](Channels.md)
 - [`ChannelControls`](ChannelControls.md)
-- [PipeWire nodes guide](../../guide/audio.md)
+- [`Link`](Link.md)
+- [`LinkGroup`](LinkGroup.md)
+- [`Relations`](Relations.md)
+- [`NodeLinks`](NodeLinks.md)
+- [PipeWire audio and routing guide](../../guide/audio.md)

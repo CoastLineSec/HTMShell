@@ -899,6 +899,27 @@ fn print_built_in_metrics(prefix: &str, summary: &SurfaceHostSummary) {
         summary.contextual_item_count,
     );
     println!(
+        "{prefix}_graph_updates=links:+{}/-{} state:{} relations:{} moves:{} groups:+{}/-{} members:+{}/-{} representatives:{} group_state:{} trackers:+{}/-{} peers:{} retained_links:{} retained_groups:{} retained_trackers:{} duplicates:{}",
+        summary.link_insertions,
+        summary.link_removals,
+        summary.link_state_mutations,
+        summary.link_relation_mutations,
+        summary.link_moves,
+        summary.group_insertions,
+        summary.group_removals,
+        summary.group_member_insertions,
+        summary.group_member_removals,
+        summary.representative_changes,
+        summary.group_state_mutations,
+        summary.node_tracker_insertions,
+        summary.node_tracker_removals,
+        summary.peer_relation_mutations,
+        summary.retained_link_identities,
+        summary.retained_group_identities,
+        summary.retained_tracker_identities,
+        summary.duplicate_graph_suppressions,
+    );
+    println!(
         "{prefix}_component_latency_us=release_to_dispatch:{} dispatch_to_mutation:{} mutation_to_commit:{} mutation_to_callback:{}",
         summary.last_pointer_release_to_action_dispatch_us,
         summary.last_action_dispatch_to_state_mutation_us,

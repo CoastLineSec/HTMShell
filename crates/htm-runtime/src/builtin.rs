@@ -1,16 +1,21 @@
 use crate::identity::{IdentityRegistry, author_slots};
 use crate::{
-    ClockFormat, ClockTimeZone, ExperimentalDocumentIdentity, ExperimentalNodeIdentity,
-    ItemBindingKey, MAX_CLOCK_DECLARATIONS_PER_DOCUMENT, MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT,
+    ClockFormat, ClockTimeZone, ContextualRepeatSource, ExperimentalDocumentIdentity,
+    ExperimentalNodeIdentity, ItemBindingKey, MAX_CLOCK_DECLARATIONS_PER_DOCUMENT,
+    MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT, MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
+    MAX_CONTEXTUAL_LINK_REPEATS_PER_GROUP_TEMPLATE, MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT,
     MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT,
     MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM, MAX_PIPEWIRE_BINDINGS_PER_ITEM,
     MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM, MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_DOCUMENT,
-    MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM, MAX_PIPEWIRE_PERCEPTUAL_VOLUME,
+    MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM, MAX_PIPEWIRE_GRAPH_BINDINGS_PER_ITEM,
+    MAX_PIPEWIRE_LINK_GROUP_REPEAT_DECLARATIONS_PER_DOCUMENT,
+    MAX_PIPEWIRE_LINK_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_PIPEWIRE_PERCEPTUAL_VOLUME,
     MAX_PIPEWIRE_PROPERTY_KEY_BYTES, MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT,
-    MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM, MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT,
-    MAX_RANGE_CONTROLS_PER_DOCUMENT, MAX_RANGE_CONTROLS_PER_ITEM, MAX_RANGE_NUMBER_BYTES,
-    MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE, MAX_REPEAT_DECLARATIONS_PER_DOCUMENT,
-    MAX_REPEAT_TEMPLATE_DEPTH, RepeatSource, RuntimeError, StateValueFormat,
+    MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM, MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM,
+    MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_RANGE_CONTROLS_PER_DOCUMENT,
+    MAX_RANGE_CONTROLS_PER_ITEM, MAX_RANGE_NUMBER_BYTES, MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE,
+    MAX_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_REPEAT_TEMPLATE_DEPTH, RepeatSource, RuntimeError,
+    StateValueFormat,
 };
 use blitz_dom::node::{ElementData, NodeData};
 use blitz_dom::{LocalName, local_name};
@@ -103,6 +108,8 @@ pub enum StateBindingKey {
     PipeWireAvailability,
     PipeWireReady,
     PipeWireNodeCount,
+    PipeWireLinkCount,
+    PipeWireLinkGroupCount,
     PipeWireDefaultSinkStatus,
     PipeWireDefaultSinkName,
     PipeWireDefaultSinkNickname,
@@ -157,7 +164,7 @@ pub enum StateBindingKey {
 }
 
 impl StateBindingKey {
-    pub const ALL: [Self; 81] = [
+    pub const ALL: [Self; 83] = [
         Self::ClockTime,
         Self::UPowerAvailability,
         Self::UPowerOnBattery,
@@ -188,6 +195,8 @@ impl StateBindingKey {
         Self::PipeWireAvailability,
         Self::PipeWireReady,
         Self::PipeWireNodeCount,
+        Self::PipeWireLinkCount,
+        Self::PipeWireLinkGroupCount,
         Self::PipeWireDefaultSinkStatus,
         Self::PipeWireDefaultSinkName,
         Self::PipeWireDefaultSinkNickname,
@@ -273,6 +282,8 @@ impl StateBindingKey {
             Self::PipeWireAvailability => "pipewire.availability",
             Self::PipeWireReady => "pipewire.ready",
             Self::PipeWireNodeCount => "pipewire.node_count",
+            Self::PipeWireLinkCount => "pipewire.link_count",
+            Self::PipeWireLinkGroupCount => "pipewire.link_group_count",
             Self::PipeWireDefaultSinkStatus => "pipewire.default_sink.status",
             Self::PipeWireDefaultSinkName => "pipewire.default_sink.name",
             Self::PipeWireDefaultSinkNickname => "pipewire.default_sink.nickname",
@@ -361,6 +372,8 @@ impl StateBindingKey {
             | Self::PipeWireAvailability
             | Self::PipeWireReady
             | Self::PipeWireNodeCount
+            | Self::PipeWireLinkCount
+            | Self::PipeWireLinkGroupCount
             | Self::PipeWireDefaultSinkStatus
             | Self::PipeWireDefaultSinkName
             | Self::PipeWireDefaultSinkNickname
@@ -534,6 +547,8 @@ impl StateBindingKey {
                     | Self::BatteryHealthPercentage
                     | Self::PowerProfileHoldCount
                     | Self::PipeWireNodeCount
+                    | Self::PipeWireLinkCount
+                    | Self::PipeWireLinkGroupCount
                     | Self::PipeWireDefaultSinkRawId
                     | Self::PipeWireDefaultSourceRawId
                     | Self::PipeWireConfiguredSinkRawId
@@ -565,6 +580,8 @@ impl StateBindingKey {
             Self::UPowerDeviceCount
             | Self::PowerProfileHoldCount
             | Self::PipeWireNodeCount
+            | Self::PipeWireLinkCount
+            | Self::PipeWireLinkGroupCount
             | Self::PipeWireDefaultSinkRawId
             | Self::PipeWireDefaultSourceRawId
             | Self::PipeWireConfiguredSinkRawId
@@ -740,6 +757,8 @@ impl std::str::FromStr for StateBindingKey {
             "pipewire.availability" => Ok(Self::PipeWireAvailability),
             "pipewire.ready" => Ok(Self::PipeWireReady),
             "pipewire.node_count" => Ok(Self::PipeWireNodeCount),
+            "pipewire.link_count" => Ok(Self::PipeWireLinkCount),
+            "pipewire.link_group_count" => Ok(Self::PipeWireLinkGroupCount),
             "pipewire.default_sink.status" => Ok(Self::PipeWireDefaultSinkStatus),
             "pipewire.default_sink.name" => Ok(Self::PipeWireDefaultSinkName),
             "pipewire.default_sink.nickname" => Ok(Self::PipeWireDefaultSinkNickname),
@@ -914,10 +933,20 @@ pub enum StateToken {
     Unmuted,
     Pending,
     Failed,
+    Partial,
+    Unlinked,
+    Init,
+    Negotiating,
+    Allocating,
+    Paused,
+    Active,
+    Incoming,
+    Outgoing,
+    SelfConnection,
 }
 
 impl StateToken {
-    pub const ALL: [Self; 89] = [
+    pub const ALL: [Self; 99] = [
         Self::Open,
         Self::Closed,
         Self::Scale1,
@@ -1007,6 +1036,16 @@ impl StateToken {
         Self::Unmuted,
         Self::Pending,
         Self::Failed,
+        Self::Partial,
+        Self::Unlinked,
+        Self::Init,
+        Self::Negotiating,
+        Self::Allocating,
+        Self::Paused,
+        Self::Active,
+        Self::Incoming,
+        Self::Outgoing,
+        Self::SelfConnection,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -1100,6 +1139,16 @@ impl StateToken {
             Self::Unmuted => "unmuted",
             Self::Pending => "pending",
             Self::Failed => "failed",
+            Self::Partial => "partial",
+            Self::Unlinked => "unlinked",
+            Self::Init => "init",
+            Self::Negotiating => "negotiating",
+            Self::Allocating => "allocating",
+            Self::Paused => "paused",
+            Self::Active => "active",
+            Self::Incoming => "incoming",
+            Self::Outgoing => "outgoing",
+            Self::SelfConnection => "self",
         }
     }
 
@@ -1312,6 +1361,7 @@ pub struct RepeatedElementDeclaration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextualRepeatDeclaration {
     pub id: String,
+    pub source: ContextualRepeatSource,
     pub template_prototype_order: usize,
     pub descendants: Vec<RepeatedElementDeclaration>,
     pub prototype_nodes: usize,
@@ -1978,6 +2028,28 @@ impl BuiltInElementIndex {
                 pipewire_repeats.len()
             )));
         }
+        let pipewire_link_repeats = elements
+            .values()
+            .filter_map(|element| element.declaration.repeat.as_ref())
+            .filter(|repeat| repeat.source == RepeatSource::PipeWireLinks)
+            .collect::<Vec<_>>();
+        if pipewire_link_repeats.len() > MAX_PIPEWIRE_LINK_REPEAT_DECLARATIONS_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{source} contains {} `pipewire.links` repeat declarations; the per-document limit is {MAX_PIPEWIRE_LINK_REPEAT_DECLARATIONS_PER_DOCUMENT}",
+                pipewire_link_repeats.len()
+            )));
+        }
+        let pipewire_group_repeats = elements
+            .values()
+            .filter_map(|element| element.declaration.repeat.as_ref())
+            .filter(|repeat| repeat.source == RepeatSource::PipeWireLinkGroups)
+            .collect::<Vec<_>>();
+        if pipewire_group_repeats.len() > MAX_PIPEWIRE_LINK_GROUP_REPEAT_DECLARATIONS_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{source} contains {} `pipewire.link_groups` repeat declarations; the per-document limit is {MAX_PIPEWIRE_LINK_GROUP_REPEAT_DECLARATIONS_PER_DOCUMENT}",
+                pipewire_group_repeats.len()
+            )));
+        }
         let property_keys = pipewire_repeats
             .iter()
             .flat_map(|repeat| repeat.descendants.iter())
@@ -2011,6 +2083,7 @@ impl BuiltInElementIndex {
         }
         let contextual_repeats = pipewire_repeats
             .iter()
+            .chain(pipewire_group_repeats.iter())
             .flat_map(|repeat| repeat.contextual_repeats.iter())
             .collect::<Vec<_>>();
         if contextual_repeats.len() > MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT {
@@ -2019,8 +2092,18 @@ impl BuiltInElementIndex {
                 contextual_repeats.len()
             )));
         }
+        let contextual_graph_repeats = contextual_repeats
+            .iter()
+            .filter(|repeat| repeat.source != ContextualRepeatSource::Channels)
+            .count();
+        if contextual_graph_repeats > MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{source} contains {contextual_graph_repeats} contextual graph repeats; the per-document limit is {MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT}"
+            )));
+        }
         let channel_ranges = contextual_repeats
             .iter()
+            .filter(|repeat| repeat.source == ContextualRepeatSource::Channels)
             .flat_map(|repeat| repeat.descendants.iter())
             .filter(|descendant| descendant.range.is_some())
             .count();
@@ -2485,13 +2568,25 @@ fn analyze_repeat(
                         )
                     })?;
                     if kind == BuiltInElementKind::Repeat {
-                        if source != RepeatSource::PipeWireNodes
-                            || element.attr(LocalName::from(SOURCE_ATTRIBUTE))
-                                != Some("item.channels")
-                        {
+                        let contextual_source = element
+                            .attr(LocalName::from(SOURCE_ATTRIBUTE))
+                            .and_then(|value| value.parse::<ContextualRepeatSource>().ok())
+                            .filter(|contextual| contextual.parent() == source)
+                            .ok_or_else(|| {
+                                invalid_declaration(
+                                    context,
+                                    format!(
+                                        "contextual repeat source is not valid inside `{source_value}`"
+                                    ),
+                                )
+                            })?;
+                        if !matches!(
+                            source,
+                            RepeatSource::PipeWireNodes | RepeatSource::PipeWireLinkGroups
+                        ) {
                             return Err(invalid_declaration(
                                 context,
-                                "`item.channels` is the only contextual repeat source and is valid only inside `pipewire.nodes`",
+                                "this repeat source does not support contextual repetition",
                             ));
                         }
                         if local_id.is_some() {
@@ -2500,15 +2595,34 @@ fn analyze_repeat(
                                 "contextual repeat declarations do not use `data-htm-local-id`",
                             ));
                         }
-                        if contextual_repeats.len() >= MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE {
+                        let source_count = contextual_repeats
+                            .iter()
+                            .filter(|repeat: &&ContextualRepeatDeclaration| {
+                                repeat.source == contextual_source
+                            })
+                            .count();
+                        let source_limit = match contextual_source {
+                            ContextualRepeatSource::Channels => {
+                                MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE
+                            }
+                            ContextualRepeatSource::GroupLinks => {
+                                MAX_CONTEXTUAL_LINK_REPEATS_PER_GROUP_TEMPLATE
+                            }
+                            ContextualRepeatSource::NodeLinkGroups => {
+                                MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE
+                            }
+                        };
+                        if source_count >= source_limit {
                             return Err(RuntimeError::LimitExceeded(format!(
-                                "{context}: node template exceeds {MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE} contextual repeats"
+                                "{context}: `{}` exceeds {source_limit} declarations in one template",
+                                contextual_source.as_str()
                             )));
                         }
                         let declaration = analyze_contextual_repeat(
                             document,
                             slot,
                             order,
+                            contextual_source,
                             contextual_repeats.len(),
                             context,
                         )?;
@@ -2806,11 +2920,16 @@ fn analyze_repeat(
                         value_format,
                         prototype_order: order,
                     });
-                    if source == RepeatSource::PipeWireNodes
-                        && descendants.len() > MAX_PIPEWIRE_BINDINGS_PER_ITEM
-                    {
+                    let source_binding_limit = match source {
+                        RepeatSource::PipeWireNodes => MAX_PIPEWIRE_BINDINGS_PER_ITEM,
+                        RepeatSource::PipeWireLinks | RepeatSource::PipeWireLinkGroups => {
+                            MAX_PIPEWIRE_GRAPH_BINDINGS_PER_ITEM
+                        }
+                        _ => MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE,
+                    };
+                    if descendants.len() > source_binding_limit {
                         return Err(RuntimeError::LimitExceeded(format!(
-                            "{context}: `pipewire.nodes` template has more than {MAX_PIPEWIRE_BINDINGS_PER_ITEM} registered bindings"
+                            "{context}: `{source_value}` template has more than {source_binding_limit} registered bindings"
                         )));
                     }
                     if descendants.len() > MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE {
@@ -2836,6 +2955,15 @@ fn analyze_repeat(
     if property_lookups > MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM {
         return Err(RuntimeError::LimitExceeded(format!(
             "{context}: repeat template has {property_lookups} PipeWire property lookups; the limit is {MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM}"
+        )));
+    }
+    let relation_bindings = descendants
+        .iter()
+        .filter(|descendant| descendant.binding.is_some_and(ItemBindingKey::is_relation))
+        .count();
+    if relation_bindings > MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM {
+        return Err(RuntimeError::LimitExceeded(format!(
+            "{context}: repeat template has {relation_bindings} PipeWire relation bindings; the limit is {MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM}"
         )));
     }
     let audio_controls = descendants
@@ -2884,6 +3012,7 @@ fn analyze_contextual_repeat(
     document: &HtmlDocument,
     template_slot: usize,
     template_prototype_order: usize,
+    source: ContextualRepeatSource,
     ordinal: usize,
     context: &str,
 ) -> Result<ContextualRepeatDeclaration, RuntimeError> {
@@ -2966,16 +3095,21 @@ fn analyze_contextual_repeat(
                         format!("unknown contextual built-in element `{kind_name}`"),
                     )
                 })?;
+                let range_allowed = source == ContextualRepeatSource::Channels;
                 if !matches!(
                     kind,
                     BuiltInElementKind::StateText
                         | BuiltInElementKind::StateToken
                         | BuiltInElementKind::StateValue
-                        | BuiltInElementKind::RangeControl
-                ) {
+                ) && !(range_allowed && kind == BuiltInElementKind::RangeControl)
+                {
                     return Err(invalid_declaration(
                         context,
-                        format!("`{}` is forbidden inside `item.channels`", kind.as_str()),
+                        format!(
+                            "`{}` is forbidden inside `{}`",
+                            kind.as_str(),
+                            source.as_str()
+                        ),
                     ));
                 }
                 let definition = definition(kind);
@@ -3001,13 +3135,13 @@ fn analyze_contextual_repeat(
                 let local_id = local_id.filter(|value| !value.is_empty()).ok_or_else(|| {
                     invalid_declaration(
                         context,
-                        "registered channel descendant requires `data-htm-local-id`",
+                        "registered contextual descendant requires `data-htm-local-id`",
                     )
                 })?;
                 if !local_ids.insert(local_id.to_owned()) {
                     return Err(invalid_declaration(
                         context,
-                        format!("duplicate channel local id `{local_id}`"),
+                        format!("duplicate contextual local id `{local_id}`"),
                     ));
                 }
                 let binding;
@@ -3031,13 +3165,16 @@ fn analyze_contextual_repeat(
                         let parsed = binding_value.parse::<ItemBindingKey>().map_err(|()| {
                             invalid_declaration(
                                 context,
-                                format!("unsupported channel binding `{binding_value}`"),
+                                format!("unsupported contextual binding `{binding_value}`"),
                             )
                         })?;
-                        if !parsed.supports_channel() {
+                        if !parsed.supports_contextual(source) {
                             return Err(invalid_declaration(
                                 context,
-                                format!("`{binding_value}` is not a channel binding"),
+                                format!(
+                                    "`{binding_value}` is not valid inside `{}`",
+                                    source.as_str()
+                                ),
                             ));
                         }
                         value_format = match kind {
@@ -3072,7 +3209,7 @@ fn analyze_contextual_repeat(
                                 return Err(invalid_declaration(
                                     context,
                                     format!(
-                                        "channel binding `{binding_value}` does not support `{}`",
+                                        "contextual binding `{binding_value}` does not support `{}`",
                                         kind.as_str()
                                     ),
                                 ));
@@ -3081,6 +3218,15 @@ fn analyze_contextual_repeat(
                         binding = Some(parsed);
                     }
                     BuiltInElementKind::RangeControl => {
+                        if source != ContextualRepeatSource::Channels {
+                            return Err(invalid_declaration(
+                                context,
+                                format!(
+                                    "`range-control` is forbidden inside `{}`",
+                                    source.as_str()
+                                ),
+                            ));
+                        }
                         if element.attr(local_name!("type")) != Some("range")
                             || !node.children.is_empty()
                         {
@@ -3137,9 +3283,27 @@ fn analyze_contextual_repeat(
                     value_format,
                     prototype_order: order,
                 });
-                if descendants.len() > MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM {
+                let binding_limit = if source == ContextualRepeatSource::Channels {
+                    MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM
+                } else {
+                    MAX_PIPEWIRE_GRAPH_BINDINGS_PER_ITEM
+                };
+                if descendants.len() > binding_limit {
                     return Err(RuntimeError::LimitExceeded(format!(
-                        "{context}: channel template exceeds {MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM} registered bindings"
+                        "{context}: `{}` template exceeds {binding_limit} registered bindings",
+                        source.as_str()
+                    )));
+                }
+                let relation_bindings = descendants
+                    .iter()
+                    .filter(|descendant| {
+                        descendant.binding.is_some_and(ItemBindingKey::is_relation)
+                    })
+                    .count();
+                if relation_bindings > MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM {
+                    return Err(RuntimeError::LimitExceeded(format!(
+                        "{context}: `{}` template exceeds {MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM} relation bindings",
+                        source.as_str()
                     )));
                 }
             } else {
@@ -3148,7 +3312,7 @@ fn analyze_contextual_repeat(
                 {
                     return Err(invalid_declaration(
                         context,
-                        "static channel local IDs must be nonempty and template-unique",
+                        "static contextual local IDs must be nonempty and template-unique",
                     ));
                 }
                 for attribute in element.attrs() {
@@ -3158,7 +3322,7 @@ fn analyze_contextual_repeat(
                         return Err(invalid_declaration(
                             context,
                             format!(
-                                "unsupported channel-template attribute `{}`",
+                                "unsupported contextual-template attribute `{}`",
                                 attribute.name.local
                             ),
                         ));
@@ -3184,7 +3348,8 @@ fn analyze_contextual_repeat(
         )));
     }
     Ok(ContextualRepeatDeclaration {
-        id: format!("channels-{ordinal}"),
+        id: format!("{}-{ordinal}", source.as_str().trim_start_matches("item.")),
+        source,
         template_prototype_order,
         descendants,
         prototype_nodes: prototype_order,
@@ -3218,9 +3383,17 @@ fn item_value_formats(binding: ItemBindingKey) -> &'static [StateValueFormat] {
         ItemBindingKey::Percentage | ItemBindingKey::HealthPercentage => {
             &[StateValueFormat::Raw, StateValueFormat::Percent]
         }
-        ItemBindingKey::RawId | ItemBindingKey::ChannelCount | ItemBindingKey::Index => {
-            &[StateValueFormat::Raw]
-        }
+        ItemBindingKey::RawId
+        | ItemBindingKey::ChannelCount
+        | ItemBindingKey::Index
+        | ItemBindingKey::SourcePortId
+        | ItemBindingKey::TargetPortId
+        | ItemBindingKey::SourceRawId
+        | ItemBindingKey::TargetRawId
+        | ItemBindingKey::MemberCount
+        | ItemBindingKey::RepresentativeLinkRawId
+        | ItemBindingKey::LinkGroupCount
+        | ItemBindingKey::PeerRawId => &[StateValueFormat::Raw],
         ItemBindingKey::Volume => &[StateValueFormat::Raw, StateValueFormat::Percent],
         _ => &[],
     }
@@ -3448,7 +3621,7 @@ mod tests {
         assert!(validate_definitions(&DEFINITIONS).is_ok());
         let duplicate = [DEFINITIONS[0], DEFINITIONS[0]];
         assert!(validate_definitions(&duplicate).is_err());
-        assert_eq!(StateBindingKey::ALL.len(), 81);
+        assert_eq!(StateBindingKey::ALL.len(), 83);
         assert!(StateBindingKey::ALL.contains(&StateBindingKey::UPowerOnBattery));
         assert!(StateBindingKey::ALL.contains(&StateBindingKey::PowerProfileCurrent));
         assert_eq!(ShellAction::ALL.len(), 14);
@@ -3490,7 +3663,7 @@ mod tests {
         assert!(StateBindingKey::SurfaceScaleProfile.supports(StateValueKind::Token));
         assert!(!StateBindingKey::SurfaceScaleProfile.supports(StateValueKind::Text));
         assert!(!StateBindingKey::ClockTime.supports(StateValueKind::Token));
-        assert_eq!(StateToken::ALL.len(), 89);
+        assert_eq!(StateToken::ALL.len(), 99);
         assert!(StateToken::ALL.contains(&StateToken::BluetoothGeneric));
         assert!(StateToken::ALL.contains(&StateToken::HighTemperature));
         assert!(StateToken::Open.valid_for(StateBindingKey::OverlayStatus));
@@ -3923,6 +4096,100 @@ mod tests {
             })
             .collect::<String>();
         assert!(discover(&excessive, BuiltInSurfaceKind::Overlay).is_err());
+    }
+
+    #[test]
+    fn pipewire_graph_repeats_relations_and_contexts_are_narrowly_typed() {
+        let index = discover(
+            r#"
+            <data id="links-count" data-htm-element="state-value" data-htm-bind="pipewire.link_count"></data>
+            <data id="groups-count" data-htm-element="state-value" data-htm-bind="pipewire.link_group_count"></data>
+            <template id="links" data-htm-element="repeat" data-htm-source="pipewire.links">
+              <article>
+                <span data-htm-element="state-token" data-htm-local-id="state" data-htm-bind="item.state"></span>
+                <span data-htm-element="state-text" data-htm-local-id="source" data-htm-bind="item.source.description"></span>
+                <data data-htm-element="state-value" data-htm-local-id="port" data-htm-bind="item.source_port_id"></data>
+              </article>
+            </template>
+            <template id="groups" data-htm-element="repeat" data-htm-source="pipewire.link_groups">
+              <article>
+                <data data-htm-element="state-value" data-htm-local-id="members" data-htm-bind="item.member_count"></data>
+                <template data-htm-element="repeat" data-htm-source="item.links">
+                  <div>
+                    <span data-htm-element="state-text" data-htm-local-id="target" data-htm-bind="item.target.name"></span>
+                  </div>
+                </template>
+              </article>
+            </template>
+            <template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes">
+              <article>
+                <data data-htm-element="state-value" data-htm-local-id="tracked" data-htm-bind="item.link_group_count"></data>
+                <template data-htm-element="repeat" data-htm-source="item.link_groups">
+                  <div>
+                    <span data-htm-element="state-token" data-htm-local-id="direction" data-htm-bind="item.connection_direction"></span>
+                    <span data-htm-element="state-text" data-htm-local-id="peer" data-htm-bind="item.peer.description"></span>
+                  </div>
+                </template>
+              </article>
+            </template>
+            "#,
+            BuiltInSurfaceKind::Overlay,
+        )
+        .unwrap();
+        let declarations = index.repeat_declarations();
+        assert_eq!(
+            declarations
+                .iter()
+                .map(|repeat| repeat.source)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                RepeatSource::PipeWireNodes,
+                RepeatSource::PipeWireLinks,
+                RepeatSource::PipeWireLinkGroups,
+            ])
+        );
+        let groups = declarations
+            .iter()
+            .find(|repeat| repeat.source == RepeatSource::PipeWireLinkGroups)
+            .unwrap();
+        assert_eq!(
+            groups.contextual_repeats[0].source,
+            ContextualRepeatSource::GroupLinks
+        );
+        let nodes = declarations
+            .iter()
+            .find(|repeat| repeat.source == RepeatSource::PipeWireNodes)
+            .unwrap();
+        assert_eq!(
+            nodes.contextual_repeats[0].source,
+            ContextualRepeatSource::NodeLinkGroups
+        );
+
+        for invalid in [
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="item.links"><div></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="item.link_groups"><div></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><template data-htm-element="repeat" data-htm-source="item.links"><div></div></template></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="pipewire.link_groups"><div><template data-htm-element="repeat" data-htm-source="item.link_groups"><div></div></template></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="pipewire.links"><div><template data-htm-element="repeat" data-htm-source="item.links"><div></div></template></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="upower.devices"><div><template data-htm-element="repeat" data-htm-source="item.link_groups"><div></div></template></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="power_profile.holds"><div><template data-htm-element="repeat" data-htm-source="item.link_groups"><div></div></template></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="pipewire.links"><div><button data-htm-element="action-button" data-htm-local-id="action" data-htm-action="overlay.close"></button></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="pipewire.link_groups"><div><template data-htm-element="repeat" data-htm-source="item.links"><div><template data-htm-element="repeat" data-htm-source="item.links"><div></div></template></div></template></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="pipewire.links"><div><span data-htm-element="state-text" data-htm-local-id="bad" data-htm-bind="item.source.parent.name"></span></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="pipewire.links"><div><span data-htm-element="state-text" data-htm-local-id="bad" data-htm-bind="../source.name"></span></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="pipewire.links"><div><span data-htm-element="state-text" data-htm-local-id="bad" data-htm-bind="item.source[0].name"></span></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="pipewire.links"><div><span data-htm-element="state-text" data-htm-local-id="bad" data-htm-bind="item.source.unknown"></span></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="pipewire.link_groups"><div><span data-htm-element="state-text" data-htm-local-id="bad" data-htm-bind="item.peer.name"></span></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="pipewire.link_groups"><div><template data-htm-element="repeat" data-htm-source="item.links"><div id="normal"></div></template></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="pipewire.links"><div id="normal"></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="pipewire.links"><div><input type="range" data-htm-element="range-control" data-htm-local-id="range" data-htm-bind="item.state"></div></template>"#,
+            r#"<template id="bad" data-htm-element="repeat" data-htm-source="pipewire.links"><div><time data-htm-element="clock-text" data-htm-local-id="clock" data-htm-format="%H"></time></div></template>"#,
+        ] {
+            assert!(
+                discover(invalid, BuiltInSurfaceKind::Overlay).is_err(),
+                "{invalid}"
+            );
+        }
     }
 
     #[test]

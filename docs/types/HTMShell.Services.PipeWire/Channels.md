@@ -32,6 +32,9 @@ The contextual clone permits ordinary HTML, `state-text`, `state-token`,
 `state-value`, and a channel [`range-control`](../HTMShell.Elements/range-control.md).
 Normal `id`, action buttons, clocks, and nested repeats are rejected.
 
+`item.channels` and node `item.link_groups` may be siblings in one node
+template. Neither contextual collection may contain the other.
+
 ## Ordering and fallback
 
 Collection order is PipeWire's volume-vector order. It is not alphabetic or

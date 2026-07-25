@@ -1,6 +1,6 @@
 # `HTMShell.Services.PipeWire`
 
-Process-scoped PipeWire node state and typed audio controls.
+Process-scoped PipeWire graph state and typed audio controls.
 
 ## Types
 
@@ -16,6 +16,11 @@ Process-scoped PipeWire node state and typed audio controls.
 - [`AudioChannel`](AudioChannel.md): ordered channel state and position tokens
 - [`Channels`](Channels.md): contextual repetition, ordering, and fallback layouts
 - [`ChannelControls`](ChannelControls.md): full-vector per-channel writes
+- [`Link`](Link.md): individual PipeWire port links
+- [`LinkGroup`](LinkGroup.md): source-target groups and member links
+- [`LinkState`](LinkState.md): complete link state tokens
+- [`Relations`](Relations.md): typed source, target, and peer projections
+- [`NodeLinks`](NodeLinks.md): contextual node connection tracking
 
-The module does not expose channel mute, channel-map writes, links, peak
-monitoring, preferred-default writes, or stream movement.
+The module does not expose channel mute, channel-map writes, link mutation,
+peak monitoring, preferred-default writes, or stream movement.

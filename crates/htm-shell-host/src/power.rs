@@ -909,6 +909,8 @@ fn device_repeat_item(device: &UPowerDeviceSnapshot) -> RepeatItemSnapshot {
         values,
         properties: BTreeMap::new(),
         channels: None,
+        links: None,
+        link_groups: None,
     }
 }
 
@@ -927,6 +929,8 @@ fn hold_repeat_item(hold: &PowerProfileHold) -> RepeatItemSnapshot {
         values: BTreeMap::new(),
         properties: BTreeMap::new(),
         channels: None,
+        links: None,
+        link_groups: None,
     }
 }
 

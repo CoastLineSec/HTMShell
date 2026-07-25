@@ -6,6 +6,15 @@ pub const MAX_UPOWER_DEVICES_PER_PROCESS: usize = 128;
 pub const MAX_POWER_PROFILE_HOLDS_PER_PROCESS: usize = 128;
 pub const MAX_PIPEWIRE_NODES_PER_PROCESS: usize = 4_096;
 pub const MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT: usize = 16;
+pub const MAX_PIPEWIRE_LINKS_PER_PROCESS: usize = 16_384;
+pub const MAX_PIPEWIRE_LINK_GROUPS_PER_PROCESS: usize = 4_096;
+pub const MAX_PIPEWIRE_LINK_REPEAT_DECLARATIONS_PER_DOCUMENT: usize = 16;
+pub const MAX_PIPEWIRE_LINK_GROUP_REPEAT_DECLARATIONS_PER_DOCUMENT: usize = 16;
+pub const MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT: usize = 32;
+pub const MAX_CONTEXTUAL_LINK_REPEATS_PER_GROUP_TEMPLATE: usize = 8;
+pub const MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE: usize = 8;
+pub const MAX_PIPEWIRE_GRAPH_BINDINGS_PER_ITEM: usize = 64;
+pub const MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM: usize = 64;
 pub const MAX_PIPEWIRE_BINDINGS_PER_ITEM: usize = 64;
 pub const MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM: usize = 32;
 pub const MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT: usize = 64;
@@ -23,7 +32,7 @@ pub const MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM: usize = 8;
 pub const MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_DOCUMENT: usize = 256;
 pub const MAX_RANGE_NUMBER_BYTES: usize = 32;
 pub const MAX_PIPEWIRE_PERCEPTUAL_VOLUME: f64 = 2.0;
-pub const MAX_ITEMS_PER_REPEAT: usize = MAX_PIPEWIRE_NODES_PER_PROCESS;
+pub const MAX_ITEMS_PER_REPEAT: usize = MAX_PIPEWIRE_LINKS_PER_PROCESS;
 pub const MAX_CLONED_NODES_PER_REPEAT: usize = 4_096;
 pub const MAX_CLONED_NODES_PER_DOCUMENT: usize = 16_384;
 pub const MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE: usize = 64;
@@ -34,13 +43,17 @@ pub enum RepeatSource {
     UPowerDevices,
     PowerProfileHolds,
     PipeWireNodes,
+    PipeWireLinks,
+    PipeWireLinkGroups,
 }
 
 impl RepeatSource {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 5] = [
         Self::UPowerDevices,
         Self::PowerProfileHolds,
         Self::PipeWireNodes,
+        Self::PipeWireLinks,
+        Self::PipeWireLinkGroups,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -48,6 +61,8 @@ impl RepeatSource {
             Self::UPowerDevices => "upower.devices",
             Self::PowerProfileHolds => "power_profile.holds",
             Self::PipeWireNodes => "pipewire.nodes",
+            Self::PipeWireLinks => "pipewire.links",
+            Self::PipeWireLinkGroups => "pipewire.link_groups",
         }
     }
 }
@@ -60,8 +75,55 @@ impl std::str::FromStr for RepeatSource {
             "upower.devices" => Ok(Self::UPowerDevices),
             "power_profile.holds" => Ok(Self::PowerProfileHolds),
             "pipewire.nodes" => Ok(Self::PipeWireNodes),
+            "pipewire.links" => Ok(Self::PipeWireLinks),
+            "pipewire.link_groups" => Ok(Self::PipeWireLinkGroups),
             _ => Err(()),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ContextualRepeatSource {
+    Channels,
+    GroupLinks,
+    NodeLinkGroups,
+}
+
+impl ContextualRepeatSource {
+    pub const ALL: [Self; 3] = [Self::Channels, Self::GroupLinks, Self::NodeLinkGroups];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Channels => "item.channels",
+            Self::GroupLinks => "item.links",
+            Self::NodeLinkGroups => "item.link_groups",
+        }
+    }
+
+    pub const fn parent(self) -> RepeatSource {
+        match self {
+            Self::Channels | Self::NodeLinkGroups => RepeatSource::PipeWireNodes,
+            Self::GroupLinks => RepeatSource::PipeWireLinkGroups,
+        }
+    }
+
+    pub const fn item_limit(self) -> usize {
+        match self {
+            Self::Channels => MAX_PIPEWIRE_CHANNELS_PER_NODE,
+            Self::GroupLinks => MAX_PIPEWIRE_LINKS_PER_PROCESS,
+            Self::NodeLinkGroups => MAX_PIPEWIRE_LINK_GROUPS_PER_PROCESS,
+        }
+    }
+}
+
+impl std::str::FromStr for ContextualRepeatSource {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|source| source.as_str() == value)
+            .ok_or(())
     }
 }
 
@@ -116,10 +178,45 @@ pub enum ItemBindingKey {
     Status,
     IsAuxiliary,
     IsCustom,
+    SourcePortId,
+    TargetPortId,
+    IsMonitor,
+    SourceStatus,
+    SourceName,
+    SourceNickname,
+    SourceDescription,
+    SourceMediaClass,
+    SourceNodeType,
+    SourceNodeState,
+    SourceDirection,
+    SourceRawId,
+    TargetStatus,
+    TargetName,
+    TargetNickname,
+    TargetDescription,
+    TargetMediaClass,
+    TargetNodeType,
+    TargetNodeState,
+    TargetDirection,
+    TargetRawId,
+    MemberCount,
+    RepresentativeLinkRawId,
+    LinkGroupCount,
+    LinkGroupStatus,
+    ConnectionDirection,
+    PeerStatus,
+    PeerName,
+    PeerNickname,
+    PeerDescription,
+    PeerMediaClass,
+    PeerNodeType,
+    PeerNodeState,
+    PeerDirection,
+    PeerRawId,
 }
 
 impl ItemBindingKey {
-    pub const ALL: [Self; 49] = [
+    pub const ALL: [Self; 84] = [
         Self::Ready,
         Self::Type,
         Self::PowerSupply,
@@ -169,6 +266,41 @@ impl ItemBindingKey {
         Self::Status,
         Self::IsAuxiliary,
         Self::IsCustom,
+        Self::SourcePortId,
+        Self::TargetPortId,
+        Self::IsMonitor,
+        Self::SourceStatus,
+        Self::SourceName,
+        Self::SourceNickname,
+        Self::SourceDescription,
+        Self::SourceMediaClass,
+        Self::SourceNodeType,
+        Self::SourceNodeState,
+        Self::SourceDirection,
+        Self::SourceRawId,
+        Self::TargetStatus,
+        Self::TargetName,
+        Self::TargetNickname,
+        Self::TargetDescription,
+        Self::TargetMediaClass,
+        Self::TargetNodeType,
+        Self::TargetNodeState,
+        Self::TargetDirection,
+        Self::TargetRawId,
+        Self::MemberCount,
+        Self::RepresentativeLinkRawId,
+        Self::LinkGroupCount,
+        Self::LinkGroupStatus,
+        Self::ConnectionDirection,
+        Self::PeerStatus,
+        Self::PeerName,
+        Self::PeerNickname,
+        Self::PeerDescription,
+        Self::PeerMediaClass,
+        Self::PeerNodeType,
+        Self::PeerNodeState,
+        Self::PeerDirection,
+        Self::PeerRawId,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -222,6 +354,41 @@ impl ItemBindingKey {
             Self::Status => "item.status",
             Self::IsAuxiliary => "item.is_auxiliary",
             Self::IsCustom => "item.is_custom",
+            Self::SourcePortId => "item.source_port_id",
+            Self::TargetPortId => "item.target_port_id",
+            Self::IsMonitor => "item.is_monitor",
+            Self::SourceStatus => "item.source.status",
+            Self::SourceName => "item.source.name",
+            Self::SourceNickname => "item.source.nickname",
+            Self::SourceDescription => "item.source.description",
+            Self::SourceMediaClass => "item.source.media_class",
+            Self::SourceNodeType => "item.source.node_type",
+            Self::SourceNodeState => "item.source.node_state",
+            Self::SourceDirection => "item.source.direction",
+            Self::SourceRawId => "item.source.raw_id",
+            Self::TargetStatus => "item.target.status",
+            Self::TargetName => "item.target.name",
+            Self::TargetNickname => "item.target.nickname",
+            Self::TargetDescription => "item.target.description",
+            Self::TargetMediaClass => "item.target.media_class",
+            Self::TargetNodeType => "item.target.node_type",
+            Self::TargetNodeState => "item.target.node_state",
+            Self::TargetDirection => "item.target.direction",
+            Self::TargetRawId => "item.target.raw_id",
+            Self::MemberCount => "item.member_count",
+            Self::RepresentativeLinkRawId => "item.representative_link_raw_id",
+            Self::LinkGroupCount => "item.link_group_count",
+            Self::LinkGroupStatus => "item.link_group_status",
+            Self::ConnectionDirection => "item.connection_direction",
+            Self::PeerStatus => "item.peer.status",
+            Self::PeerName => "item.peer.name",
+            Self::PeerNickname => "item.peer.nickname",
+            Self::PeerDescription => "item.peer.description",
+            Self::PeerMediaClass => "item.peer.media_class",
+            Self::PeerNodeType => "item.peer.node_type",
+            Self::PeerNodeState => "item.peer.node_state",
+            Self::PeerDirection => "item.peer.direction",
+            Self::PeerRawId => "item.peer.raw_id",
         }
     }
 
@@ -276,7 +443,11 @@ impl ItemBindingKey {
                     | Self::CanSetMute
                     | Self::ChannelCount
                     | Self::ChannelStatus
+                    | Self::LinkGroupCount
+                    | Self::LinkGroupStatus
             ),
+            RepeatSource::PipeWireLinks => self.supports_link(),
+            RepeatSource::PipeWireLinkGroups => self.supports_link_group(),
         }
     }
 
@@ -291,6 +462,123 @@ impl ItemBindingKey {
                 | Self::CanSetVolume
                 | Self::IsAuxiliary
                 | Self::IsCustom
+        )
+    }
+
+    pub const fn supports_link(self) -> bool {
+        matches!(
+            self,
+            Self::Ready
+                | Self::State
+                | Self::RawId
+                | Self::SourcePortId
+                | Self::TargetPortId
+                | Self::IsMonitor
+                | Self::SourceStatus
+                | Self::SourceName
+                | Self::SourceNickname
+                | Self::SourceDescription
+                | Self::SourceMediaClass
+                | Self::SourceNodeType
+                | Self::SourceNodeState
+                | Self::SourceDirection
+                | Self::SourceRawId
+                | Self::TargetStatus
+                | Self::TargetName
+                | Self::TargetNickname
+                | Self::TargetDescription
+                | Self::TargetMediaClass
+                | Self::TargetNodeType
+                | Self::TargetNodeState
+                | Self::TargetDirection
+                | Self::TargetRawId
+        )
+    }
+
+    pub const fn supports_link_group(self) -> bool {
+        matches!(
+            self,
+            Self::Ready
+                | Self::State
+                | Self::IsMonitor
+                | Self::MemberCount
+                | Self::RepresentativeLinkRawId
+                | Self::SourceStatus
+                | Self::SourceName
+                | Self::SourceNickname
+                | Self::SourceDescription
+                | Self::SourceMediaClass
+                | Self::SourceNodeType
+                | Self::SourceNodeState
+                | Self::SourceDirection
+                | Self::SourceRawId
+                | Self::TargetStatus
+                | Self::TargetName
+                | Self::TargetNickname
+                | Self::TargetDescription
+                | Self::TargetMediaClass
+                | Self::TargetNodeType
+                | Self::TargetNodeState
+                | Self::TargetDirection
+                | Self::TargetRawId
+        )
+    }
+
+    pub const fn supports_node_link_group(self) -> bool {
+        self.supports_link_group()
+            || matches!(
+                self,
+                Self::ConnectionDirection
+                    | Self::PeerStatus
+                    | Self::PeerName
+                    | Self::PeerNickname
+                    | Self::PeerDescription
+                    | Self::PeerMediaClass
+                    | Self::PeerNodeType
+                    | Self::PeerNodeState
+                    | Self::PeerDirection
+                    | Self::PeerRawId
+            )
+    }
+
+    pub const fn supports_contextual(self, source: ContextualRepeatSource) -> bool {
+        match source {
+            ContextualRepeatSource::Channels => self.supports_channel(),
+            ContextualRepeatSource::GroupLinks => self.supports_link(),
+            ContextualRepeatSource::NodeLinkGroups => self.supports_node_link_group(),
+        }
+    }
+
+    pub const fn is_relation(self) -> bool {
+        matches!(
+            self,
+            Self::SourceStatus
+                | Self::SourceName
+                | Self::SourceNickname
+                | Self::SourceDescription
+                | Self::SourceMediaClass
+                | Self::SourceNodeType
+                | Self::SourceNodeState
+                | Self::SourceDirection
+                | Self::SourceRawId
+                | Self::TargetStatus
+                | Self::TargetName
+                | Self::TargetNickname
+                | Self::TargetDescription
+                | Self::TargetMediaClass
+                | Self::TargetNodeType
+                | Self::TargetNodeState
+                | Self::TargetDirection
+                | Self::TargetRawId
+                | Self::PeerStatus
+                | Self::PeerName
+                | Self::PeerNickname
+                | Self::PeerDescription
+                | Self::PeerMediaClass
+                | Self::PeerNodeType
+                | Self::PeerNodeState
+                | Self::PeerDirection
+                | Self::PeerRawId
         )
     }
 
@@ -335,6 +623,33 @@ impl ItemBindingKey {
                 | Self::Status
                 | Self::IsAuxiliary
                 | Self::IsCustom
+                | Self::IsMonitor
+                | Self::SourceStatus
+                | Self::SourceName
+                | Self::SourceNickname
+                | Self::SourceDescription
+                | Self::SourceMediaClass
+                | Self::SourceNodeType
+                | Self::SourceNodeState
+                | Self::SourceDirection
+                | Self::TargetStatus
+                | Self::TargetName
+                | Self::TargetNickname
+                | Self::TargetDescription
+                | Self::TargetMediaClass
+                | Self::TargetNodeType
+                | Self::TargetNodeState
+                | Self::TargetDirection
+                | Self::LinkGroupStatus
+                | Self::ConnectionDirection
+                | Self::PeerStatus
+                | Self::PeerName
+                | Self::PeerNickname
+                | Self::PeerDescription
+                | Self::PeerMediaClass
+                | Self::PeerNodeType
+                | Self::PeerNodeState
+                | Self::PeerDirection
         )
     }
 
@@ -369,6 +684,21 @@ impl ItemBindingKey {
                 | Self::Status
                 | Self::IsAuxiliary
                 | Self::IsCustom
+                | Self::IsMonitor
+                | Self::SourceStatus
+                | Self::SourceNodeType
+                | Self::SourceNodeState
+                | Self::SourceDirection
+                | Self::TargetStatus
+                | Self::TargetNodeType
+                | Self::TargetNodeState
+                | Self::TargetDirection
+                | Self::LinkGroupStatus
+                | Self::ConnectionDirection
+                | Self::PeerStatus
+                | Self::PeerNodeType
+                | Self::PeerNodeState
+                | Self::PeerDirection
         )
     }
 
@@ -386,6 +716,14 @@ impl ItemBindingKey {
                 | Self::Volume
                 | Self::ChannelCount
                 | Self::Index
+                | Self::SourcePortId
+                | Self::TargetPortId
+                | Self::SourceRawId
+                | Self::TargetRawId
+                | Self::MemberCount
+                | Self::RepresentativeLinkRawId
+                | Self::LinkGroupCount
+                | Self::PeerRawId
         )
     }
 }
@@ -595,6 +933,18 @@ pub struct RepeatItemSnapshot {
     pub values: BTreeMap<ItemBindingKey, NumericValue>,
     pub properties: BTreeMap<String, String>,
     pub channels: Option<ContextualRepeatSnapshot>,
+    pub links: Option<ContextualRepeatSnapshot>,
+    pub link_groups: Option<ContextualRepeatSnapshot>,
+}
+
+impl RepeatItemSnapshot {
+    pub fn contextual(&self, source: ContextualRepeatSource) -> Option<&ContextualRepeatSnapshot> {
+        match source {
+            ContextualRepeatSource::Channels => self.channels.as_ref(),
+            ContextualRepeatSource::GroupLinks => self.links.as_ref(),
+            ContextualRepeatSource::NodeLinkGroups => self.link_groups.as_ref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -620,6 +970,12 @@ pub struct PipeWireDocumentDemand {
     pub audio_writes: bool,
     pub channel_projection: bool,
     pub channel_writes: bool,
+    pub link_collection: bool,
+    pub link_details: bool,
+    pub link_group_collection: bool,
+    pub group_members: bool,
+    pub node_link_tracking: bool,
+    pub relation_projection: bool,
     pub property_keys: std::collections::BTreeSet<String>,
 }
 
@@ -633,6 +989,12 @@ impl PipeWireDocumentDemand {
             && !self.audio_writes
             && !self.channel_projection
             && !self.channel_writes
+            && !self.link_collection
+            && !self.link_details
+            && !self.link_group_collection
+            && !self.group_members
+            && !self.node_link_tracking
+            && !self.relation_projection
             && self.property_keys.is_empty()
     }
 
@@ -645,6 +1007,12 @@ impl PipeWireDocumentDemand {
         self.audio_writes |= other.audio_writes;
         self.channel_projection |= other.channel_projection;
         self.channel_writes |= other.channel_writes;
+        self.link_collection |= other.link_collection;
+        self.link_details |= other.link_details;
+        self.link_group_collection |= other.link_group_collection;
+        self.group_members |= other.group_members;
+        self.node_link_tracking |= other.node_link_tracking;
+        self.relation_projection |= other.relation_projection;
         self.property_keys
             .extend(other.property_keys.iter().cloned());
     }
