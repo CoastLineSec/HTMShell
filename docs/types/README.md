@@ -66,3 +66,6 @@ Process-scoped PipeWire node and audio state.
 - [`AudioNode`](HTMShell.Services.PipeWire/AudioNode.md)
 - [`AudioControls`](HTMShell.Services.PipeWire/AudioControls.md)
 - [`Volume`](HTMShell.Services.PipeWire/Volume.md)
+- [`AudioChannel`](HTMShell.Services.PipeWire/AudioChannel.md)
+- [`Channels`](HTMShell.Services.PipeWire/Channels.md)
+- [`ChannelControls`](HTMShell.Services.PipeWire/ChannelControls.md)

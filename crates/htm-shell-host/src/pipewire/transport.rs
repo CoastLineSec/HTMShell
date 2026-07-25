@@ -951,6 +951,7 @@ fn parse_audio_properties(
     }
     let mut muted = None;
     let mut channel_volumes = None;
+    let mut channel_positions = None;
     for property in object.properties {
         match (property.key, property.value) {
             (pipewire::spa::sys::SPA_PROP_mute, Value::Bool(value)) => muted = Some(value),
@@ -967,8 +968,18 @@ fn parse_audio_properties(
                 }
                 channel_volumes = Some(values);
             }
+            (
+                pipewire::spa::sys::SPA_PROP_channelMap,
+                Value::ValueArray(ValueArray::Id(values)),
+            ) => {
+                if values.len() > MAX_AUDIO_CHANNELS {
+                    return Err(format!("node {raw_id} returned an excessive channel map"));
+                }
+                channel_positions = Some(values.into_iter().map(|value| value.0).collect());
+            }
             (pipewire::spa::sys::SPA_PROP_mute, _)
-            | (pipewire::spa::sys::SPA_PROP_channelVolumes, _) => {
+            | (pipewire::spa::sys::SPA_PROP_channelVolumes, _)
+            | (pipewire::spa::sys::SPA_PROP_channelMap, _) => {
                 return Err(format!(
                     "node {raw_id} returned an invalid audio property type"
                 ));
@@ -976,12 +987,13 @@ fn parse_audio_properties(
             _ => {}
         }
     }
-    if muted.is_none() && channel_volumes.is_none() {
+    if muted.is_none() && channel_volumes.is_none() && channel_positions.is_none() {
         return Ok(None);
     }
     Ok(Some(RawNodeAudioInfo {
         raw_id,
         channel_volumes,
+        channel_positions,
         muted,
     }))
 }
@@ -1061,6 +1073,13 @@ mod tests {
                 pipewire::spa::sys::SPA_PROP_channelVolumes,
                 Value::ValueArray(ValueArray::Float(vec![1.0, 0.125])),
             ),
+            Property::new(
+                pipewire::spa::sys::SPA_PROP_channelMap,
+                Value::ValueArray(ValueArray::Id(vec![
+                    pipewire::spa::utils::Id(3),
+                    pipewire::spa::utils::Id(4),
+                ])),
+            ),
         ])
         .unwrap();
         let pod = Pod::from_bytes(&bytes).unwrap();
@@ -1068,6 +1087,7 @@ mod tests {
         assert_eq!(info.raw_id, 42);
         assert_eq!(info.muted, Some(true));
         assert_eq!(info.channel_volumes, Some(vec![1.0, 0.125]));
+        assert_eq!(info.channel_positions, Some(vec![3, 4]));
     }
 
     #[test]

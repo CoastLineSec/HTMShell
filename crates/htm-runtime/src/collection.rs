@@ -1,4 +1,3 @@
-use crate::StateToken;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -16,6 +15,12 @@ pub const MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT: usize = 128;
 pub const MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM: usize = 16;
 pub const MAX_RANGE_CONTROLS_PER_DOCUMENT: usize = 64;
 pub const MAX_RANGE_CONTROLS_PER_ITEM: usize = 8;
+pub const MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE: usize = 8;
+pub const MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT: usize = 32;
+pub const MAX_PIPEWIRE_CHANNELS_PER_NODE: usize = 64;
+pub const MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM: usize = 64;
+pub const MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM: usize = 8;
+pub const MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_DOCUMENT: usize = 256;
 pub const MAX_RANGE_NUMBER_BYTES: usize = 32;
 pub const MAX_PIPEWIRE_PERCEPTUAL_VOLUME: f64 = 2.0;
 pub const MAX_ITEMS_PER_REPEAT: usize = MAX_PIPEWIRE_NODES_PER_PROCESS;
@@ -103,10 +108,18 @@ pub enum ItemBindingKey {
     MuteState,
     CanSetVolume,
     CanSetMute,
+    ChannelCount,
+    ChannelStatus,
+    PositionName,
+    Position,
+    Index,
+    Status,
+    IsAuxiliary,
+    IsCustom,
 }
 
 impl ItemBindingKey {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 49] = [
         Self::Ready,
         Self::Type,
         Self::PowerSupply,
@@ -148,6 +161,14 @@ impl ItemBindingKey {
         Self::MuteState,
         Self::CanSetVolume,
         Self::CanSetMute,
+        Self::ChannelCount,
+        Self::ChannelStatus,
+        Self::PositionName,
+        Self::Position,
+        Self::Index,
+        Self::Status,
+        Self::IsAuxiliary,
+        Self::IsCustom,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -193,6 +214,14 @@ impl ItemBindingKey {
             Self::MuteState => "item.mute_state",
             Self::CanSetVolume => "item.can_set_volume",
             Self::CanSetMute => "item.can_set_mute",
+            Self::ChannelCount => "item.channel_count",
+            Self::ChannelStatus => "item.channel_status",
+            Self::PositionName => "item.position_name",
+            Self::Position => "item.position",
+            Self::Index => "item.index",
+            Self::Status => "item.status",
+            Self::IsAuxiliary => "item.is_auxiliary",
+            Self::IsCustom => "item.is_custom",
         }
     }
 
@@ -245,8 +274,24 @@ impl ItemBindingKey {
                     | Self::MuteState
                     | Self::CanSetVolume
                     | Self::CanSetMute
+                    | Self::ChannelCount
+                    | Self::ChannelStatus
             ),
         }
+    }
+
+    pub const fn supports_channel(self) -> bool {
+        matches!(
+            self,
+            Self::PositionName
+                | Self::Position
+                | Self::Index
+                | Self::Volume
+                | Self::Status
+                | Self::CanSetVolume
+                | Self::IsAuxiliary
+                | Self::IsCustom
+        )
     }
 
     pub const fn supports_text(self) -> bool {
@@ -284,6 +329,12 @@ impl ItemBindingKey {
                 | Self::MuteState
                 | Self::CanSetVolume
                 | Self::CanSetMute
+                | Self::ChannelStatus
+                | Self::PositionName
+                | Self::Position
+                | Self::Status
+                | Self::IsAuxiliary
+                | Self::IsCustom
         )
     }
 
@@ -313,6 +364,11 @@ impl ItemBindingKey {
                 | Self::MuteState
                 | Self::CanSetVolume
                 | Self::CanSetMute
+                | Self::ChannelStatus
+                | Self::Position
+                | Self::Status
+                | Self::IsAuxiliary
+                | Self::IsCustom
         )
     }
 
@@ -328,6 +384,8 @@ impl ItemBindingKey {
                 | Self::HealthPercentage
                 | Self::RawId
                 | Self::Volume
+                | Self::ChannelCount
+                | Self::Index
         )
     }
 }
@@ -533,9 +591,16 @@ fn format_duration(seconds: u64) -> String {
 pub struct RepeatItemSnapshot {
     pub key: String,
     pub text: BTreeMap<ItemBindingKey, String>,
-    pub tokens: BTreeMap<ItemBindingKey, StateToken>,
+    pub tokens: BTreeMap<ItemBindingKey, String>,
     pub values: BTreeMap<ItemBindingKey, NumericValue>,
     pub properties: BTreeMap<String, String>,
+    pub channels: Option<ContextualRepeatSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextualRepeatSnapshot {
+    pub source_generation: u64,
+    pub items: Vec<RepeatItemSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -553,6 +618,8 @@ pub struct PipeWireDocumentDemand {
     pub defaults: bool,
     pub audio_state: bool,
     pub audio_writes: bool,
+    pub channel_projection: bool,
+    pub channel_writes: bool,
     pub property_keys: std::collections::BTreeSet<String>,
 }
 
@@ -564,6 +631,8 @@ impl PipeWireDocumentDemand {
             && !self.defaults
             && !self.audio_state
             && !self.audio_writes
+            && !self.channel_projection
+            && !self.channel_writes
             && self.property_keys.is_empty()
     }
 
@@ -574,6 +643,8 @@ impl PipeWireDocumentDemand {
         self.defaults |= other.defaults;
         self.audio_state |= other.audio_state;
         self.audio_writes |= other.audio_writes;
+        self.channel_projection |= other.channel_projection;
+        self.channel_writes |= other.channel_writes;
         self.property_keys
             .extend(other.property_keys.iter().cloned());
     }

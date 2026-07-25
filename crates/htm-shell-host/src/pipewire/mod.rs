@@ -7,6 +7,7 @@ use htm_runtime::{
     PipeWireAudioOperation, PipeWireAudioTarget, PipeWireControlIdentity, PipeWireControlRequest,
     PipeWireControlState,
 };
+pub use model::PipeWireAudioChannelPosition;
 #[cfg(test)]
 use model::PipeWireAvailability;
 use model::PipeWireDelta;
@@ -43,13 +44,14 @@ struct PendingWrite<T> {
     sent: T,
     queued: Option<T>,
     started: Instant,
+    layout_generation: Option<u64>,
     controls: BTreeMap<PipeWireControlIdentity, PipeWireAudioTarget>,
 }
 
 #[derive(Debug, Default)]
 struct NodeWriteCoordinator {
     mute: Option<PendingWrite<bool>>,
-    volume: Option<PendingWrite<model::FiniteVolume>>,
+    volume: Option<PendingWrite<Vec<model::FiniteVolume>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,6 +348,21 @@ impl PipeWireSource {
                     .control_counters
                     .stale_writes_rejected
                     .saturating_add(1);
+                if matches!(
+                    request.operation,
+                    PipeWireAudioOperation::SetVolume | PipeWireAudioOperation::SetChannelVolume
+                ) {
+                    self.control_counters.stale_vectors_rejected = self
+                        .control_counters
+                        .stale_vectors_rejected
+                        .saturating_add(1);
+                    if matches!(request.operation, PipeWireAudioOperation::SetChannelVolume) {
+                        self.control_counters.layout_invalidated_intents = self
+                            .control_counters
+                            .layout_invalidated_intents
+                            .saturating_add(1);
+                    }
+                }
                 self.sync_control_counters();
                 return Err(error);
             }
@@ -361,6 +378,9 @@ impl PipeWireSource {
             PipeWireAudioOperation::Mute
             | PipeWireAudioOperation::Unmute
             | PipeWireAudioOperation::ToggleMute => {
+                if matches!(request.target, PipeWireAudioTarget::ChannelItem { .. }) {
+                    return Err("PipeWire mute operations cannot target a channel".into());
+                }
                 if !node.audio.can_set_mute {
                     return Err("PipeWire audio target does not permit mute control".into());
                 }
@@ -372,7 +392,8 @@ impl PipeWireSource {
                     PipeWireAudioOperation::Mute => true,
                     PipeWireAudioOperation::Unmute => false,
                     PipeWireAudioOperation::ToggleMute => !current,
-                    PipeWireAudioOperation::SetVolume => unreachable!(),
+                    PipeWireAudioOperation::SetVolume
+                    | PipeWireAudioOperation::SetChannelVolume => unreachable!(),
                 };
                 if self
                     .writes
@@ -411,6 +432,7 @@ impl PipeWireSource {
                         sent: desired,
                         queued: None,
                         started: Instant::now(),
+                        layout_generation: None,
                         controls: BTreeMap::from([(
                             request.control.clone(),
                             request.target.clone(),
@@ -418,29 +440,73 @@ impl PipeWireSource {
                     });
                 }
             }
-            PipeWireAudioOperation::SetVolume => {
+            PipeWireAudioOperation::SetVolume | PipeWireAudioOperation::SetChannelVolume => {
+                if matches!(request.operation, PipeWireAudioOperation::SetVolume)
+                    == matches!(request.target, PipeWireAudioTarget::ChannelItem { .. })
+                {
+                    return Err("PipeWire volume operation and target do not match".into());
+                }
                 if !node.audio.can_set_volume {
                     return Err("PipeWire audio target does not permit volume control".into());
                 }
-                let desired = request
+                let desired_value = request
                     .volume
                     .and_then(|volume| model::FiniteVolume::new(volume.get() as f32))
                     .filter(|volume| volume.get() <= model::MAX_PERCEPTUAL_VOLUME)
                     .ok_or_else(|| "PipeWire volume request is outside its bound".to_owned())?;
-                let current = node
-                    .audio
-                    .average_volume
-                    .ok_or_else(|| "PipeWire volume state is unavailable".to_owned())?;
+                if node.audio.channels.is_empty() {
+                    return Err("PipeWire channel volume state is unavailable".into());
+                }
+                match request.operation {
+                    PipeWireAudioOperation::SetVolume => {
+                        self.control_counters.average_intents =
+                            self.control_counters.average_intents.saturating_add(1);
+                    }
+                    PipeWireAudioOperation::SetChannelVolume => {
+                        self.control_counters.channel_intents =
+                            self.control_counters.channel_intents.saturating_add(1);
+                    }
+                    _ => unreachable!(),
+                }
+                let base = self
+                    .writes
+                    .get(&node_id)
+                    .and_then(|coordinator| coordinator.volume.as_ref())
+                    .map(|pending| pending.queued.as_ref().unwrap_or(&pending.sent).clone())
+                    .unwrap_or_else(|| node.audio.channels.clone());
+                let desired = desired_volume_vector(
+                    request.operation,
+                    &request.target,
+                    &node,
+                    base,
+                    desired_value,
+                )
+                .inspect_err(|_| {
+                    self.control_counters.stale_vectors_rejected = self
+                        .control_counters
+                        .stale_vectors_rejected
+                        .saturating_add(1);
+                    if matches!(request.operation, PipeWireAudioOperation::SetChannelVolume) {
+                        self.control_counters.layout_invalidated_intents = self
+                            .control_counters
+                            .layout_invalidated_intents
+                            .saturating_add(1);
+                    }
+                })?;
                 if self
                     .writes
                     .get(&node_id)
                     .and_then(|coordinator| coordinator.volume.as_ref())
                     .is_none()
-                    && volumes_match(current, desired)
+                    && volume_vectors_match(&node.audio.channels, &desired)
                 {
                     self.control_counters.duplicate_writes_suppressed = self
                         .control_counters
                         .duplicate_writes_suppressed
+                        .saturating_add(1);
+                    self.control_counters.duplicate_vectors_suppressed = self
+                        .control_counters
+                        .duplicate_vectors_suppressed
                         .saturating_add(1);
                     self.sync_control_counters();
                     self.control_outcomes.push(PipeWireControlOutcome {
@@ -453,14 +519,19 @@ impl PipeWireSource {
                 if let Some(pending) = pending {
                     self.control_counters.writes_coalesced =
                         self.control_counters.writes_coalesced.saturating_add(1);
-                    pending.queued = (!volumes_match(pending.sent, desired)).then_some(desired);
+                    self.control_counters.vectors_coalesced =
+                        self.control_counters.vectors_coalesced.saturating_add(1);
+                    pending.queued =
+                        (!volume_vectors_match(&pending.sent, &desired)).then_some(desired);
                     pending
                         .controls
                         .insert(request.control.clone(), request.target.clone());
                 } else {
-                    if let Err(error) = self.send_volume(&node, desired) {
+                    if let Err(error) = self.send_volume(&node, &desired) {
                         self.control_counters.writes_failed =
                             self.control_counters.writes_failed.saturating_add(1);
+                        self.control_counters.vectors_failed =
+                            self.control_counters.vectors_failed.saturating_add(1);
                         self.sync_control_counters();
                         return Err(error);
                     }
@@ -468,6 +539,7 @@ impl PipeWireSource {
                         sent: desired,
                         queued: None,
                         started: Instant::now(),
+                        layout_generation: Some(node.audio.channel_layout_generation),
                         controls: BTreeMap::from([(
                             request.control.clone(),
                             request.target.clone(),
@@ -582,25 +654,30 @@ impl PipeWireSource {
                 if *source_generation != snapshot.connection_generation {
                     return Err("PipeWire node target belongs to a stale generation".into());
                 }
-                let (generation, raw_id) = item_key
-                    .split_once(':')
-                    .ok_or_else(|| "PipeWire node item key is malformed".to_owned())?;
-                let generation = generation
-                    .parse::<u64>()
-                    .map_err(|_| "PipeWire node item generation is malformed".to_owned())?;
-                let raw_id = raw_id
-                    .parse::<u32>()
-                    .map_err(|_| "PipeWire node item ID is malformed".to_owned())?;
-                let id = model::PipeWireNodeId {
-                    connection_generation: generation,
-                    global_id: raw_id,
-                };
+                let id = parse_node_item_key(item_key)?;
                 snapshot
                     .nodes
                     .iter()
                     .any(|node| node.id == id)
                     .then_some(id)
                     .ok_or_else(|| "PipeWire node target is unavailable".into())
+            }
+            PipeWireAudioTarget::ChannelItem {
+                source_generation,
+                node_item_key,
+                ..
+            } => {
+                if *source_generation != snapshot.connection_generation {
+                    return Err("PipeWire node target belongs to a stale generation".into());
+                }
+                let id = parse_node_item_key(node_item_key)?;
+                let node = snapshot
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == id)
+                    .ok_or_else(|| "PipeWire node target is unavailable".to_owned())?;
+                channel_target_index(target, node)?;
+                Ok(id)
             }
         }
     }
@@ -622,16 +699,28 @@ impl PipeWireSource {
     fn send_volume(
         &mut self,
         node: &model::PipeWireNodeSnapshot,
-        desired: model::FiniteVolume,
+        desired: &[model::FiniteVolume],
     ) -> Result<(), String> {
-        let channels = model::scaled_linear_channels(&node.audio.channels, desired.get())
-            .ok_or_else(|| "PipeWire channel volumes cannot be scaled".to_owned())?;
+        if desired.len() != node.audio.channels.len() {
+            self.control_counters.stale_vectors_rejected = self
+                .control_counters
+                .stale_vectors_rejected
+                .saturating_add(1);
+            self.control_counters.layout_invalidated_intents = self
+                .control_counters
+                .layout_invalidated_intents
+                .saturating_add(1);
+            return Err("PipeWire volume vector belongs to a stale channel layout".into());
+        }
+        let channels = model::perceptual_channels_to_linear(desired)
+            .ok_or_else(|| "PipeWire channel volumes cannot be encoded".to_owned())?;
         self.transport
             .as_ref()
             .ok_or_else(|| "PipeWire transport is unavailable".to_owned())?
             .set_node_channel_volumes(node.raw_global_id, channels)?;
         self.control_counters.volume_writes_sent =
             self.control_counters.volume_writes_sent.saturating_add(1);
+        self.control_counters.vectors_sent = self.control_counters.vectors_sent.saturating_add(1);
         self.sync_control_counters();
         Ok(())
     }
@@ -684,19 +773,35 @@ impl PipeWireSource {
             if let Some(mut write) = coordinator.volume.take() {
                 self.reject_retargeted_controls(id, &mut write.controls);
                 if !write.controls.is_empty() {
-                    let state = node.as_ref().and_then(|node| node.audio.average_volume);
-                    if state.is_none() {
+                    let layout_matches = node.as_ref().is_some_and(|node| {
+                        write.layout_generation == Some(node.audio.channel_layout_generation)
+                    });
+                    let state = layout_matches
+                        .then(|| node.as_ref().map(|node| node.audio.channels.as_slice()))
+                        .flatten()
+                        .filter(|channels| !channels.is_empty());
+                    if !layout_matches {
+                        self.control_counters.stale_vectors_rejected = self
+                            .control_counters
+                            .stale_vectors_rejected
+                            .saturating_add(1);
+                        self.control_counters.layout_invalidated_intents = self
+                            .control_counters
+                            .layout_invalidated_intents
+                            .saturating_add(1);
                         self.finish_controls(write.controls, PipeWireControlState::Unavailable);
-                    } else if state.is_some_and(|state| volumes_match(state, write.sent)) {
+                    } else if state.is_none() {
+                        self.finish_controls(write.controls, PipeWireControlState::Unavailable);
+                    } else if state.is_some_and(|state| volume_vectors_match(state, &write.sent)) {
                         if let Some(queued) = write.queued.take().filter(|queued| {
-                            !state.is_some_and(|state| volumes_match(state, *queued))
+                            !state.is_some_and(|state| volume_vectors_match(state, queued))
                         }) {
                             if now.duration_since(write.started) < VOLUME_WRITE_INTERVAL {
                                 write.queued = Some(queued);
                                 coordinator.volume = Some(write);
                             } else if node
                                 .as_ref()
-                                .is_some_and(|node| self.send_volume(node, queued).is_ok())
+                                .is_some_and(|node| self.send_volume(node, &queued).is_ok())
                             {
                                 write.sent = queued;
                                 write.started = now;
@@ -704,16 +809,22 @@ impl PipeWireSource {
                             } else {
                                 self.control_counters.writes_failed =
                                     self.control_counters.writes_failed.saturating_add(1);
+                                self.control_counters.vectors_failed =
+                                    self.control_counters.vectors_failed.saturating_add(1);
                                 self.finish_controls(write.controls, PipeWireControlState::Failed);
                             }
                         } else {
                             self.control_counters.writes_confirmed =
                                 self.control_counters.writes_confirmed.saturating_add(1);
+                            self.control_counters.vectors_confirmed =
+                                self.control_counters.vectors_confirmed.saturating_add(1);
                             self.finish_controls(write.controls, PipeWireControlState::Idle);
                         }
                     } else if now.duration_since(write.started) >= CONTROL_TIMEOUT {
                         self.control_counters.writes_timed_out =
                             self.control_counters.writes_timed_out.saturating_add(1);
+                        self.control_counters.vectors_timed_out =
+                            self.control_counters.vectors_timed_out.saturating_add(1);
                         self.finish_controls(write.controls, PipeWireControlState::Failed);
                     } else {
                         coordinator.volume = Some(write);
@@ -739,6 +850,10 @@ impl PipeWireSource {
             })
             .collect::<Vec<_>>();
         for control in stale {
+            let channel_target = matches!(
+                controls.get(&control),
+                Some(PipeWireAudioTarget::ChannelItem { .. })
+            );
             controls.remove(&control);
             self.control_outcomes.push(PipeWireControlOutcome {
                 control,
@@ -748,6 +863,16 @@ impl PipeWireSource {
                 .control_counters
                 .stale_writes_rejected
                 .saturating_add(1);
+            if channel_target {
+                self.control_counters.stale_vectors_rejected = self
+                    .control_counters
+                    .stale_vectors_rejected
+                    .saturating_add(1);
+                self.control_counters.layout_invalidated_intents = self
+                    .control_counters
+                    .layout_invalidated_intents
+                    .saturating_add(1);
+            }
         }
     }
 
@@ -785,6 +910,96 @@ fn volumes_match(left: model::FiniteVolume, right: model::FiniteVolume) -> bool 
     (left.get() - right.get()).abs() <= 0.0005
 }
 
+fn volume_vectors_match(left: &[model::FiniteVolume], right: &[model::FiniteVolume]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| volumes_match(*left, *right))
+}
+
+fn parse_node_item_key(value: &str) -> Result<model::PipeWireNodeId, String> {
+    let (generation, raw_id) = value
+        .split_once(':')
+        .ok_or_else(|| "PipeWire node item key is malformed".to_owned())?;
+    Ok(model::PipeWireNodeId {
+        connection_generation: generation
+            .parse::<u64>()
+            .map_err(|_| "PipeWire node item generation is malformed".to_owned())?,
+        global_id: raw_id
+            .parse::<u32>()
+            .map_err(|_| "PipeWire node item ID is malformed".to_owned())?,
+    })
+}
+
+fn channel_target_index(
+    target: &PipeWireAudioTarget,
+    node: &model::PipeWireNodeSnapshot,
+) -> Result<usize, String> {
+    let PipeWireAudioTarget::ChannelItem {
+        layout_generation,
+        channel_item_key,
+        ..
+    } = target
+    else {
+        return Err("channel volume operation requires a contextual channel target".into());
+    };
+    if *layout_generation != node.audio.channel_layout_generation {
+        return Err("PipeWire channel target belongs to a stale layout".into());
+    }
+    let mut parts = channel_item_key.split(':');
+    let generation = parts
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "PipeWire channel item generation is malformed".to_owned())?;
+    let index = parts
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| "PipeWire channel item index is malformed".to_owned())?;
+    let raw = parts
+        .next()
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or_else(|| "PipeWire channel item position is malformed".to_owned())?;
+    if parts.next().is_some()
+        || generation != *layout_generation
+        || node
+            .audio
+            .channel_positions
+            .get(index)
+            .is_none_or(|position| position.raw != raw)
+    {
+        return Err("PipeWire channel target is stale".into());
+    }
+    Ok(index)
+}
+
+fn desired_volume_vector(
+    operation: PipeWireAudioOperation,
+    target: &PipeWireAudioTarget,
+    node: &model::PipeWireNodeSnapshot,
+    base: Vec<model::FiniteVolume>,
+    desired: model::FiniteVolume,
+) -> Result<Vec<model::FiniteVolume>, String> {
+    if base.len() != node.audio.channels.len() || base.is_empty() {
+        return Err("PipeWire coordinated volume vector is stale".into());
+    }
+    match operation {
+        PipeWireAudioOperation::SetVolume => {
+            model::scaled_perceptual_channels(&base, desired.get())
+                .ok_or_else(|| "PipeWire channel volumes cannot be scaled".to_owned())
+        }
+        PipeWireAudioOperation::SetChannelVolume => {
+            let index = channel_target_index(target, node)?;
+            let mut result = base;
+            *result.get_mut(index).ok_or_else(|| {
+                "PipeWire channel target is outside the current vector".to_owned()
+            })? = desired;
+            Ok(result)
+        }
+        _ => Err("mute operation cannot construct a volume vector".into()),
+    }
+}
+
 pub(crate) fn run_pipewire_graph_diagnostic() -> Result<PipeWireSnapshot, String> {
     let started = Instant::now();
     let mut source = PipeWireSource::default();
@@ -797,6 +1012,8 @@ pub(crate) fn run_pipewire_graph_diagnostic() -> Result<PipeWireSnapshot, String
         links: true,
         audio_state: false,
         audio_writes: false,
+        channel_projection: false,
+        channel_writes: false,
         property_keys: Default::default(),
     });
     loop {
@@ -932,12 +1149,124 @@ mod tests {
                 PipeWireDelta::NodeAudioInfo(RawNodeAudioInfo {
                     raw_id: 42,
                     channel_volumes: Some(vec![1.0, 0.125]),
+                    channel_positions: Some(vec![3, 4]),
                     muted: Some(false),
                 }),
             ])
             .unwrap();
         source.reconciler.mark_ready().unwrap();
         source
+    }
+
+    #[test]
+    fn channel_and_average_intents_share_one_complete_vector() {
+        let source = source_with_audio_node();
+        let node = &source.snapshot().nodes[0];
+        let channel = PipeWireAudioTarget::ChannelItem {
+            source_generation: 1,
+            node_item_key: "1:42".into(),
+            layout_generation: 1,
+            channel_item_key: "1:1:4".into(),
+        };
+        let right = desired_volume_vector(
+            PipeWireAudioOperation::SetChannelVolume,
+            &channel,
+            node,
+            node.audio.channels.clone(),
+            model::FiniteVolume::new(0.8).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(right[0], node.audio.channels[0]);
+        assert_eq!(right[1], model::FiniteVolume::new(0.8).unwrap());
+        let scaled = desired_volume_vector(
+            PipeWireAudioOperation::SetVolume,
+            &item_target(),
+            node,
+            right,
+            model::FiniteVolume::new(0.9).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(scaled.len(), 2);
+        assert!((model::perceptual_average(&scaled).unwrap().get() - 0.9).abs() < 0.000_01);
+        let linear = model::perceptual_channels_to_linear(&scaled).unwrap();
+        assert_eq!(linear.len(), 2);
+    }
+
+    #[test]
+    fn stale_channel_layout_cannot_construct_a_write() {
+        let source = source_with_audio_node();
+        let node = &source.snapshot().nodes[0];
+        let stale = PipeWireAudioTarget::ChannelItem {
+            source_generation: 1,
+            node_item_key: "1:42".into(),
+            layout_generation: 2,
+            channel_item_key: "2:0:3".into(),
+        };
+        assert!(
+            desired_volume_vector(
+                PipeWireAudioOperation::SetChannelVolume,
+                &stale,
+                node,
+                node.audio.channels.clone(),
+                model::FiniteVolume::new(0.5).unwrap(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn layout_replacement_invalidates_the_complete_coordinated_vector() {
+        let mut source = source_with_audio_node();
+        let node = PipeWireNodeId {
+            connection_generation: 1,
+            global_id: 42,
+        };
+        let average_control = control("average");
+        let channel_control = control("channel");
+        let channel_target = PipeWireAudioTarget::ChannelItem {
+            source_generation: 1,
+            node_item_key: "1:42".into(),
+            layout_generation: 1,
+            channel_item_key: "1:0:3".into(),
+        };
+        source.writes.insert(
+            node,
+            NodeWriteCoordinator {
+                mute: None,
+                volume: Some(PendingWrite {
+                    sent: vec![model::FiniteVolume::new(0.5).unwrap(); 2],
+                    queued: Some(vec![model::FiniteVolume::new(0.75).unwrap(); 2]),
+                    started: Instant::now(),
+                    layout_generation: Some(1),
+                    controls: BTreeMap::from([
+                        (average_control.clone(), item_target()),
+                        (channel_control.clone(), channel_target),
+                    ]),
+                }),
+            },
+        );
+        source
+            .reconciler
+            .apply([PipeWireDelta::NodeAudioInfo(RawNodeAudioInfo {
+                raw_id: 42,
+                channel_volumes: None,
+                channel_positions: Some(vec![4, 3]),
+                muted: None,
+            })])
+            .unwrap();
+        source.reconcile_pending_writes(Instant::now());
+        let outcomes = source.take_control_outcomes();
+        assert!(outcomes.contains(&PipeWireControlOutcome {
+            control: average_control,
+            state: PipeWireControlState::Unavailable,
+        }));
+        assert!(outcomes.contains(&PipeWireControlOutcome {
+            control: channel_control,
+            state: PipeWireControlState::Unavailable,
+        }));
+        assert!(source.writes.is_empty());
+        assert_eq!(source.control_counters.layout_invalidated_intents, 2);
+        assert_eq!(source.control_counters.stale_vectors_rejected, 2);
     }
 
     #[test]
@@ -1068,12 +1397,14 @@ mod tests {
                     sent: true,
                     queued: None,
                     started,
+                    layout_generation: None,
                     controls: pending_control(mute.clone()),
                 }),
                 volume: Some(PendingWrite {
-                    sent: model::FiniteVolume::new(0.5).unwrap(),
+                    sent: vec![model::FiniteVolume::new(0.5).unwrap(); 2],
                     queued: None,
                     started,
+                    layout_generation: Some(1),
                     controls: pending_control(volume.clone()),
                 }),
             },
@@ -1083,6 +1414,7 @@ mod tests {
             .apply([PipeWireDelta::NodeAudioInfo(RawNodeAudioInfo {
                 raw_id: 42,
                 channel_volumes: Some(vec![0.125, 0.125]),
+                channel_positions: Some(vec![3, 4]),
                 muted: Some(true),
             })])
             .unwrap();
@@ -1097,6 +1429,8 @@ mod tests {
             state: PipeWireControlState::Idle,
         }));
         assert!(source.writes.is_empty());
+        assert_eq!(source.control_counters.writes_confirmed, 2);
+        assert_eq!(source.control_counters.vectors_confirmed, 1);
     }
 
     #[test]
@@ -1115,6 +1449,7 @@ mod tests {
                     sent: true,
                     queued: None,
                     started,
+                    layout_generation: None,
                     controls: pending_control(timed_out.clone()),
                 }),
                 volume: None,
@@ -1128,6 +1463,8 @@ mod tests {
                 state: PipeWireControlState::Failed,
             }]
         );
+        assert_eq!(source.control_counters.writes_timed_out, 1);
+        assert_eq!(source.control_counters.vectors_timed_out, 0);
 
         let removed = control("removed");
         source.writes.insert(
@@ -1137,6 +1474,7 @@ mod tests {
                     sent: true,
                     queued: None,
                     started,
+                    layout_generation: None,
                     controls: pending_control(removed.clone()),
                 }),
                 volume: None,
@@ -1161,9 +1499,10 @@ mod tests {
             NodeWriteCoordinator {
                 mute: None,
                 volume: Some(PendingWrite {
-                    sent: model::FiniteVolume::new(0.5).unwrap(),
+                    sent: vec![model::FiniteVolume::new(0.5).unwrap(); 2],
                     queued: None,
                     started,
+                    layout_generation: Some(1),
                     controls: pending_control(stale.clone()),
                 }),
             },
@@ -1208,6 +1547,7 @@ mod tests {
                     sent: true,
                     queued: None,
                     started: Instant::now(),
+                    layout_generation: None,
                     controls: BTreeMap::from([(pending.clone(), PipeWireAudioTarget::DefaultSink)]),
                 }),
                 volume: None,
@@ -1241,9 +1581,10 @@ mod tests {
             NodeWriteCoordinator {
                 mute: None,
                 volume: Some(PendingWrite {
-                    sent: model::FiniteVolume::new(0.75).unwrap(),
-                    queued: Some(model::FiniteVolume::new(0.5).unwrap()),
+                    sent: vec![model::FiniteVolume::new(0.75).unwrap(); 2],
+                    queued: Some(vec![model::FiniteVolume::new(0.5).unwrap(); 2]),
                     started,
+                    layout_generation: Some(1),
                     controls: pending_control(control("volume")),
                 }),
             },

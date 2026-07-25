@@ -177,6 +177,17 @@ pub struct SurfaceHostSummary {
     pub repeat_identity_reuses: u64,
     pub repeated_item_count: u64,
     pub cloned_node_count: u64,
+    pub contextual_item_count: u64,
+    pub channel_source_activations: u64,
+    pub channel_source_releases: u64,
+    pub channel_insertions: u64,
+    pub channel_removals: u64,
+    pub channel_moves: u64,
+    pub channel_layout_replacements: u64,
+    pub channel_value_mutations: u64,
+    pub contextual_subtree_clones: u64,
+    pub retained_channel_identities: u64,
+    pub duplicate_channel_suppressions: u64,
     pub last_reconciliation_us: u64,
     pub last_state_projection_us: u64,
     pub last_attribute_mutation_us: u64,
@@ -1934,6 +1945,24 @@ impl State {
         surface_state.summary.repeat_identity_reuses = runtime_measurements.repeat_identity_reuses;
         surface_state.summary.repeated_item_count = runtime_measurements.repeated_item_count;
         surface_state.summary.cloned_node_count = runtime_measurements.cloned_node_count;
+        surface_state.summary.contextual_item_count = runtime_measurements.contextual_item_count;
+        surface_state.summary.channel_source_activations =
+            runtime_measurements.channel_source_activations;
+        surface_state.summary.channel_source_releases =
+            runtime_measurements.channel_source_releases;
+        surface_state.summary.channel_insertions = runtime_measurements.channel_insertions;
+        surface_state.summary.channel_removals = runtime_measurements.channel_removals;
+        surface_state.summary.channel_moves = runtime_measurements.channel_moves;
+        surface_state.summary.channel_layout_replacements =
+            runtime_measurements.channel_layout_replacements;
+        surface_state.summary.channel_value_mutations =
+            runtime_measurements.channel_value_mutations;
+        surface_state.summary.contextual_subtree_clones =
+            runtime_measurements.contextual_subtree_clones;
+        surface_state.summary.retained_channel_identities =
+            runtime_measurements.retained_channel_identities;
+        surface_state.summary.duplicate_channel_suppressions =
+            runtime_measurements.duplicate_channel_suppressions;
         surface_state.summary.last_reconciliation_us =
             milliseconds_to_microseconds(runtime_measurements.last_reconciliation_ms);
         surface_state.summary.last_state_projection_us =
@@ -3043,6 +3072,22 @@ impl State {
                             metrics.repeat_identity_reuses = measurements.repeat_identity_reuses;
                             metrics.repeated_item_count = measurements.repeated_item_count;
                             metrics.cloned_node_count = measurements.cloned_node_count;
+                            metrics.contextual_item_count = measurements.contextual_item_count;
+                            metrics.channel_source_activations =
+                                measurements.channel_source_activations;
+                            metrics.channel_source_releases = measurements.channel_source_releases;
+                            metrics.channel_insertions = measurements.channel_insertions;
+                            metrics.channel_removals = measurements.channel_removals;
+                            metrics.channel_moves = measurements.channel_moves;
+                            metrics.channel_layout_replacements =
+                                measurements.channel_layout_replacements;
+                            metrics.channel_value_mutations = measurements.channel_value_mutations;
+                            metrics.contextual_subtree_clones =
+                                measurements.contextual_subtree_clones;
+                            metrics.retained_channel_identities =
+                                measurements.retained_channel_identities;
+                            metrics.duplicate_channel_suppressions =
+                                measurements.duplicate_channel_suppressions;
                             metrics.last_reconciliation_us =
                                 milliseconds_to_microseconds(measurements.last_reconciliation_ms);
                             metrics.last_state_projection_us =

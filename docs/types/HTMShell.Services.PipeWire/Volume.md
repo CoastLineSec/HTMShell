@@ -2,7 +2,7 @@
 
 **Module:** `HTMShell.Services.PipeWire`
 
-HTMShell exposes one perceptual average volume for each audio-capable node.
+HTMShell exposes perceptual node-average and ordered per-channel volume.
 
 ## Scale
 
@@ -12,9 +12,16 @@ PipeWire channel gains are converted to the same perceptual scale used by the re
 
 ## Writes
 
-Setting an average scales the current perceptual channel values proportionally, preserving their balance. If every channel is zero, each channel receives the requested average. Mono, stereo, surround, and auxiliary channel counts use the same rule.
+Setting an average scales the current perceptual channel values proportionally,
+preserving their balance. If every channel is zero, each channel receives the
+requested average. Mono, stereo, surround, auxiliary, and custom layouts use
+the same rule.
 
-The ordered channel vector remains internal. Empty, nonfinite, or malformed vectors make volume unavailable.
+Setting one channel replaces only that entry in the latest complete desired
+vector. The full vector is written, so other channels are not flattened,
+reordered, or reset. Average and channel controls share one coordinator.
+
+Empty, nonfinite, or malformed vectors make volume unavailable.
 
 ## Bounds
 
@@ -30,3 +37,5 @@ Pointer interaction can update local range presentation immediately. Public volu
 
 - [`range-control`](../HTMShell.Elements/range-control.md)
 - [`AudioControls`](AudioControls.md)
+- [`AudioChannel`](AudioChannel.md)
+- [`ChannelControls`](ChannelControls.md)

@@ -10,10 +10,15 @@ Audio controls use typed actions and generation-safe node targets.
 - `pipewire.audio.unmute`
 - `pipewire.audio.toggle_mute`
 - `pipewire.audio.set_volume`
+- `pipewire.audio.set_channel_volume`
 
 The mute actions use [`action-button`](../HTMShell.Elements/action-button.md). Set-volume uses only [`range-control`](../HTMShell.Elements/range-control.md).
 
 Inside `pipewire.nodes`, controls target the current keyed item. Outside a repeat, only `pipewire.default_sink` and `pipewire.default_source` are writable targets.
+
+Inside `pipewire.nodes` then `item.channels`,
+`pipewire.audio.set_channel_volume` targets the current channel and its implicit
+parent node. It forbids `data-htm-target`.
 
 Configured defaults, raw IDs, names, selectors, arbitrary DOM IDs, and dynamic target values are rejected.
 
@@ -32,7 +37,10 @@ The identity includes the document generation, control element, target generatio
 
 ## Request behavior
 
-Mute, unmute, and toggle are bounded to one active mute operation per node. Volume motion retains only the latest desired value and permits one active volume operation per node. Duplicate desired values are suppressed. Queued volume writes are spaced by at least 16 milliseconds.
+Mute, unmute, and toggle are bounded to one active mute operation per node.
+Average and channel motion retain only the latest complete desired vector and
+permit one active volume operation per node. Duplicate vectors are suppressed.
+Queued volume writes are spaced by at least 16 milliseconds.
 
 The confirmation timeout is two seconds. Denial, timeout, removal, reconnect, and stale replies leave public volume and mute state unchanged.
 
@@ -40,6 +48,8 @@ The confirmation timeout is two seconds. Denial, timeout, removal, reconnect, an
 
 - 128 PipeWire audio controls per document
 - 16 PipeWire audio controls per repeated item
+- 256 channel range controls per document
+- 8 channel range controls per channel item
 - 4,096 node coordinators, bounded by the graph limit
 - one pending mute intent and one pending volume intent per node
 
@@ -47,4 +57,5 @@ The confirmation timeout is two seconds. Denial, timeout, removal, reconnect, an
 
 - [PipeWire audio actions](../HTMShell.Actions/PipeWireAudio.md)
 - [`AudioNode`](AudioNode.md)
+- [`ChannelControls`](ChannelControls.md)
 - [`Volume`](Volume.md)

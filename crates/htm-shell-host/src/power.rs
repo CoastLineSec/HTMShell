@@ -840,9 +840,12 @@ fn device_repeat_item(device: &UPowerDeviceSnapshot) -> RepeatItemSnapshot {
     let mut tokens = BTreeMap::new();
     let mut values = BTreeMap::new();
     text.insert(ItemBindingKey::Ready, "true".into());
-    tokens.insert(ItemBindingKey::Ready, StateToken::True);
+    tokens.insert(ItemBindingKey::Ready, StateToken::True.as_str().into());
     text.insert(ItemBindingKey::Type, device.device_type.text().into());
-    tokens.insert(ItemBindingKey::Type, device.device_type.token());
+    tokens.insert(
+        ItemBindingKey::Type,
+        device.device_type.token().as_str().into(),
+    );
     insert_bool(
         &mut text,
         &mut tokens,
@@ -872,7 +875,7 @@ fn device_repeat_item(device: &UPowerDeviceSnapshot) -> RepeatItemSnapshot {
         device.is_present,
     );
     text.insert(ItemBindingKey::State, device.state.text().into());
-    tokens.insert(ItemBindingKey::State, device.state.token());
+    tokens.insert(ItemBindingKey::State, device.state.token().as_str().into());
     insert_value(
         &mut values,
         ItemBindingKey::HealthPercentage,
@@ -905,6 +908,7 @@ fn device_repeat_item(device: &UPowerDeviceSnapshot) -> RepeatItemSnapshot {
         tokens,
         values,
         properties: BTreeMap::new(),
+        channels: None,
     }
 }
 
@@ -916,20 +920,24 @@ fn hold_repeat_item(hold: &PowerProfileHold) -> RepeatItemSnapshot {
             (ItemBindingKey::ApplicationId, hold.application_id.clone()),
             (ItemBindingKey::Reason, hold.reason.clone()),
         ]),
-        tokens: BTreeMap::from([(ItemBindingKey::Profile, hold.profile.token())]),
+        tokens: BTreeMap::from([(
+            ItemBindingKey::Profile,
+            hold.profile.token().as_str().into(),
+        )]),
         values: BTreeMap::new(),
         properties: BTreeMap::new(),
+        channels: None,
     }
 }
 
 fn insert_bool(
     text: &mut BTreeMap<ItemBindingKey, String>,
-    tokens: &mut BTreeMap<ItemBindingKey, StateToken>,
+    tokens: &mut BTreeMap<ItemBindingKey, String>,
     key: ItemBindingKey,
     value: Option<bool>,
 ) {
     text.insert(key, bool_text(value));
-    tokens.insert(key, bool_token(value));
+    tokens.insert(key, bool_token(value).as_str().into());
 }
 
 fn insert_value(

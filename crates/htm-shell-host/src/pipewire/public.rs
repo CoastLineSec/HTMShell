@@ -3,8 +3,8 @@ use super::model::{
     PipeWireSnapshot,
 };
 use htm_runtime::{
-    ItemBindingKey, NumericValue, PipeWireDocumentDemand, RepeatItemSnapshot, RepeatSource,
-    RepeatSourceSnapshot, StateBindingKey, StateToken,
+    ContextualRepeatSnapshot, ItemBindingKey, NumericValue, PipeWireDocumentDemand,
+    RepeatItemSnapshot, RepeatSource, RepeatSourceSnapshot, StateBindingKey, StateToken,
 };
 use std::collections::BTreeMap;
 
@@ -27,6 +27,8 @@ pub(crate) struct PipeWireDemand {
     pub links: bool,
     pub audio_state: bool,
     pub audio_writes: bool,
+    pub channel_projection: bool,
+    pub channel_writes: bool,
     pub property_keys: std::collections::BTreeSet<String>,
 }
 
@@ -42,6 +44,8 @@ impl PipeWireDemand {
         self.defaults |= demand.defaults;
         self.audio_state |= demand.audio_state;
         self.audio_writes |= demand.audio_writes;
+        self.channel_projection |= demand.channel_projection;
+        self.channel_writes |= demand.channel_writes;
         self.property_keys
             .extend(demand.property_keys.iter().cloned());
     }
@@ -517,6 +521,10 @@ fn project_node(
             ItemBindingKey::CanSetMute,
             bool_text(node.audio.can_set_mute),
         ),
+        (
+            ItemBindingKey::ChannelStatus,
+            channel_status(node).text().into(),
+        ),
     ]);
     let actual_role = default_role(snapshot, node, false);
     let configured_role = default_role(snapshot, node, true);
@@ -526,39 +534,64 @@ fn project_node(
         configured_role.text().into(),
     );
     let tokens = BTreeMap::from([
-        (ItemBindingKey::Ready, bool_token(node.ready)),
-        (ItemBindingKey::NodeType, node_type.token()),
-        (ItemBindingKey::NodeState, node_state_token(node.state)),
-        (ItemBindingKey::Direction, direction.token()),
+        (
+            ItemBindingKey::Ready,
+            bool_token(node.ready).as_str().into(),
+        ),
+        (ItemBindingKey::NodeType, node_type.token().as_str().into()),
+        (
+            ItemBindingKey::NodeState,
+            node_state_token(node.state).as_str().into(),
+        ),
+        (ItemBindingKey::Direction, direction.token().as_str().into()),
         (
             ItemBindingKey::IsAudio,
-            bool_token(node.classification.audio),
+            bool_token(node.classification.audio).as_str().into(),
         ),
         (
             ItemBindingKey::IsVideo,
-            bool_token(node.classification.video),
+            bool_token(node.classification.video).as_str().into(),
         ),
         (
             ItemBindingKey::IsStream,
-            bool_token(node.classification.stream),
+            bool_token(node.classification.stream).as_str().into(),
         ),
-        (ItemBindingKey::IsSink, bool_token(node.classification.sink)),
+        (
+            ItemBindingKey::IsSink,
+            bool_token(node.classification.sink).as_str().into(),
+        ),
         (
             ItemBindingKey::IsSource,
-            bool_token(node.classification.source),
+            bool_token(node.classification.source).as_str().into(),
         ),
-        (ItemBindingKey::AudioStatus, audio_status(node).token()),
-        (ItemBindingKey::MuteState, mute_token(node.audio.muted)),
+        (
+            ItemBindingKey::AudioStatus,
+            audio_status(node).token().as_str().into(),
+        ),
+        (
+            ItemBindingKey::MuteState,
+            mute_token(node.audio.muted).as_str().into(),
+        ),
         (
             ItemBindingKey::CanSetVolume,
-            bool_token(node.audio.can_set_volume),
+            bool_token(node.audio.can_set_volume).as_str().into(),
         ),
         (
             ItemBindingKey::CanSetMute,
-            bool_token(node.audio.can_set_mute),
+            bool_token(node.audio.can_set_mute).as_str().into(),
         ),
-        (ItemBindingKey::DefaultRole, actual_role.token(false)),
-        (ItemBindingKey::ConfiguredRole, configured_role.token(true)),
+        (
+            ItemBindingKey::ChannelStatus,
+            channel_status(node).token().as_str().into(),
+        ),
+        (
+            ItemBindingKey::DefaultRole,
+            actual_role.token(false).as_str().into(),
+        ),
+        (
+            ItemBindingKey::ConfiguredRole,
+            configured_role.token(true).as_str().into(),
+        ),
     ]);
     let properties = demand
         .property_keys
@@ -585,8 +618,73 @@ fn project_node(
                     .map(|value| NumericValue::Decimal(f64::from(value.get())))
                     .unwrap_or(NumericValue::Unknown),
             ),
+            (
+                ItemBindingKey::ChannelCount,
+                NumericValue::Integer(node.audio.channels.len() as i64),
+            ),
         ]),
         properties,
+        channels: demand.channel_projection.then(|| project_channels(node)),
+    }
+}
+
+fn project_channels(node: &PipeWireNodeSnapshot) -> ContextualRepeatSnapshot {
+    let items = node
+        .audio
+        .channels
+        .iter()
+        .zip(&node.audio.channel_positions)
+        .enumerate()
+        .map(|(index, (volume, position))| {
+            let token = position.token();
+            let can_set = node.audio.can_set_volume;
+            RepeatItemSnapshot {
+                key: format!(
+                    "{}:{index}:{}",
+                    node.audio.channel_layout_generation, position.raw
+                ),
+                text: BTreeMap::from([
+                    (ItemBindingKey::PositionName, position.name()),
+                    (ItemBindingKey::Position, token.clone()),
+                    (ItemBindingKey::Status, "Ready".into()),
+                    (ItemBindingKey::CanSetVolume, bool_text(can_set)),
+                    (
+                        ItemBindingKey::IsAuxiliary,
+                        bool_text(position.is_auxiliary()),
+                    ),
+                    (ItemBindingKey::IsCustom, bool_text(position.is_custom())),
+                ]),
+                tokens: BTreeMap::from([
+                    (ItemBindingKey::Position, token),
+                    (ItemBindingKey::Status, StateToken::Ready.as_str().into()),
+                    (
+                        ItemBindingKey::CanSetVolume,
+                        bool_token(can_set).as_str().into(),
+                    ),
+                    (
+                        ItemBindingKey::IsAuxiliary,
+                        bool_token(position.is_auxiliary()).as_str().into(),
+                    ),
+                    (
+                        ItemBindingKey::IsCustom,
+                        bool_token(position.is_custom()).as_str().into(),
+                    ),
+                ]),
+                values: BTreeMap::from([
+                    (ItemBindingKey::Index, NumericValue::Integer(index as i64)),
+                    (
+                        ItemBindingKey::Volume,
+                        NumericValue::Decimal(f64::from(volume.get())),
+                    ),
+                ]),
+                properties: BTreeMap::new(),
+                channels: None,
+            }
+        })
+        .collect();
+    ContextualRepeatSnapshot {
+        source_generation: node.audio.channel_layout_generation,
+        items,
     }
 }
 
@@ -619,6 +717,18 @@ fn audio_status(node: &PipeWireNodeSnapshot) -> AudioStatus {
     if !node.audio_capable {
         AudioStatus::Unsupported
     } else if node.audio.ready {
+        AudioStatus::Ready
+    } else {
+        AudioStatus::Unavailable
+    }
+}
+
+fn channel_status(node: &PipeWireNodeSnapshot) -> AudioStatus {
+    if !node.audio_capable {
+        AudioStatus::Unsupported
+    } else if !node.audio.channels.is_empty()
+        && node.audio.channels.len() == node.audio.channel_positions.len()
+    {
         AudioStatus::Ready
     } else {
         AudioStatus::Unavailable
@@ -845,6 +955,7 @@ mod tests {
             nodes: true,
             node_details: true,
             defaults: true,
+            channel_projection: true,
             property_keys: BTreeSet::from(["application.name".into()]),
             ..PipeWireDemand::default()
         };
@@ -855,11 +966,11 @@ mod tests {
         assert_eq!(repeat.items[0].key, "7:42");
         assert_eq!(
             repeat.items[0].tokens[&ItemBindingKey::NodeType],
-            StateToken::AudioSink
+            StateToken::AudioSink.as_str()
         );
         assert_eq!(
             repeat.items[0].tokens[&ItemBindingKey::DefaultRole],
-            StateToken::DefaultSink
+            StateToken::DefaultSink.as_str()
         );
         assert_eq!(
             repeat.items[0].properties,
@@ -867,11 +978,11 @@ mod tests {
         );
         assert_eq!(
             repeat.items[0].tokens[&ItemBindingKey::AudioStatus],
-            StateToken::Ready
+            StateToken::Ready.as_str()
         );
         assert_eq!(
             repeat.items[0].tokens[&ItemBindingKey::MuteState],
-            StateToken::Unmuted
+            StateToken::Unmuted.as_str()
         );
         assert_eq!(
             repeat.items[0].values[&ItemBindingKey::Volume],
@@ -879,7 +990,19 @@ mod tests {
         );
         assert_eq!(
             repeat.items[0].tokens[&ItemBindingKey::CanSetVolume],
-            StateToken::True
+            StateToken::True.as_str()
+        );
+        let channels = repeat.items[0].channels.as_ref().unwrap();
+        assert_eq!(channels.source_generation, 1);
+        assert_eq!(channels.items.len(), 2);
+        assert_eq!(channels.items[0].key, "1:0:3");
+        assert_eq!(
+            channels.items[0].tokens[&ItemBindingKey::Position],
+            "front-left"
+        );
+        assert_eq!(
+            channels.items[1].values[&ItemBindingKey::Volume],
+            NumericValue::Decimal(0.5)
         );
         assert!(projections.tokens.contains(&(
             StateBindingKey::PipeWireDefaultSinkStatus,
@@ -911,12 +1034,18 @@ mod tests {
     fn unsupported_and_incomplete_audio_nodes_remain_explicit() {
         let video = node(1, "Video/Source");
         assert_eq!(audio_status(&video).token(), StateToken::Unsupported);
+        assert_eq!(channel_status(&video).token(), StateToken::Unsupported);
         assert_eq!(mute_token(video.audio.muted), StateToken::Unavailable);
 
-        let audio = node(2, "Audio/Source");
+        let mut audio = node(2, "Audio/Source");
         assert_eq!(audio_status(&audio).token(), StateToken::Unavailable);
+        assert_eq!(channel_status(&audio).token(), StateToken::Unavailable);
         assert!(!audio.audio.can_set_volume);
         assert!(!audio.audio.can_set_mute);
+
+        audio.audio =
+            PipeWireNodeAudioSnapshot::from_linear_channels(&[1.0], Some(false), false).unwrap();
+        assert_eq!(channel_status(&audio).token(), StateToken::Ready);
     }
 
     #[test]
@@ -1020,6 +1149,8 @@ mod tests {
             defaults: false,
             audio_state: false,
             audio_writes: false,
+            channel_projection: true,
+            channel_writes: true,
             property_keys: BTreeSet::from(["media.title".into()]),
         };
         let mut demand = PipeWireDemand::default();
@@ -1029,5 +1160,7 @@ mod tests {
         assert_eq!(demand.property_keys.len(), 1);
         assert!(demand.node_details);
         assert!(!demand.defaults);
+        assert!(demand.channel_projection);
+        assert!(demand.channel_writes);
     }
 }

@@ -12,6 +12,9 @@ pub const MAX_METADATA_VALUE_BYTES: usize = 1_024;
 pub const MAX_STAGED_DELTAS: usize = MAX_NODES + MAX_LINKS + 4_096;
 pub const MAX_AUDIO_CHANNELS: usize = 64;
 pub const MAX_PERCEPTUAL_VOLUME: f32 = 2.0;
+pub const SPA_AUDIO_CHANNEL_AUX_START: u32 = 0x1000;
+pub const SPA_AUDIO_CHANNEL_AUX_END: u32 = 0x1fff;
+pub const SPA_AUDIO_CHANNEL_CUSTOM_START: u32 = 0x10000;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -163,6 +166,8 @@ impl Serialize for FiniteVolume {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PipeWireNodeAudioSnapshot {
     pub channels: Vec<FiniteVolume>,
+    pub channel_positions: Vec<PipeWireAudioChannelPosition>,
+    pub channel_layout_generation: u64,
     pub average_volume: Option<FiniteVolume>,
     pub muted: Option<bool>,
     pub ready: bool,
@@ -185,15 +190,214 @@ impl PipeWireNodeAudioSnapshot {
             .map(|value| FiniteVolume::new(value.cbrt()))
             .collect::<Option<Vec<_>>>()?;
         let average_volume = perceptual_average(&channels);
+        let channel_positions = normalize_channel_positions(channels.len(), &[]);
         Some(Self {
             ready: average_volume.is_some() && muted.is_some(),
             can_set_volume: writable && average_volume.is_some(),
             can_set_mute: writable && muted.is_some(),
             channels,
+            channel_positions,
+            channel_layout_generation: 1,
             average_volume,
             muted,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct PipeWireAudioChannelPosition {
+    pub raw: u32,
+}
+
+impl PipeWireAudioChannelPosition {
+    pub const NAMED: [Self; 38] = [
+        Self::new(0),
+        Self::new(1),
+        Self::new(2),
+        Self::new(3),
+        Self::new(4),
+        Self::new(5),
+        Self::new(6),
+        Self::new(7),
+        Self::new(8),
+        Self::new(9),
+        Self::new(10),
+        Self::new(11),
+        Self::new(12),
+        Self::new(13),
+        Self::new(14),
+        Self::new(15),
+        Self::new(16),
+        Self::new(17),
+        Self::new(18),
+        Self::new(19),
+        Self::new(20),
+        Self::new(21),
+        Self::new(22),
+        Self::new(23),
+        Self::new(24),
+        Self::new(25),
+        Self::new(26),
+        Self::new(27),
+        Self::new(28),
+        Self::new(29),
+        Self::new(30),
+        Self::new(31),
+        Self::new(32),
+        Self::new(33),
+        Self::new(34),
+        Self::new(35),
+        Self::new(36),
+        Self::new(37),
+    ];
+    pub const AUXILIARY_FIRST: Self = Self::new(SPA_AUDIO_CHANNEL_AUX_START);
+    pub const AUXILIARY_LAST: Self = Self::new(SPA_AUDIO_CHANNEL_AUX_END);
+    pub const CUSTOM_FIRST: Self = Self::new(SPA_AUDIO_CHANNEL_CUSTOM_START);
+    pub const CUSTOM_LAST: Self = Self::new(u32::MAX);
+
+    pub const fn new(raw: u32) -> Self {
+        Self { raw }
+    }
+
+    pub fn token(self) -> String {
+        match self.raw {
+            0 => "unknown".into(),
+            1 => "na".into(),
+            2 => "mono".into(),
+            3 => "front-left".into(),
+            4 => "front-right".into(),
+            5 => "front-center".into(),
+            6 => "lfe".into(),
+            7 => "side-left".into(),
+            8 => "side-right".into(),
+            9 => "front-left-center".into(),
+            10 => "front-right-center".into(),
+            11 => "rear-center".into(),
+            12 => "rear-left".into(),
+            13 => "rear-right".into(),
+            14 => "top-center".into(),
+            15 => "top-front-left".into(),
+            16 => "top-front-center".into(),
+            17 => "top-front-right".into(),
+            18 => "top-rear-left".into(),
+            19 => "top-rear-center".into(),
+            20 => "top-rear-right".into(),
+            21 => "rear-left-center".into(),
+            22 => "rear-right-center".into(),
+            23 => "front-left-wide".into(),
+            24 => "front-right-wide".into(),
+            25 => "lfe-2".into(),
+            26 => "front-left-high".into(),
+            27 => "front-center-high".into(),
+            28 => "front-right-high".into(),
+            29 => "top-front-left-center".into(),
+            30 => "top-front-right-center".into(),
+            31 => "top-side-left".into(),
+            32 => "top-side-right".into(),
+            33 => "lfe-left".into(),
+            34 => "lfe-right".into(),
+            35 => "bottom-center".into(),
+            36 => "bottom-left-center".into(),
+            37 => "bottom-right-center".into(),
+            raw if (SPA_AUDIO_CHANNEL_AUX_START..=SPA_AUDIO_CHANNEL_AUX_END).contains(&raw) => {
+                format!("aux-{}", raw - SPA_AUDIO_CHANNEL_AUX_START + 1)
+            }
+            raw if raw >= SPA_AUDIO_CHANNEL_CUSTOM_START => {
+                format!("custom-{}", raw - SPA_AUDIO_CHANNEL_CUSTOM_START + 1)
+            }
+            _ => "unknown".into(),
+        }
+    }
+
+    pub fn name(self) -> String {
+        match self.raw {
+            0 => "Unknown".into(),
+            1 => "N/A".into(),
+            2 => "Mono".into(),
+            3 => "Front Left".into(),
+            4 => "Front Right".into(),
+            5 => "Front Center".into(),
+            6 => "Low Frequency Effects".into(),
+            7 => "Side Left".into(),
+            8 => "Side Right".into(),
+            9 => "Front Left Center".into(),
+            10 => "Front Right Center".into(),
+            11 => "Rear Center".into(),
+            12 => "Rear Left".into(),
+            13 => "Rear Right".into(),
+            14 => "Top Center".into(),
+            15 => "Top Front Left".into(),
+            16 => "Top Front Center".into(),
+            17 => "Top Front Right".into(),
+            18 => "Top Rear Left".into(),
+            19 => "Top Rear Center".into(),
+            20 => "Top Rear Right".into(),
+            21 => "Rear Left Center".into(),
+            22 => "Rear Right Center".into(),
+            23 => "Front Left Wide".into(),
+            24 => "Front Right Wide".into(),
+            25 => "Low Frequency Effects 2".into(),
+            26 => "Front Left High".into(),
+            27 => "Front Center High".into(),
+            28 => "Front Right High".into(),
+            29 => "Top Front Left Center".into(),
+            30 => "Top Front Right Center".into(),
+            31 => "Top Side Left".into(),
+            32 => "Top Side Right".into(),
+            33 => "Low Frequency Effects Left".into(),
+            34 => "Low Frequency Effects Right".into(),
+            35 => "Bottom Center".into(),
+            36 => "Bottom Left Center".into(),
+            37 => "Bottom Right Center".into(),
+            raw if (SPA_AUDIO_CHANNEL_AUX_START..=SPA_AUDIO_CHANNEL_AUX_END).contains(&raw) => {
+                format!("Aux {}", raw - SPA_AUDIO_CHANNEL_AUX_START + 1)
+            }
+            raw if raw >= SPA_AUDIO_CHANNEL_CUSTOM_START => {
+                format!("Custom {}", raw - SPA_AUDIO_CHANNEL_CUSTOM_START + 1)
+            }
+            _ => "Unknown".into(),
+        }
+    }
+
+    pub const fn is_auxiliary(self) -> bool {
+        self.raw >= SPA_AUDIO_CHANNEL_AUX_START && self.raw <= SPA_AUDIO_CHANNEL_AUX_END
+    }
+
+    pub const fn is_custom(self) -> bool {
+        self.raw >= SPA_AUDIO_CHANNEL_CUSTOM_START
+    }
+}
+
+pub(crate) fn normalize_channel_positions(
+    volume_count: usize,
+    positions: &[u32],
+) -> Vec<PipeWireAudioChannelPosition> {
+    if volume_count == 0 {
+        return Vec::new();
+    }
+    if positions.is_empty() {
+        let fallback: &[u32] = match volume_count {
+            1 => &[2],
+            2 => &[3, 4],
+            3 => &[3, 4, 6],
+            4 => &[3, 4, 12, 13],
+            5 => &[3, 4, 5, 7, 8],
+            6 => &[3, 4, 5, 6, 7, 8],
+            7 => &[3, 4, 5, 12, 13, 7, 8],
+            8 => &[3, 4, 5, 6, 12, 13, 7, 8],
+            _ => &[],
+        };
+        if !fallback.is_empty() {
+            return fallback
+                .iter()
+                .copied()
+                .map(PipeWireAudioChannelPosition::new)
+                .collect();
+        }
+    }
+    (0..volume_count)
+        .map(|index| PipeWireAudioChannelPosition::new(*positions.get(index).unwrap_or(&0)))
+        .collect()
 }
 
 pub(crate) fn perceptual_average(channels: &[FiniteVolume]) -> Option<FiniteVolume> {
@@ -207,10 +411,10 @@ pub(crate) fn perceptual_average(channels: &[FiniteVolume]) -> Option<FiniteVolu
     FiniteVolume::new(sum / channels.len() as f32)
 }
 
-pub(crate) fn scaled_linear_channels(
+pub(crate) fn scaled_perceptual_channels(
     channels: &[FiniteVolume],
     desired_average: f32,
-) -> Option<Vec<f32>> {
+) -> Option<Vec<FiniteVolume>> {
     if !desired_average.is_finite()
         || !(0.0..=MAX_PERCEPTUAL_VOLUME).contains(&desired_average)
         || channels.is_empty()
@@ -228,9 +432,17 @@ pub(crate) fn scaled_linear_channels(
     } else {
         vec![desired_average; channels.len()]
     };
-    perceptual
-        .into_iter()
+    perceptual.into_iter().map(FiniteVolume::new).collect()
+}
+
+pub(crate) fn perceptual_channels_to_linear(channels: &[FiniteVolume]) -> Option<Vec<f32>> {
+    if channels.is_empty() || channels.len() > MAX_AUDIO_CHANNELS {
+        return None;
+    }
+    channels
+        .iter()
         .map(|value| {
+            let value = value.get();
             let linear = value * value * value;
             (linear.is_finite() && linear >= 0.0).then_some(linear)
         })
@@ -294,6 +506,16 @@ pub struct PipeWireControlCounters {
     pub writes_timed_out: u64,
     pub stale_writes_rejected: u64,
     pub duplicate_writes_suppressed: u64,
+    pub average_intents: u64,
+    pub channel_intents: u64,
+    pub vectors_sent: u64,
+    pub vectors_coalesced: u64,
+    pub duplicate_vectors_suppressed: u64,
+    pub vectors_confirmed: u64,
+    pub vectors_failed: u64,
+    pub vectors_timed_out: u64,
+    pub stale_vectors_rejected: u64,
+    pub layout_invalidated_intents: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -382,6 +604,7 @@ pub(crate) struct RawNodeInfo {
 pub(crate) struct RawNodeAudioInfo {
     pub raw_id: u32,
     pub channel_volumes: Option<Vec<f32>>,
+    pub channel_positions: Option<Vec<u32>>,
     pub muted: Option<bool>,
 }
 
@@ -567,7 +790,10 @@ mod tests {
         assert!((audio.channels[1].get() - 0.5).abs() < 0.000_001);
         assert!((audio.average_volume.unwrap().get() - 0.75).abs() < 0.000_001);
 
-        let scaled = scaled_linear_channels(&audio.channels, 1.5).unwrap();
+        let scaled = perceptual_channels_to_linear(
+            &scaled_perceptual_channels(&audio.channels, 1.5).unwrap(),
+        )
+        .unwrap();
         assert!((scaled[0] - 8.0).abs() < 0.000_01);
         assert!((scaled[1] - 1.0).abs() < 0.000_01);
     }
@@ -576,14 +802,101 @@ mod tests {
     fn zero_balance_and_invalid_vectors_are_contained() {
         let audio =
             PipeWireNodeAudioSnapshot::from_linear_channels(&[0.0, 0.0], Some(true), true).unwrap();
-        let scaled = scaled_linear_channels(&audio.channels, 0.5).unwrap();
+        let scaled = perceptual_channels_to_linear(
+            &scaled_perceptual_channels(&audio.channels, 0.5).unwrap(),
+        )
+        .unwrap();
         assert_eq!(scaled, vec![0.125, 0.125]);
         assert!(
             PipeWireNodeAudioSnapshot::from_linear_channels(&[f32::NAN], Some(false), true)
                 .is_none()
         );
-        assert!(scaled_linear_channels(&audio.channels, MAX_PERCEPTUAL_VOLUME + 0.1).is_none());
-        assert!(scaled_linear_channels(&[], 0.5).is_none());
+        assert!(scaled_perceptual_channels(&audio.channels, MAX_PERCEPTUAL_VOLUME + 0.1).is_none());
+        assert!(scaled_perceptual_channels(&[], 0.5).is_none());
+    }
+
+    #[test]
+    fn channel_positions_cover_named_auxiliary_custom_and_unknown_values() {
+        let named = [
+            (0, "unknown", "Unknown"),
+            (1, "na", "N/A"),
+            (2, "mono", "Mono"),
+            (3, "front-left", "Front Left"),
+            (4, "front-right", "Front Right"),
+            (5, "front-center", "Front Center"),
+            (6, "lfe", "Low Frequency Effects"),
+            (7, "side-left", "Side Left"),
+            (8, "side-right", "Side Right"),
+            (9, "front-left-center", "Front Left Center"),
+            (10, "front-right-center", "Front Right Center"),
+            (11, "rear-center", "Rear Center"),
+            (12, "rear-left", "Rear Left"),
+            (13, "rear-right", "Rear Right"),
+            (14, "top-center", "Top Center"),
+            (15, "top-front-left", "Top Front Left"),
+            (16, "top-front-center", "Top Front Center"),
+            (17, "top-front-right", "Top Front Right"),
+            (18, "top-rear-left", "Top Rear Left"),
+            (19, "top-rear-center", "Top Rear Center"),
+            (20, "top-rear-right", "Top Rear Right"),
+            (21, "rear-left-center", "Rear Left Center"),
+            (22, "rear-right-center", "Rear Right Center"),
+            (23, "front-left-wide", "Front Left Wide"),
+            (24, "front-right-wide", "Front Right Wide"),
+            (25, "lfe-2", "Low Frequency Effects 2"),
+            (26, "front-left-high", "Front Left High"),
+            (27, "front-center-high", "Front Center High"),
+            (28, "front-right-high", "Front Right High"),
+            (29, "top-front-left-center", "Top Front Left Center"),
+            (30, "top-front-right-center", "Top Front Right Center"),
+            (31, "top-side-left", "Top Side Left"),
+            (32, "top-side-right", "Top Side Right"),
+            (33, "lfe-left", "Low Frequency Effects Left"),
+            (34, "lfe-right", "Low Frequency Effects Right"),
+            (35, "bottom-center", "Bottom Center"),
+            (36, "bottom-left-center", "Bottom Left Center"),
+            (37, "bottom-right-center", "Bottom Right Center"),
+        ];
+        for (raw, token, name) in named {
+            let position = PipeWireAudioChannelPosition::new(raw);
+            assert_eq!(position.token(), token);
+            assert_eq!(position.name(), name);
+        }
+        let auxiliary = PipeWireAudioChannelPosition::new(SPA_AUDIO_CHANNEL_AUX_START + 63);
+        assert_eq!(auxiliary.token(), "aux-64");
+        assert_eq!(auxiliary.name(), "Aux 64");
+        assert!(auxiliary.is_auxiliary());
+        let custom = PipeWireAudioChannelPosition::new(SPA_AUDIO_CHANNEL_CUSTOM_START + 4);
+        assert_eq!(custom.token(), "custom-5");
+        assert_eq!(custom.name(), "Custom 5");
+        assert!(custom.is_custom());
+        assert_eq!(PipeWireAudioChannelPosition::new(999).token(), "unknown");
+    }
+
+    #[test]
+    fn fallback_channel_layouts_match_the_reference_order() {
+        assert_eq!(
+            normalize_channel_positions(6, &[])
+                .into_iter()
+                .map(PipeWireAudioChannelPosition::token)
+                .collect::<Vec<_>>(),
+            [
+                "front-left",
+                "front-right",
+                "front-center",
+                "lfe",
+                "side-left",
+                "side-right"
+            ]
+        );
+        assert_eq!(
+            normalize_channel_positions(3, &[3])
+                .into_iter()
+                .map(PipeWireAudioChannelPosition::token)
+                .collect::<Vec<_>>(),
+            ["front-left", "unknown", "unknown"]
+        );
+        assert_eq!(normalize_channel_positions(2, &[3, 4, 5]).len(), 2);
     }
 
     #[test]

@@ -11,8 +11,9 @@ use crate::model::{DiagnosticMessage, LogicalRect, ViewportSpec};
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
 use crate::{
     ExperimentalDocumentIdentity, ExperimentalNodeIdentity, MAX_CLONED_NODES_PER_DOCUMENT,
-    MAX_CLONED_NODES_PER_REPEAT, MAX_ITEMS_PER_REPEAT, NumericValue, PipeWireDocumentDemand,
-    RepeatItemSnapshot, RepeatSource, RepeatSourceSnapshot, RuntimeError, StateValueFormat,
+    MAX_CLONED_NODES_PER_REPEAT, MAX_ITEMS_PER_REPEAT, MAX_PIPEWIRE_CHANNELS_PER_NODE,
+    NumericValue, PipeWireDocumentDemand, RepeatItemSnapshot, RepeatSource, RepeatSourceSnapshot,
+    RuntimeError, StateValueFormat,
 };
 use blitz_dom::node::NodeData;
 use blitz_dom::{Document, DocumentConfig, LocalName, QualName, StyleThreading, local_name, ns};
@@ -147,6 +148,13 @@ pub enum PipeWireControlLocator {
         item_key: String,
         local_id: String,
     },
+    Contextual {
+        repeat_id: String,
+        node_item_key: String,
+        contextual_id: String,
+        channel_item_key: String,
+        local_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +162,12 @@ pub enum PipeWireAudioTarget {
     NodeItem {
         source_generation: u64,
         item_key: String,
+    },
+    ChannelItem {
+        source_generation: u64,
+        node_item_key: String,
+        layout_generation: u64,
+        channel_item_key: String,
     },
     DefaultSink,
     DefaultSource,
@@ -165,6 +179,7 @@ pub enum PipeWireAudioOperation {
     Unmute,
     ToggleMute,
     SetVolume,
+    SetChannelVolume,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +226,7 @@ impl PipeWireControlState {
 struct PendingRange {
     control: PipeWireControlIdentity,
     target: PipeWireAudioTarget,
+    operation: PipeWireAudioOperation,
     node: ExperimentalNodeIdentity,
     range: RangeControlDeclaration,
     authoritative_value: Option<String>,
@@ -245,7 +261,7 @@ impl LiveAction {
             | ShellAction::PipeWireAudioToggleMute => {
                 Self::PipeWireAudio(pipewire_mute_request(action, pipewire_target, control)?)
             }
-            ShellAction::PipeWireAudioSetVolume => {
+            ShellAction::PipeWireAudioSetVolume | ShellAction::PipeWireAudioSetChannelVolume => {
                 return Err(RuntimeError::InvalidMutationTarget(
                     "set-volume is emitted by range interaction".into(),
                 ));
@@ -310,6 +326,17 @@ pub struct LiveRuntimeMeasurements {
     pub repeat_identity_reuses: u64,
     pub repeated_item_count: u64,
     pub cloned_node_count: u64,
+    pub contextual_item_count: u64,
+    pub channel_source_activations: u64,
+    pub channel_source_releases: u64,
+    pub channel_insertions: u64,
+    pub channel_removals: u64,
+    pub channel_moves: u64,
+    pub channel_layout_replacements: u64,
+    pub channel_value_mutations: u64,
+    pub contextual_subtree_clones: u64,
+    pub retained_channel_identities: u64,
+    pub duplicate_channel_suppressions: u64,
     pub last_reconciliation_ms: f64,
     pub last_state_projection_ms: f64,
     pub last_attribute_mutation_ms: f64,
@@ -351,6 +378,17 @@ struct LiveRepeatedElement {
 struct LiveRepeatedItem {
     root: ExperimentalNodeIdentity,
     elements: Vec<LiveRepeatedElement>,
+    contextual_repeats: BTreeMap<String, LiveContextualRepeat>,
+}
+
+#[derive(Debug, Clone)]
+struct LiveContextualRepeat {
+    declaration: crate::ContextualRepeatDeclaration,
+    template_node: ExperimentalNodeIdentity,
+    prototype_root: ExperimentalNodeIdentity,
+    source_generation: u64,
+    items: BTreeMap<String, LiveRepeatedItem>,
+    order: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -910,6 +948,45 @@ impl LiveDocument {
                         ))
                     })?
             }
+            PipeWireControlLocator::Contextual {
+                repeat_id,
+                node_item_key,
+                contextual_id,
+                channel_item_key,
+                local_id,
+            } => {
+                let repeat = self.repeats.get(repeat_id).ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "PipeWire repeat `#{repeat_id}` disappeared"
+                    ))
+                })?;
+                let node = repeat.items.get(node_item_key).ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "PipeWire node item `{node_item_key}` disappeared"
+                    ))
+                })?;
+                let contextual = node.contextual_repeats.get(contextual_id).ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "contextual repeat `{contextual_id}` disappeared"
+                    ))
+                })?;
+                let channel = contextual.items.get(channel_item_key).ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "channel item `{channel_item_key}` disappeared"
+                    ))
+                })?;
+                channel
+                    .elements
+                    .iter()
+                    .find(|element| element.declaration.local_id == *local_id)
+                    .filter(|element| element.declaration.action.is_some())
+                    .map(|element| element.node)
+                    .ok_or_else(|| {
+                        RuntimeError::InvalidMutationTarget(format!(
+                            "channel control `{local_id}` disappeared"
+                        ))
+                    })?
+            }
         };
         let changed = self.apply_attribute_to_node(node, STATE_ATTRIBUTE, Some(state.as_str()))?;
         if changed {
@@ -1141,9 +1218,19 @@ impl LiveDocument {
                             | crate::ItemBindingKey::MuteState
                             | crate::ItemBindingKey::CanSetVolume
                             | crate::ItemBindingKey::CanSetMute
+                            | crate::ItemBindingKey::ChannelCount
+                            | crate::ItemBindingKey::ChannelStatus
                     )
                 ) {
                     demand.audio_state = true;
+                }
+                if matches!(
+                    descendant.binding,
+                    Some(
+                        crate::ItemBindingKey::ChannelCount | crate::ItemBindingKey::ChannelStatus
+                    )
+                ) {
+                    demand.channel_projection = true;
                 }
                 if descendant.action.is_some() {
                     demand.audio_state = true;
@@ -1151,6 +1238,20 @@ impl LiveDocument {
                 }
                 if let Some(property_key) = &descendant.property_key {
                     demand.property_keys.insert(property_key.clone());
+                }
+            }
+            if !repeat.declaration.contextual_repeats.is_empty() {
+                demand.audio_state = true;
+                demand.channel_projection = true;
+                for contextual in &repeat.declaration.contextual_repeats {
+                    if contextual
+                        .descendants
+                        .iter()
+                        .any(|descendant| descendant.range.is_some())
+                    {
+                        demand.audio_writes = true;
+                        demand.channel_writes = true;
+                    }
                 }
             }
         }
@@ -1591,20 +1692,8 @@ impl LiveDocument {
         let mut projected_document_nodes = self.total_repeated_nodes();
         for repeat_id in &repeat_ids {
             let repeat = &self.repeats[repeat_id];
-            let current = repeat
-                .items
-                .len()
-                .checked_mul(repeat.declaration.prototype_nodes)
-                .ok_or_else(|| {
-                    RuntimeError::LimitExceeded("current repeat node count overflow".into())
-                })?;
-            let desired = snapshot
-                .items
-                .len()
-                .checked_mul(repeat.declaration.prototype_nodes)
-                .ok_or_else(|| {
-                    RuntimeError::LimitExceeded("desired repeat node count overflow".into())
-                })?;
+            let current = Self::repeat_node_count(repeat)?;
+            let desired = Self::desired_repeat_node_count(&repeat.declaration, snapshot)?;
             if desired > MAX_CLONED_NODES_PER_REPEAT {
                 return Err(RuntimeError::LimitExceeded(format!(
                     "repeat `#{repeat_id}` would exceed the per-repeat node limit of {MAX_CLONED_NODES_PER_REPEAT}"
@@ -1670,6 +1759,13 @@ impl LiveDocument {
         self.measurements.repeated_item_count = self
             .repeats
             .values()
+            .map(|repeat| repeat.items.len() as u64)
+            .sum();
+        self.measurements.contextual_item_count = self
+            .repeats
+            .values()
+            .flat_map(|repeat| repeat.items.values())
+            .flat_map(|item| item.contextual_repeats.values())
             .map(|repeat| repeat.items.len() as u64)
             .sum();
         self.measurements.cloned_node_count = self.total_repeated_nodes() as u64;
@@ -1844,11 +1940,7 @@ impl LiveDocument {
                 repeat.source_generation
             )));
         }
-        let desired_repeat_nodes = snapshot
-            .items
-            .len()
-            .checked_mul(repeat.declaration.prototype_nodes)
-            .ok_or_else(|| RuntimeError::LimitExceeded("repeat node count overflow".into()))?;
+        let desired_repeat_nodes = Self::desired_repeat_node_count(&repeat.declaration, snapshot)?;
         if desired_repeat_nodes > MAX_CLONED_NODES_PER_REPEAT {
             return Err(RuntimeError::LimitExceeded(format!(
                 "repeat clone would exceed the per-repeat node limit of {MAX_CLONED_NODES_PER_REPEAT}"
@@ -1898,30 +1990,6 @@ impl LiveDocument {
                     update.property_updates = update.property_updates.saturating_add(changed);
                 }
             } else {
-                let repeat_nodes_after = repeat
-                    .items
-                    .len()
-                    .checked_add(1)
-                    .and_then(|items| items.checked_mul(repeat.declaration.prototype_nodes))
-                    .ok_or_else(|| {
-                        RuntimeError::LimitExceeded("repeat node count overflow".into())
-                    })?;
-                let nodes_after = self
-                    .total_repeated_nodes()
-                    .checked_add(repeat_nodes_after)
-                    .ok_or_else(|| {
-                        RuntimeError::LimitExceeded("repeated node count overflow".into())
-                    })?;
-                if repeat_nodes_after > MAX_CLONED_NODES_PER_REPEAT {
-                    return Err(RuntimeError::LimitExceeded(format!(
-                        "repeat clone would exceed the per-repeat node limit of {MAX_CLONED_NODES_PER_REPEAT}"
-                    )));
-                }
-                if nodes_after > MAX_CLONED_NODES_PER_DOCUMENT {
-                    return Err(RuntimeError::LimitExceeded(format!(
-                        "repeat clone would exceed the document node limit of {MAX_CLONED_NODES_PER_DOCUMENT}"
-                    )));
-                }
                 self.insert_repeat_item(repeat, item)?;
                 update.insertions = update.insertions.saturating_add(1);
                 update.subtree_clones = update.subtree_clones.saturating_add(1);
@@ -1956,13 +2024,66 @@ impl LiveDocument {
     fn total_repeated_nodes(&self) -> usize {
         self.repeats
             .values()
-            .map(|repeat| {
-                repeat
+            .map(|repeat| Self::repeat_node_count(repeat).unwrap_or(usize::MAX))
+            .fold(0usize, usize::saturating_add)
+    }
+
+    fn repeat_node_count(repeat: &LiveRepeat) -> Result<usize, RuntimeError> {
+        let outer = repeat
+            .items
+            .len()
+            .checked_mul(repeat.declaration.prototype_nodes)
+            .ok_or_else(|| RuntimeError::LimitExceeded("repeat node count overflow".into()))?;
+        repeat
+            .items
+            .values()
+            .flat_map(|item| item.contextual_repeats.values())
+            .try_fold(outer, |nodes, nested| {
+                nested
                     .items
                     .len()
-                    .saturating_mul(repeat.declaration.prototype_nodes)
+                    .checked_mul(nested.declaration.prototype_nodes)
+                    .and_then(|nested_nodes| nodes.checked_add(nested_nodes))
+                    .ok_or_else(|| {
+                        RuntimeError::LimitExceeded("contextual repeat node count overflow".into())
+                    })
             })
-            .sum()
+    }
+
+    fn desired_repeat_node_count(
+        declaration: &RepeatDeclaration,
+        snapshot: &RepeatSourceSnapshot,
+    ) -> Result<usize, RuntimeError> {
+        let outer = snapshot
+            .items
+            .len()
+            .checked_mul(declaration.prototype_nodes)
+            .ok_or_else(|| RuntimeError::LimitExceeded("repeat node count overflow".into()))?;
+        snapshot.items.iter().try_fold(outer, |nodes, item| {
+            let channel_count = item
+                .channels
+                .as_ref()
+                .map_or(0, |channels| channels.items.len());
+            if channel_count > MAX_PIPEWIRE_CHANNELS_PER_NODE {
+                return Err(RuntimeError::LimitExceeded(format!(
+                    "PipeWire node `{}` has {channel_count} public channels; limit is {MAX_PIPEWIRE_CHANNELS_PER_NODE}",
+                    item.key
+                )));
+            }
+            declaration
+                .contextual_repeats
+                .iter()
+                .try_fold(nodes, |nodes, nested| {
+                    channel_count
+                        .checked_mul(nested.prototype_nodes)
+                        .and_then(|nested_nodes| nodes.checked_add(nested_nodes))
+                        .ok_or_else(|| {
+                            RuntimeError::LimitExceeded(
+                                "contextual repeat node count overflow".into(),
+                            )
+                        })
+                })
+        })
     }
 
     fn insert_repeat_item(
@@ -2013,11 +2134,40 @@ impl LiveDocument {
                 })
             })
             .collect::<Result<Vec<_>, RuntimeError>>()?;
+        let mut contextual_repeats = BTreeMap::new();
+        for declaration in &repeat.declaration.contextual_repeats {
+            let template_node = clone_identities
+                .get(declaration.template_prototype_order)
+                .copied()
+                .ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "contextual repeat `{}` has an invalid prototype position",
+                        declaration.id
+                    ))
+                })?;
+            let template_slot = self.identities.resolve(&self.document, template_node)?;
+            let prototype_root_slot = template_root_element(&self.document, template_slot)?;
+            let prototype_root = self
+                .identities
+                .identity_for_slot(&self.document, prototype_root_slot)?;
+            contextual_repeats.insert(
+                declaration.id.clone(),
+                LiveContextualRepeat {
+                    declaration: declaration.clone(),
+                    template_node,
+                    prototype_root,
+                    source_generation: 0,
+                    items: BTreeMap::new(),
+                    order: Vec::new(),
+                },
+            );
+        }
         repeat.items.insert(
             item.key.clone(),
             LiveRepeatedItem {
                 root: clone_identities[0],
                 elements,
+                contextual_repeats,
             },
         );
         repeat.order.push(item.key.clone());
@@ -2051,14 +2201,40 @@ impl LiveDocument {
 
     fn update_repeat_item(
         &mut self,
-        repeat: &LiveRepeat,
+        repeat: &mut LiveRepeat,
         item: &RepeatItemSnapshot,
     ) -> Result<usize, RuntimeError> {
-        let live = repeat.items.get(&item.key).ok_or_else(|| {
+        let live = repeat.items.get_mut(&item.key).ok_or_else(|| {
             RuntimeError::InvalidMutationTarget(format!("repeat item `{}` disappeared", item.key))
         })?;
+        let elements = live.elements.clone();
+        let mut changed = self.update_repeated_elements(&elements, item)?;
+        if !live.contextual_repeats.is_empty() {
+            for contextual in live.contextual_repeats.values_mut() {
+                let empty;
+                let channels = if let Some(channels) = item.channels.as_ref() {
+                    channels
+                } else {
+                    empty = crate::ContextualRepeatSnapshot {
+                        source_generation: contextual.source_generation,
+                        items: Vec::new(),
+                    };
+                    &empty
+                };
+                changed =
+                    changed.saturating_add(self.reconcile_contextual_repeat(contextual, channels)?);
+            }
+        }
+        Ok(changed)
+    }
+
+    fn update_repeated_elements(
+        &mut self,
+        elements: &[LiveRepeatedElement],
+        item: &RepeatItemSnapshot,
+    ) -> Result<usize, RuntimeError> {
         let mut changed = 0usize;
-        for element in &live.elements {
+        for element in elements {
             let element_changed = match element.declaration.kind {
                 BuiltInElementKind::StateText => {
                     let binding = element.declaration.binding.ok_or_else(|| {
@@ -2092,21 +2268,17 @@ impl LiveDocument {
                             .as_ref()
                             .is_some_and(|key| item.properties.contains_key(key))
                         {
-                            StateToken::Available
+                            StateToken::Available.as_str()
                         } else {
-                            StateToken::Unavailable
+                            StateToken::Unavailable.as_str()
                         }
                     } else {
                         item.tokens
                             .get(&binding)
-                            .copied()
-                            .unwrap_or(StateToken::Unknown)
+                            .map(String::as_str)
+                            .unwrap_or(StateToken::Unknown.as_str())
                     };
-                    self.apply_attribute_to_node(
-                        element.node,
-                        STATE_ATTRIBUTE,
-                        Some(token.as_str()),
-                    )?
+                    self.apply_attribute_to_node(element.node, STATE_ATTRIBUTE, Some(token))?
                 }
                 BuiltInElementKind::StateValue => {
                     let binding = element.declaration.binding.ok_or_else(|| {
@@ -2147,7 +2319,7 @@ impl LiveDocument {
                         .declaration
                         .enabled_binding
                         .and_then(|binding| item.tokens.get(&binding))
-                        .is_some_and(|token| *token == StateToken::True);
+                        .is_some_and(|token| token == StateToken::True.as_str());
                     self.apply_control_availability(
                         element.node,
                         element.declaration.disabled,
@@ -2159,7 +2331,7 @@ impl LiveDocument {
                         .declaration
                         .enabled_binding
                         .and_then(|binding| item.tokens.get(&binding))
-                        .is_some_and(|token| *token == StateToken::True);
+                        .is_some_and(|token| token == StateToken::True.as_str());
                     let mut changed = self.apply_control_availability(
                         element.node,
                         element.declaration.disabled,
@@ -2208,6 +2380,220 @@ impl LiveDocument {
             changed = changed.saturating_add(usize::from(element_changed));
         }
         Ok(changed)
+    }
+
+    fn reconcile_contextual_repeat(
+        &mut self,
+        repeat: &mut LiveContextualRepeat,
+        snapshot: &crate::ContextualRepeatSnapshot,
+    ) -> Result<usize, RuntimeError> {
+        let was_empty = repeat.items.is_empty();
+        if snapshot.items.len() > crate::MAX_PIPEWIRE_CHANNELS_PER_NODE {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "`item.channels` contains {} items; limit is {}",
+                snapshot.items.len(),
+                crate::MAX_PIPEWIRE_CHANNELS_PER_NODE
+            )));
+        }
+        let mut keys = BTreeSet::new();
+        if snapshot
+            .items
+            .iter()
+            .any(|item| item.key.is_empty() || !keys.insert(item.key.clone()))
+        {
+            return Err(RuntimeError::InvalidMutationTarget(
+                "`item.channels` contains an empty or duplicate key".into(),
+            ));
+        }
+        if snapshot.source_generation < repeat.source_generation {
+            return Err(RuntimeError::InvalidMutationTarget(
+                "stale channel-layout generation".into(),
+            ));
+        }
+        let mut changed = 0usize;
+        if repeat.source_generation != 0 && repeat.source_generation != snapshot.source_generation {
+            self.measurements.channel_layout_replacements = self
+                .measurements
+                .channel_layout_replacements
+                .saturating_add(1);
+            for key in repeat.order.clone() {
+                self.remove_contextual_item(repeat, &key)?;
+                changed = changed.saturating_add(1);
+                self.measurements.channel_removals =
+                    self.measurements.channel_removals.saturating_add(1);
+            }
+        }
+        repeat.source_generation = snapshot.source_generation;
+        let desired = snapshot
+            .items
+            .iter()
+            .map(|item| item.key.as_str())
+            .collect::<BTreeSet<_>>();
+        for key in repeat
+            .order
+            .iter()
+            .filter(|key| !desired.contains(key.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.remove_contextual_item(repeat, &key)?;
+            changed = changed.saturating_add(1);
+            self.measurements.channel_removals =
+                self.measurements.channel_removals.saturating_add(1);
+        }
+        for item in &snapshot.items {
+            if let Some(live) = repeat.items.get(&item.key) {
+                self.measurements.retained_channel_identities = self
+                    .measurements
+                    .retained_channel_identities
+                    .saturating_add(1);
+                let elements = live.elements.clone();
+                let mutations = self.update_repeated_elements(&elements, item)?;
+                if mutations == 0 {
+                    self.measurements.duplicate_channel_suppressions = self
+                        .measurements
+                        .duplicate_channel_suppressions
+                        .saturating_add(1);
+                } else {
+                    self.measurements.channel_value_mutations = self
+                        .measurements
+                        .channel_value_mutations
+                        .saturating_add(mutations as u64);
+                }
+                changed = changed.saturating_add(mutations);
+            } else {
+                self.insert_contextual_item(repeat, item)?;
+                changed = changed.saturating_add(1);
+                self.measurements.channel_insertions =
+                    self.measurements.channel_insertions.saturating_add(1);
+                self.measurements.contextual_subtree_clones = self
+                    .measurements
+                    .contextual_subtree_clones
+                    .saturating_add(1);
+            }
+        }
+        let desired_order = snapshot
+            .items
+            .iter()
+            .map(|item| item.key.clone())
+            .collect::<Vec<_>>();
+        if repeat.order != desired_order {
+            self.measurements.channel_moves = self.measurements.channel_moves.saturating_add(
+                desired_order
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, key)| repeat.order.get(*index) != Some(*key))
+                    .count() as u64,
+            );
+            let marker = self
+                .identities
+                .resolve(&self.document, repeat.template_node)?;
+            for key in &desired_order {
+                let root = repeat.items.get(key).ok_or_else(|| {
+                    RuntimeError::InvalidMutationTarget(format!(
+                        "channel item `{key}` disappeared during reorder"
+                    ))
+                })?;
+                let slot = self.identities.resolve(&self.document, root.root)?;
+                self.document.mutate().insert_nodes_before(marker, &[slot]);
+            }
+            repeat.order = desired_order;
+            changed = changed.saturating_add(1);
+        }
+        let is_empty = repeat.items.is_empty();
+        if was_empty && !is_empty {
+            self.measurements.channel_source_activations = self
+                .measurements
+                .channel_source_activations
+                .saturating_add(1);
+        } else if !was_empty && is_empty {
+            self.measurements.channel_source_releases =
+                self.measurements.channel_source_releases.saturating_add(1);
+        }
+        Ok(changed)
+    }
+
+    fn insert_contextual_item(
+        &mut self,
+        repeat: &mut LiveContextualRepeat,
+        item: &RepeatItemSnapshot,
+    ) -> Result<(), RuntimeError> {
+        let prototype = self
+            .identities
+            .resolve(&self.document, repeat.prototype_root)?;
+        let clone = self.document.mutate().deep_clone_node(prototype);
+        let clone_slots = subtree_slots(&self.document, clone)?;
+        if clone_slots.len() != repeat.declaration.prototype_nodes {
+            return Err(RuntimeError::InvalidMutationTarget(format!(
+                "contextual repeat `{}` cloned {} nodes; expected {}",
+                repeat.declaration.id,
+                clone_slots.len(),
+                repeat.declaration.prototype_nodes
+            )));
+        }
+        let mut identities = Vec::with_capacity(clone_slots.len());
+        for slot in &clone_slots {
+            identities.push(self.identities.activate_created(&self.document, *slot)?);
+        }
+        let marker = self
+            .identities
+            .resolve(&self.document, repeat.template_node)?;
+        self.document.mutate().insert_nodes_before(marker, &[clone]);
+        let elements = repeat
+            .declaration
+            .descendants
+            .iter()
+            .map(|declaration| {
+                let node = identities
+                    .get(declaration.prototype_order)
+                    .copied()
+                    .ok_or_else(|| {
+                        RuntimeError::InvalidMutationTarget(format!(
+                            "channel local id `{}` has an invalid prototype position",
+                            declaration.local_id
+                        ))
+                    })?;
+                Ok(LiveRepeatedElement {
+                    declaration: declaration.clone(),
+                    node,
+                })
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        repeat.items.insert(
+            item.key.clone(),
+            LiveRepeatedItem {
+                root: identities[0],
+                elements: elements.clone(),
+                contextual_repeats: BTreeMap::new(),
+            },
+        );
+        repeat.order.push(item.key.clone());
+        self.update_repeated_elements(&elements, item)?;
+        Ok(())
+    }
+
+    fn remove_contextual_item(
+        &mut self,
+        repeat: &mut LiveContextualRepeat,
+        key: &str,
+    ) -> Result<(), RuntimeError> {
+        let Some(item) = repeat.items.remove(key) else {
+            return Ok(());
+        };
+        let slots = self.identities.subtree_slots(&self.document, item.root)?;
+        if self
+            .pressed_range
+            .as_ref()
+            .is_some_and(|range| slots.contains(&range.node.slot))
+        {
+            self.pressed_range = None;
+            self.pending_action = None;
+        }
+        let root = self.identities.resolve(&self.document, item.root)?;
+        self.document.mutate().remove_and_drop_node(root);
+        self.identities.retire_removed(&self.document, &slots)?;
+        repeat.order.retain(|current| current != key);
+        Ok(())
     }
 
     fn apply_control_availability(
@@ -2533,6 +2919,46 @@ impl LiveDocument {
             }
             for item_key in repeat.order.iter().rev() {
                 let item = &repeat.items[item_key];
+                for (contextual_id, contextual) in &item.contextual_repeats {
+                    for channel_item_key in contextual.order.iter().rev() {
+                        let channel = &contextual.items[channel_item_key];
+                        for element in channel.elements.iter().rev() {
+                            let Some(range) = element.declaration.range else {
+                                continue;
+                            };
+                            if self.node_is_disabled(element.node)? {
+                                continue;
+                            }
+                            let bounds = self.bounds_for_identity(element.node)?;
+                            if contains(&bounds, x, y) {
+                                return Ok(Some(PendingRange {
+                                    control: PipeWireControlIdentity {
+                                        document_generation: self.document_identity,
+                                        locator: PipeWireControlLocator::Contextual {
+                                            repeat_id: repeat_id.clone(),
+                                            node_item_key: item_key.clone(),
+                                            contextual_id: contextual_id.clone(),
+                                            channel_item_key: channel_item_key.clone(),
+                                            local_id: element.declaration.local_id.clone(),
+                                        },
+                                    },
+                                    target: PipeWireAudioTarget::ChannelItem {
+                                        source_generation: repeat.source_generation,
+                                        node_item_key: item_key.clone(),
+                                        layout_generation: contextual.source_generation,
+                                        channel_item_key: channel_item_key.clone(),
+                                    },
+                                    operation: PipeWireAudioOperation::SetChannelVolume,
+                                    node: element.node,
+                                    range,
+                                    authoritative_value: self
+                                        .node_attribute(element.node, "value")?,
+                                    last_desired: None,
+                                }));
+                            }
+                        }
+                    }
+                }
                 for element in item.elements.iter().rev() {
                     let Some(range) = element.declaration.range else {
                         continue;
@@ -2555,6 +2981,7 @@ impl LiveDocument {
                                 source_generation: repeat.source_generation,
                                 item_key: item_key.clone(),
                             },
+                            operation: PipeWireAudioOperation::SetVolume,
                             node: element.node,
                             range,
                             authoritative_value: self.node_attribute(element.node, "value")?,
@@ -2588,6 +3015,7 @@ impl LiveDocument {
                         locator: PipeWireControlLocator::Element(declaration.id.html_id.clone()),
                     },
                     target: pipewire_audio_target(range.target)?,
+                    operation: PipeWireAudioOperation::SetVolume,
                     node,
                     range,
                     authoritative_value: self.node_attribute(node, "value")?,
@@ -2633,7 +3061,7 @@ impl LiveDocument {
             self.pending_action = Some(LiveAction::PipeWireAudio(PipeWireControlRequest {
                 control: pending.control.clone(),
                 target: pending.target.clone(),
-                operation: PipeWireAudioOperation::SetVolume,
+                operation: pending.operation,
                 volume: Some(desired),
             }));
             pending.last_desired = Some(desired);
@@ -2736,6 +3164,9 @@ fn pipewire_mute_operation(action: ShellAction) -> Result<PipeWireAudioOperation
         ShellAction::PipeWireAudioMute => Ok(PipeWireAudioOperation::Mute),
         ShellAction::PipeWireAudioUnmute => Ok(PipeWireAudioOperation::Unmute),
         ShellAction::PipeWireAudioToggleMute => Ok(PipeWireAudioOperation::ToggleMute),
+        ShellAction::PipeWireAudioSetChannelVolume => Err(RuntimeError::InvalidMutationTarget(
+            "set-channel-volume is emitted by contextual range interaction".into(),
+        )),
         _ => Err(RuntimeError::InvalidMutationTarget(format!(
             "action `{}` is not a PipeWire mute operation",
             action.as_str()
@@ -2856,6 +3287,28 @@ fn subtree_slots(document: &HtmlDocument, root: usize) -> Result<Vec<usize>, Run
         stack.extend(node.children.iter().rev().copied());
     }
     Ok(slots)
+}
+
+fn template_root_element(document: &HtmlDocument, template: usize) -> Result<usize, RuntimeError> {
+    let node = document.get_node(template).ok_or_else(|| {
+        RuntimeError::InvalidMutationTarget("contextual template disappeared".into())
+    })?;
+    let roots = node
+        .children
+        .iter()
+        .copied()
+        .filter(|slot| {
+            document
+                .get_node(*slot)
+                .is_some_and(|node| matches!(node.data, NodeData::Element(_)))
+        })
+        .collect::<Vec<_>>();
+    if roots.len() != 1 {
+        return Err(RuntimeError::InvalidMutationTarget(
+            "contextual template no longer has exactly one root".into(),
+        ));
+    }
+    Ok(roots[0])
 }
 
 fn node_bounds(node: &blitz_dom::Node) -> LogicalRect {
@@ -3067,8 +3520,14 @@ mod tests {
             key: key.into(),
             text: BTreeMap::from([(crate::ItemBindingKey::Model, model.into())]),
             tokens: BTreeMap::from([
-                (crate::ItemBindingKey::State, StateToken::Discharging),
-                (crate::ItemBindingKey::Type, StateToken::Battery),
+                (
+                    crate::ItemBindingKey::State,
+                    StateToken::Discharging.as_str().into(),
+                ),
+                (
+                    crate::ItemBindingKey::Type,
+                    StateToken::Battery.as_str().into(),
+                ),
             ]),
             values: BTreeMap::from([
                 (
@@ -3078,6 +3537,7 @@ mod tests {
                 (crate::ItemBindingKey::Energy, NumericValue::Decimal(42.0)),
             ]),
             properties: BTreeMap::new(),
+            channels: None,
         }
     }
 
@@ -3173,6 +3633,8 @@ mod tests {
         assert!(demand.defaults);
         assert!(demand.audio_state);
         assert!(demand.audio_writes);
+        assert!(demand.channel_projection);
+        assert!(demand.channel_writes);
         assert_eq!(
             demand.property_keys,
             BTreeSet::from(["application.name".into(), "media.title".into()])
@@ -3193,26 +3655,99 @@ mod tests {
                 (crate::ItemBindingKey::Direction, "Sink".into()),
             ]),
             tokens: BTreeMap::from([
-                (crate::ItemBindingKey::NodeType, StateToken::AudioSink),
-                (crate::ItemBindingKey::NodeState, StateToken::Running),
-                (crate::ItemBindingKey::DefaultRole, StateToken::DefaultSink),
+                (
+                    crate::ItemBindingKey::NodeType,
+                    StateToken::AudioSink.as_str().into(),
+                ),
+                (
+                    crate::ItemBindingKey::NodeState,
+                    StateToken::Running.as_str().into(),
+                ),
+                (
+                    crate::ItemBindingKey::DefaultRole,
+                    StateToken::DefaultSink.as_str().into(),
+                ),
                 (
                     crate::ItemBindingKey::ConfiguredRole,
-                    StateToken::ConfiguredSink,
+                    StateToken::ConfiguredSink.as_str().into(),
                 ),
-                (crate::ItemBindingKey::IsAudio, StateToken::True),
-                (crate::ItemBindingKey::IsVideo, StateToken::False),
-                (crate::ItemBindingKey::IsStream, StateToken::False),
-                (crate::ItemBindingKey::AudioStatus, StateToken::Ready),
-                (crate::ItemBindingKey::MuteState, StateToken::Unmuted),
-                (crate::ItemBindingKey::CanSetVolume, StateToken::True),
-                (crate::ItemBindingKey::CanSetMute, StateToken::True),
+                (
+                    crate::ItemBindingKey::IsAudio,
+                    StateToken::True.as_str().into(),
+                ),
+                (
+                    crate::ItemBindingKey::IsVideo,
+                    StateToken::False.as_str().into(),
+                ),
+                (
+                    crate::ItemBindingKey::IsStream,
+                    StateToken::False.as_str().into(),
+                ),
+                (
+                    crate::ItemBindingKey::AudioStatus,
+                    StateToken::Ready.as_str().into(),
+                ),
+                (
+                    crate::ItemBindingKey::MuteState,
+                    StateToken::Unmuted.as_str().into(),
+                ),
+                (
+                    crate::ItemBindingKey::CanSetVolume,
+                    StateToken::True.as_str().into(),
+                ),
+                (
+                    crate::ItemBindingKey::CanSetMute,
+                    StateToken::True.as_str().into(),
+                ),
             ]),
             values: BTreeMap::from([
                 (crate::ItemBindingKey::RawId, NumericValue::Integer(42)),
                 (crate::ItemBindingKey::Volume, NumericValue::Decimal(0.75)),
             ]),
             properties: BTreeMap::from([("application.name".into(), "Player".into())]),
+            channels: Some(crate::ContextualRepeatSnapshot {
+                source_generation: 1,
+                items: vec![
+                    RepeatItemSnapshot {
+                        key: "1:0:3".into(),
+                        text: BTreeMap::from([
+                            (crate::ItemBindingKey::PositionName, "Front Left".into()),
+                            (crate::ItemBindingKey::Position, "front-left".into()),
+                            (crate::ItemBindingKey::Status, "Ready".into()),
+                        ]),
+                        tokens: BTreeMap::from([
+                            (crate::ItemBindingKey::Position, "front-left".into()),
+                            (crate::ItemBindingKey::Status, "ready".into()),
+                            (crate::ItemBindingKey::CanSetVolume, "true".into()),
+                        ]),
+                        values: BTreeMap::from([
+                            (crate::ItemBindingKey::Index, NumericValue::Integer(0)),
+                            (crate::ItemBindingKey::Volume, NumericValue::Decimal(0.8)),
+                        ]),
+                        properties: BTreeMap::new(),
+                        channels: None,
+                    },
+                    RepeatItemSnapshot {
+                        key: "1:1:4".into(),
+                        text: BTreeMap::from([
+                            (crate::ItemBindingKey::PositionName, "Front Right".into()),
+                            (crate::ItemBindingKey::Position, "front-right".into()),
+                            (crate::ItemBindingKey::Status, "Ready".into()),
+                        ]),
+                        tokens: BTreeMap::from([
+                            (crate::ItemBindingKey::Position, "front-right".into()),
+                            (crate::ItemBindingKey::Status, "ready".into()),
+                            (crate::ItemBindingKey::CanSetVolume, "true".into()),
+                        ]),
+                        values: BTreeMap::from([
+                            (crate::ItemBindingKey::Index, NumericValue::Integer(1)),
+                            (crate::ItemBindingKey::Volume, NumericValue::Decimal(0.6)),
+                        ]),
+                        properties: BTreeMap::new(),
+                        channels: None,
+                    },
+                ],
+            }),
         };
         let first = RepeatSourceSnapshot {
             source: RepeatSource::PipeWireNodes,
@@ -3221,6 +3756,34 @@ mod tests {
         };
         assert_eq!(overlay.apply_repeat_source(&first).unwrap().insertions, 1);
         let identity = overlay.repeats["node-card"].items["7:42"].root;
+        let contextual =
+            &overlay.repeats["node-card"].items["7:42"].contextual_repeats["channels-0"];
+        assert_eq!(contextual.order, ["1:0:3", "1:1:4"]);
+        let left_identity = contextual.items["1:0:3"].root;
+        let left_range = contextual.items["1:0:3"]
+            .elements
+            .iter()
+            .find(|element| element.declaration.local_id == "channel-volume-control")
+            .unwrap()
+            .node;
+        let left_bounds = overlay.bounds_for_identity(left_range).unwrap();
+        let pending = overlay
+            .range_at(
+                left_bounds.x + left_bounds.width * 0.5,
+                left_bounds.y + left_bounds.height * 0.5,
+            )
+            .unwrap()
+            .expect("channel range is interactive");
+        assert_eq!(pending.operation, PipeWireAudioOperation::SetChannelVolume);
+        assert_eq!(
+            pending.target,
+            PipeWireAudioTarget::ChannelItem {
+                source_generation: 7,
+                node_item_key: "7:42".into(),
+                layout_generation: 1,
+                channel_item_key: "1:0:3".into(),
+            }
+        );
         let repeated = &overlay.repeats["node-card"].items["7:42"].elements;
         let mute_node = repeated
             .iter()
@@ -3278,6 +3841,9 @@ mod tests {
             .insert("media.title".into(), "Current track".into());
         item.values
             .insert(crate::ItemBindingKey::Volume, NumericValue::Decimal(0.9));
+        item.channels.as_mut().unwrap().items[0]
+            .values
+            .insert(crate::ItemBindingKey::Volume, NumericValue::Decimal(0.85));
         let second = RepeatSourceSnapshot {
             source: RepeatSource::PipeWireNodes,
             source_generation: 7,
@@ -3287,6 +3853,12 @@ mod tests {
         assert!(update.property_updates > 0);
         assert_eq!(overlay.repeats["node-card"].items["7:42"].root, identity);
         assert_eq!(
+            overlay.repeats["node-card"].items["7:42"].contextual_repeats["channels-0"]
+                .items["1:0:3"]
+                .root,
+            left_identity
+        );
+        assert_eq!(
             overlay.node_attribute(range_node, "value").unwrap(),
             Some("0.9".into())
         );
@@ -3295,6 +3867,49 @@ mod tests {
             parse_count
         );
         assert_eq!(overlay.measurements().registry_scan_count, scans);
+
+        let mut replacement_item = second.items[0].clone();
+        let channels = replacement_item.channels.as_mut().unwrap();
+        channels.source_generation = 2;
+        channels.items.reverse();
+        for (index, channel) in channels.items.iter_mut().enumerate() {
+            let raw = if index == 0 { 4 } else { 3 };
+            channel.key = format!("2:{index}:{raw}");
+            channel.values.insert(
+                crate::ItemBindingKey::Index,
+                NumericValue::Integer(index as i64),
+            );
+        }
+        let replacement = RepeatSourceSnapshot {
+            source: RepeatSource::PipeWireNodes,
+            source_generation: 7,
+            items: vec![replacement_item],
+        };
+        assert!(
+            overlay
+                .apply_repeat_source(&replacement)
+                .unwrap()
+                .property_updates
+                > 0
+        );
+        let live_item = &overlay.repeats["node-card"].items["7:42"];
+        assert_eq!(live_item.root, identity);
+        let channels = &live_item.contextual_repeats["channels-0"];
+        assert_eq!(channels.source_generation, 2);
+        assert!(!channels.items.contains_key("1:0:3"));
+        assert_ne!(channels.items["2:1:3"].root, left_identity);
+        assert!(
+            overlay
+                .apply_pipewire_control_state(&pending.control, PipeWireControlState::Idle)
+                .is_err()
+        );
+        let measurements = overlay.measurements();
+        assert_eq!(measurements.contextual_item_count, 2);
+        assert_eq!(measurements.channel_source_activations, 1);
+        assert_eq!(measurements.channel_layout_replacements, 1);
+        assert_eq!(measurements.channel_insertions, 4);
+        assert_eq!(measurements.channel_removals, 2);
+        assert!(measurements.retained_channel_identities >= 2);
     }
 
     #[test]

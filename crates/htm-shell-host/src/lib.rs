@@ -26,7 +26,10 @@ pub use manifest::{
     SurfaceKind, SurfacePreset, SurfaceTemplate, ValidatedManifest,
 };
 pub use output::{OutputCatalog, OutputEligibility, OutputKey, OutputRecord};
-pub use pipewire::{PipeWireNodeDirection, PipeWireNodeType, run_pipewire_graph_diagnostic_json};
+pub use pipewire::{
+    PipeWireAudioChannelPosition, PipeWireNodeDirection, PipeWireNodeType,
+    run_pipewire_graph_diagnostic_json,
+};
 pub use pixel::{Argb8888Layout, convert_premultiplied_rgba_to_argb8888};
 pub use power::{
     BatteryAvailability, BatteryChargeState, BatteryServiceSummary, BatterySnapshot,

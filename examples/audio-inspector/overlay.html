@@ -210,6 +210,54 @@
                       data-htm-action="pipewire.audio.toggle_mute"
                       data-htm-enabled-bind="item.can_set_mute">Toggle mute</button>
             </div>
+            <section class="channels"
+                     data-htm-element="state-token"
+                     data-htm-local-id="channel-status"
+                     data-htm-bind="item.channel_status">
+              <header>
+                <strong>Ordered channels</strong>
+                <data data-htm-element="state-value"
+                      data-htm-local-id="channel-count"
+                      data-htm-bind="item.channel_count"></data>
+              </header>
+              <div class="channel-strips">
+                <template data-htm-element="repeat"
+                          data-htm-source="item.channels">
+                  <div class="channel"
+                       data-htm-element="state-token"
+                       data-htm-local-id="position"
+                       data-htm-bind="item.position">
+                    <span data-htm-element="state-text"
+                          data-htm-local-id="position-name"
+                          data-htm-bind="item.position_name"></span>
+                    <data data-htm-element="state-value"
+                          data-htm-local-id="channel-index"
+                          data-htm-bind="item.index"></data>
+                    <data data-htm-element="state-value"
+                          data-htm-local-id="channel-volume"
+                          data-htm-bind="item.volume"
+                          data-htm-format="percent"></data>
+                    <span class="channel-flag auxiliary"
+                          data-htm-element="state-token"
+                          data-htm-local-id="channel-auxiliary"
+                          data-htm-bind="item.is_auxiliary"></span>
+                    <span class="channel-flag custom"
+                          data-htm-element="state-token"
+                          data-htm-local-id="channel-custom"
+                          data-htm-bind="item.is_custom"></span>
+                    <input type="range"
+                           data-htm-element="range-control"
+                           data-htm-local-id="channel-volume-control"
+                           data-htm-bind="item.volume"
+                           data-htm-action="pipewire.audio.set_channel_volume"
+                           data-htm-enabled-bind="item.can_set_volume"
+                           min="0"
+                           max="1"
+                           step="0.01">
+                  </div>
+                </template>
+              </div>
+            </section>
             <footer>
               <span data-htm-element="state-token"
                     data-htm-local-id="default-role"

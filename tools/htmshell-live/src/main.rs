@@ -885,6 +885,20 @@ fn print_built_in_metrics(prefix: &str, summary: &SurfaceHostSummary) {
         summary.last_reconciliation_us,
     );
     println!(
+        "{prefix}_channel_updates=activations:{} releases:{} insertions:{} removals:{} moves:{} layouts:{} values:{} clones:{} identity_reuses:{} duplicates:{} items:{}",
+        summary.channel_source_activations,
+        summary.channel_source_releases,
+        summary.channel_insertions,
+        summary.channel_removals,
+        summary.channel_moves,
+        summary.channel_layout_replacements,
+        summary.channel_value_mutations,
+        summary.contextual_subtree_clones,
+        summary.retained_channel_identities,
+        summary.duplicate_channel_suppressions,
+        summary.contextual_item_count,
+    );
+    println!(
         "{prefix}_component_latency_us=release_to_dispatch:{} dispatch_to_mutation:{} mutation_to_commit:{} mutation_to_callback:{}",
         summary.last_pointer_release_to_action_dispatch_us,
         summary.last_action_dispatch_to_state_mutation_us,

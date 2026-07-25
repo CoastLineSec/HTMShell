@@ -3,7 +3,8 @@
 **Module:** `HTMShell.Services.PipeWire`
 **Scope:** Process
 
-`PipeWire` exposes connection state, the current node collection, default audio state, and typed volume and mute controls.
+`PipeWire` exposes connection state, the current node collection, default audio
+state, ordered channels, and typed volume and mute controls.
 
 ## State
 
@@ -25,7 +26,10 @@ Node updates are event-driven. Insertions, removals, property changes, and order
 
 Reading volume or mute state activates audio parameter tracking. Declaring a mute action or [`range-control`](../HTMShell.Elements/range-control.md) also activates write demand.
 
-Subscriptions and node write coordinators are shared process-wide. Removing the final audio consumer releases audio tracking. No channel, link, or peak demand is created.
+Subscriptions and node write coordinators are shared process-wide. Removing the
+final audio consumer releases audio tracking. `item.channels` adds
+document-driven channel projection and channel-write demand without creating
+link or peak demand.
 
 ## Lifecycle
 
@@ -37,4 +41,7 @@ PipeWire absence is valid. On disconnect, current nodes and defaults are cleared
 - [`Defaults`](Defaults.md)
 - [`AudioNode`](AudioNode.md)
 - [`AudioControls`](AudioControls.md)
+- [`AudioChannel`](AudioChannel.md)
+- [`Channels`](Channels.md)
+- [`ChannelControls`](ChannelControls.md)
 - [PipeWire nodes guide](../../guide/audio.md)

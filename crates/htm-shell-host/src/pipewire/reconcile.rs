@@ -5,7 +5,7 @@ use super::model::{
     PipeWireLinkId, PipeWireLinkSnapshot, PipeWireLinkState, PipeWireModelError,
     PipeWireNodeAudioSnapshot, PipeWireNodeClassification, PipeWireNodeId, PipeWireNodeSnapshot,
     PipeWireNodeState, PipeWireResourceCounters, PipeWireSnapshot, RawLinkInfo, RawNodeAudioInfo,
-    RawNodeInfo, bounded_text, perceptual_average,
+    RawNodeInfo, bounded_text, normalize_channel_positions, perceptual_average,
 };
 use super::public::PipeWireNodeType;
 use serde::Deserialize;
@@ -28,6 +28,8 @@ struct NodeRecord {
     input_ports: u32,
     output_ports: u32,
     audio_channels: Option<Vec<FiniteVolume>>,
+    audio_channel_positions: Option<Vec<u32>>,
+    channel_layout_generation: u64,
     muted: Option<bool>,
     audio_tracked: bool,
     writable: bool,
@@ -169,6 +171,8 @@ impl PipeWireReconciler {
                             input_ports: 0,
                             output_ports: 0,
                             audio_channels: None,
+                            audio_channel_positions: None,
+                            channel_layout_generation: 0,
                             muted: None,
                             audio_tracked: false,
                             writable: false,
@@ -199,7 +203,14 @@ impl PipeWireReconciler {
                     if let Some(node) = self.nodes.get_mut(&raw_id) {
                         node.audio_tracked = tracked;
                         if !tracked {
+                            if node.audio_channels.is_some()
+                                || node.audio_channel_positions.is_some()
+                            {
+                                node.channel_layout_generation =
+                                    node.channel_layout_generation.saturating_add(1);
+                            }
                             node.audio_channels = None;
+                            node.audio_channel_positions = None;
                             node.muted = None;
                         }
                     }
@@ -298,6 +309,10 @@ impl PipeWireReconciler {
         let Some(node) = self.nodes.get_mut(&info.raw_id) else {
             return Ok(());
         };
+        let old_layout = normalize_channel_positions(
+            node.audio_channels.as_ref().map_or(0, Vec::len),
+            node.audio_channel_positions.as_deref().unwrap_or(&[]),
+        );
         if let Some(channels) = info.channel_volumes {
             if channels.len() > MAX_AUDIO_CHANNELS {
                 return Err(PipeWireModelError::ResourceLimit(format!(
@@ -317,6 +332,25 @@ impl PipeWireReconciler {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             node.audio_channels = Some(channels);
+        }
+        if let Some(positions) = info.channel_positions {
+            if positions.len() > MAX_AUDIO_CHANNELS {
+                return Err(PipeWireModelError::ResourceLimit(format!(
+                    "node {} audio channel-map count exceeds {MAX_AUDIO_CHANNELS}",
+                    info.raw_id
+                )));
+            }
+            node.audio_channel_positions = Some(positions);
+        }
+        let new_layout = normalize_channel_positions(
+            node.audio_channels.as_ref().map_or(0, Vec::len),
+            node.audio_channel_positions.as_deref().unwrap_or(&[]),
+        );
+        if old_layout != new_layout {
+            node.channel_layout_generation = node.channel_layout_generation.saturating_add(1);
+            if node.channel_layout_generation == 0 {
+                node.channel_layout_generation = 1;
+            }
         }
         if let Some(muted) = info.muted {
             node.muted = Some(muted);
@@ -479,11 +513,19 @@ impl PipeWireReconciler {
                     can_set_volume: node.writable && average_volume.is_some(),
                     can_set_mute: node.writable && node.muted.is_some(),
                     channels,
+                    channel_positions: normalize_channel_positions(
+                        node.audio_channels.as_ref().map_or(0, Vec::len),
+                        node.audio_channel_positions.as_deref().unwrap_or(&[]),
+                    ),
+                    channel_layout_generation: node.channel_layout_generation,
                     average_volume,
                     muted: node.muted,
                 }
             } else {
-                PipeWireNodeAudioSnapshot::default()
+                PipeWireNodeAudioSnapshot {
+                    channel_layout_generation: node.channel_layout_generation,
+                    ..PipeWireNodeAudioSnapshot::default()
+                }
             },
             ready: node.ready,
         })
@@ -783,6 +825,7 @@ mod tests {
                 .apply([PipeWireDelta::NodeAudioInfo(RawNodeAudioInfo {
                     raw_id: 9,
                     channel_volumes: Some(vec![linear, linear]),
+                    channel_positions: Some(vec![3, 4]),
                     muted: Some(index % 2 == 0),
                 })])
                 .unwrap();
@@ -791,6 +834,7 @@ mod tests {
         let duplicate = PipeWireDelta::NodeAudioInfo(RawNodeAudioInfo {
             raw_id: 9,
             channel_volumes: Some(vec![1.0, 1.0]),
+            channel_positions: Some(vec![3, 4]),
             muted: Some(false),
         });
         for _ in 0..500 {
@@ -802,6 +846,82 @@ mod tests {
                 .resources
                 .duplicate_publications_suppressed
                 >= 500
+        );
+    }
+
+    #[test]
+    fn channel_layout_generation_changes_only_with_normalized_layout() {
+        let mut reconciler = PipeWireReconciler::default();
+        reconciler.begin_generation(8).unwrap();
+        let mut initial = add_node(12, "stream", "Stream/Output/Audio");
+        initial.extend([
+            PipeWireDelta::NodePermissions {
+                raw_id: 12,
+                writable: true,
+            },
+            PipeWireDelta::NodeAudioTracking {
+                raw_id: 12,
+                tracked: true,
+            },
+            PipeWireDelta::NodeAudioInfo(RawNodeAudioInfo {
+                raw_id: 12,
+                channel_volumes: Some(vec![1.0, 0.125]),
+                channel_positions: Some(vec![3, 4]),
+                muted: Some(false),
+            }),
+        ]);
+        let first = reconciler.apply(initial).unwrap().unwrap();
+        let node_id = first.nodes[0].id;
+        let layout = first.nodes[0].audio.channel_layout_generation;
+        assert_ne!(layout, 0);
+
+        let volume_only = reconciler
+            .apply([PipeWireDelta::NodeAudioInfo(RawNodeAudioInfo {
+                raw_id: 12,
+                channel_volumes: Some(vec![0.125, 1.0]),
+                channel_positions: None,
+                muted: None,
+            })])
+            .unwrap()
+            .unwrap();
+        assert_eq!(volume_only.nodes[0].id, node_id);
+        assert_eq!(volume_only.nodes[0].audio.channel_layout_generation, layout);
+
+        let replacement = reconciler
+            .apply([PipeWireDelta::NodeAudioInfo(RawNodeAudioInfo {
+                raw_id: 12,
+                channel_volumes: None,
+                channel_positions: Some(vec![4, 3]),
+                muted: None,
+            })])
+            .unwrap()
+            .unwrap();
+        assert_eq!(replacement.nodes[0].id, node_id);
+        assert_eq!(
+            replacement.nodes[0].audio.channel_layout_generation,
+            layout + 1
+        );
+        assert_eq!(
+            replacement.nodes[0]
+                .audio
+                .channel_positions
+                .iter()
+                .map(|position| position.token())
+                .collect::<Vec<_>>(),
+            ["front-right", "front-left"]
+        );
+
+        let unavailable = reconciler
+            .apply([PipeWireDelta::NodeAudioTracking {
+                raw_id: 12,
+                tracked: false,
+            }])
+            .unwrap()
+            .unwrap();
+        assert!(unavailable.nodes[0].audio.channels.is_empty());
+        assert_eq!(
+            unavailable.nodes[0].audio.channel_layout_generation,
+            layout + 2
         );
     }
 

@@ -40,6 +40,18 @@ dd[data-htm-state="unavailable"] { color: #74839a; }
 .node-audio { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; margin-top: 12px; padding-top: 12px; border-top: 1px solid #3c4f6c; }
 .node-audio input { grid-column: 1 / -1; }
 .audio-reading { display: flex; gap: 8px; }
+.channels { margin-top: 12px; padding-top: 12px; border-top: 1px solid #3c4f6c; }
+.channels > header { display: flex; justify-content: space-between; color: #91a8c8; }
+.channel-strips { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-top: 8px; }
+.channel { display: grid; gap: 5px; padding: 8px; border-radius: 8px; background: #121d2f; }
+.channel > span { min-height: 2.4em; }
+.channel > data { color: #91a8c8; }
+.channel[data-htm-state^="aux-"] { border: 1px solid #c0a6ff; }
+.channel[data-htm-state^="custom-"],
+.channel[data-htm-state="unknown"] { border: 1px solid #ffbd7a; }
+.channel-flag { display: none; }
+.channel-flag[data-htm-state="true"] { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #c0a6ff; }
+.channel-flag.custom[data-htm-state="true"] { background: #ffbd7a; }
 footer { display: flex; gap: 6px; margin-top: 12px; }
 footer > span { min-width: 12px; min-height: 5px; border-radius: 4px; background: #42536e; }
 .overlay-footer { align-items: center; }

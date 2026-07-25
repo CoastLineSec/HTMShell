@@ -1,13 +1,17 @@
 use htm_runtime::{
     CLOCK_FORMAT_CONVERSIONS, CLOCK_FORMAT_FLAGS, CLOCK_PUBLIC_ATTRIBUTES, ClockFormat,
-    ItemBindingKey, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM,
+    ItemBindingKey, MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT, MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE,
+    MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM,
+    MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM, MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_DOCUMENT,
+    MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM, MAX_PIPEWIRE_CHANNELS_PER_NODE,
     MAX_PIPEWIRE_PERCEPTUAL_VOLUME, MAX_RANGE_CONTROLS_PER_DOCUMENT, MAX_RANGE_CONTROLS_PER_ITEM,
     RepeatSource, ShellAction, StateBindingKey, StateToken, StateValueFormat,
     built_in_registry_names,
 };
 use htm_shell_host::{
-    PerformanceDegradationReason, PipeWireNodeDirection, PipeWireNodeType, PowerProfile,
-    SurfaceKind, UPowerDeviceState, UPowerDeviceType, ValidatedManifest,
+    PerformanceDegradationReason, PipeWireAudioChannelPosition, PipeWireNodeDirection,
+    PipeWireNodeType, PowerProfile, SurfaceKind, UPowerDeviceState, UPowerDeviceType,
+    ValidatedManifest,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -262,6 +266,27 @@ fn typed_public_names_are_covered_by_the_reference() {
             MAX_RANGE_CONTROLS_PER_ITEM,
             "range controls per repeated item",
         ),
+        (
+            MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE,
+            "contextual repeats per node template",
+        ),
+        (
+            MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT,
+            "contextual repeats per document",
+        ),
+        (MAX_PIPEWIRE_CHANNELS_PER_NODE, "public channels per node"),
+        (
+            MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM,
+            "channel bindings per item",
+        ),
+        (
+            MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM,
+            "channel range controls per item",
+        ),
+        (
+            MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_DOCUMENT,
+            "channel range controls per document",
+        ),
     ] {
         assert!(
             reference.contains(&limit.to_string()),
@@ -318,6 +343,25 @@ fn typed_public_names_are_covered_by_the_reference() {
             documented_name(&reference, direction.token().as_str()),
             "PipeWire direction is undocumented: {}",
             direction.token().as_str()
+        );
+    }
+    for position in PipeWireAudioChannelPosition::NAMED {
+        assert!(
+            documented_name(&reference, &position.token()),
+            "PipeWire channel position is undocumented: {}",
+            position.token()
+        );
+    }
+    for position in [
+        PipeWireAudioChannelPosition::AUXILIARY_FIRST,
+        PipeWireAudioChannelPosition::AUXILIARY_LAST,
+        PipeWireAudioChannelPosition::CUSTOM_FIRST,
+        PipeWireAudioChannelPosition::CUSTOM_LAST,
+    ] {
+        assert!(
+            documented_name(&reference, &position.token()),
+            "PipeWire ranged channel position is undocumented: {}",
+            position.token()
         );
     }
     for attribute in CLOCK_PUBLIC_ATTRIBUTES {
@@ -388,6 +432,15 @@ fn audio_example_uses_only_the_typed_control_surface() {
         "item.volume",
         "item.mute_state",
         "item.audio_status",
+        "item.channels",
+        "item.channel_count",
+        "item.channel_status",
+        "item.position",
+        "item.position_name",
+        "item.index",
+        "item.is_auxiliary",
+        "item.is_custom",
+        "pipewire.audio.set_channel_volume",
         "pending",
         "failed",
     ] {

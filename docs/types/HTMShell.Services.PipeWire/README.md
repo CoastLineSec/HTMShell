@@ -13,5 +13,9 @@ Process-scoped PipeWire node state and typed audio controls.
 - [`AudioNode`](AudioNode.md): volume, mute, and control capability
 - [`AudioControls`](AudioControls.md): typed item-local and actual-default controls
 - [`Volume`](Volume.md): perceptual average and amplification bounds
+- [`AudioChannel`](AudioChannel.md): ordered channel state and position tokens
+- [`Channels`](Channels.md): contextual repetition, ordering, and fallback layouts
+- [`ChannelControls`](ChannelControls.md): full-vector per-channel writes
 
-The module does not expose public channels, links, peak monitoring, preferred-default writes, or stream movement.
+The module does not expose channel mute, channel-map writes, links, peak
+monitoring, preferred-default writes, or stream movement.

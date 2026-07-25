@@ -1,14 +1,16 @@
 use crate::identity::{IdentityRegistry, author_slots};
 use crate::{
     ClockFormat, ClockTimeZone, ExperimentalDocumentIdentity, ExperimentalNodeIdentity,
-    ItemBindingKey, MAX_CLOCK_DECLARATIONS_PER_DOCUMENT, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT,
+    ItemBindingKey, MAX_CLOCK_DECLARATIONS_PER_DOCUMENT, MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT,
+    MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT,
     MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM, MAX_PIPEWIRE_BINDINGS_PER_ITEM,
-    MAX_PIPEWIRE_PERCEPTUAL_VOLUME, MAX_PIPEWIRE_PROPERTY_KEY_BYTES,
-    MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT, MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM,
-    MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_RANGE_CONTROLS_PER_DOCUMENT,
-    MAX_RANGE_CONTROLS_PER_ITEM, MAX_RANGE_NUMBER_BYTES, MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE,
-    MAX_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_REPEAT_TEMPLATE_DEPTH, RepeatSource, RuntimeError,
-    StateValueFormat,
+    MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM, MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_DOCUMENT,
+    MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM, MAX_PIPEWIRE_PERCEPTUAL_VOLUME,
+    MAX_PIPEWIRE_PROPERTY_KEY_BYTES, MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT,
+    MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM, MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT,
+    MAX_RANGE_CONTROLS_PER_DOCUMENT, MAX_RANGE_CONTROLS_PER_ITEM, MAX_RANGE_NUMBER_BYTES,
+    MAX_REGISTERED_DESCENDANTS_PER_TEMPLATE, MAX_REPEAT_DECLARATIONS_PER_DOCUMENT,
+    MAX_REPEAT_TEMPLATE_DEPTH, RepeatSource, RuntimeError, StateValueFormat,
 };
 use blitz_dom::node::{ElementData, NodeData};
 use blitz_dom::{LocalName, local_name};
@@ -1121,10 +1123,11 @@ pub enum ShellAction {
     PipeWireAudioUnmute,
     PipeWireAudioToggleMute,
     PipeWireAudioSetVolume,
+    PipeWireAudioSetChannelVolume,
 }
 
 impl ShellAction {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::OverlayToggle,
         Self::OverlayClose,
         Self::OverlayActivate,
@@ -1138,6 +1141,7 @@ impl ShellAction {
         Self::PipeWireAudioUnmute,
         Self::PipeWireAudioToggleMute,
         Self::PipeWireAudioSetVolume,
+        Self::PipeWireAudioSetChannelVolume,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -1155,6 +1159,7 @@ impl ShellAction {
             Self::PipeWireAudioUnmute => "pipewire.audio.unmute",
             Self::PipeWireAudioToggleMute => "pipewire.audio.toggle_mute",
             Self::PipeWireAudioSetVolume => "pipewire.audio.set_volume",
+            Self::PipeWireAudioSetChannelVolume => "pipewire.audio.set_channel_volume",
         }
     }
 }
@@ -1177,6 +1182,7 @@ impl std::str::FromStr for ShellAction {
             "pipewire.audio.unmute" => Ok(Self::PipeWireAudioUnmute),
             "pipewire.audio.toggle_mute" => Ok(Self::PipeWireAudioToggleMute),
             "pipewire.audio.set_volume" => Ok(Self::PipeWireAudioSetVolume),
+            "pipewire.audio.set_channel_volume" => Ok(Self::PipeWireAudioSetChannelVolume),
             _ => Err(()),
         }
     }
@@ -1214,6 +1220,7 @@ impl BuiltInSurfaceKind {
                         | ShellAction::PipeWireAudioUnmute
                         | ShellAction::PipeWireAudioToggleMute
                         | ShellAction::PipeWireAudioSetVolume
+                        | ShellAction::PipeWireAudioSetChannelVolume
                 )
         )
     }
@@ -1303,12 +1310,21 @@ pub struct RepeatedElementDeclaration {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextualRepeatDeclaration {
+    pub id: String,
+    pub template_prototype_order: usize,
+    pub descendants: Vec<RepeatedElementDeclaration>,
+    pub prototype_nodes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepeatDeclaration {
     pub id: ElementInstanceId,
     pub source: RepeatSource,
     pub template_node: ExperimentalNodeIdentity,
     pub root_node: ExperimentalNodeIdentity,
     pub descendants: Vec<RepeatedElementDeclaration>,
+    pub contextual_repeats: Vec<ContextualRepeatDeclaration>,
     pub prototype_nodes: usize,
 }
 
@@ -1583,10 +1599,14 @@ impl BuiltInElementIndex {
                             | ShellAction::PipeWireAudioUnmute
                             | ShellAction::PipeWireAudioToggleMute
                     );
-                    if action == ShellAction::PipeWireAudioSetVolume {
+                    if matches!(
+                        action,
+                        ShellAction::PipeWireAudioSetVolume
+                            | ShellAction::PipeWireAudioSetChannelVolume
+                    ) {
                         return Err(invalid_declaration(
                             &context,
-                            "`pipewire.audio.set_volume` requires `range-control`",
+                            "PipeWire numeric audio actions require `range-control`",
                         ));
                     }
                     let target_value = element.attr(LocalName::from(TARGET_ATTRIBUTE));
@@ -1989,6 +2009,26 @@ impl BuiltInElementIndex {
                 "{source} contains {audio_controls} PipeWire audio controls; the per-document limit is {MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT}"
             )));
         }
+        let contextual_repeats = pipewire_repeats
+            .iter()
+            .flat_map(|repeat| repeat.contextual_repeats.iter())
+            .collect::<Vec<_>>();
+        if contextual_repeats.len() > MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{source} contains {} contextual repeats; the per-document limit is {MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT}",
+                contextual_repeats.len()
+            )));
+        }
+        let channel_ranges = contextual_repeats
+            .iter()
+            .flat_map(|repeat| repeat.descendants.iter())
+            .filter(|descendant| descendant.range.is_some())
+            .count();
+        if channel_ranges > MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_DOCUMENT {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{source} contains {channel_ranges} channel range controls; the per-document limit is {MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_DOCUMENT}"
+            )));
+        }
         let range_controls = elements
             .values()
             .filter(|element| element.declaration.range.is_some())
@@ -2389,6 +2429,7 @@ fn analyze_repeat(
     }
     let root = roots[0];
     let mut descendants = Vec::new();
+    let mut contextual_repeats = Vec::new();
     let mut local_ids = BTreeSet::new();
     let mut stack = vec![(root, 1usize)];
     let mut prototype_order = 0usize;
@@ -2414,14 +2455,18 @@ fn analyze_repeat(
             let kind_name = element.attr(LocalName::from(ELEMENT_ATTRIBUTE));
             match kind_name {
                 None => {
-                    if local_id.is_some() {
+                    if let Some(local_id) = local_id
+                        && (local_id.is_empty() || !local_ids.insert(local_id.to_owned()))
+                    {
                         return Err(invalid_declaration(
                             context,
-                            "`data-htm-local-id` is only valid on registered repeat descendants",
+                            "static repeat local IDs must be nonempty and template-unique",
                         ));
                     }
                     for attribute in element.attrs() {
-                        if attribute.name.local.as_ref().starts_with("data-htm-") {
+                        if attribute.name.local.as_ref().starts_with("data-htm-")
+                            && attribute.name.local.as_ref() != LOCAL_ID_ATTRIBUTE
+                        {
                             return Err(invalid_declaration(
                                 context,
                                 format!(
@@ -2439,6 +2484,45 @@ fn analyze_repeat(
                             format!("unknown repeated built-in element `{kind_name}`"),
                         )
                     })?;
+                    if kind == BuiltInElementKind::Repeat {
+                        if source != RepeatSource::PipeWireNodes
+                            || element.attr(LocalName::from(SOURCE_ATTRIBUTE))
+                                != Some("item.channels")
+                        {
+                            return Err(invalid_declaration(
+                                context,
+                                "`item.channels` is the only contextual repeat source and is valid only inside `pipewire.nodes`",
+                            ));
+                        }
+                        if local_id.is_some() {
+                            return Err(invalid_declaration(
+                                context,
+                                "contextual repeat declarations do not use `data-htm-local-id`",
+                            ));
+                        }
+                        if contextual_repeats.len() >= MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE {
+                            return Err(RuntimeError::LimitExceeded(format!(
+                                "{context}: node template exceeds {MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE} contextual repeats"
+                            )));
+                        }
+                        let declaration = analyze_contextual_repeat(
+                            document,
+                            slot,
+                            order,
+                            contextual_repeats.len(),
+                            context,
+                        )?;
+                        let nested_nodes = subtree_node_count(document, slot)?;
+                        prototype_order = prototype_order
+                            .checked_add(nested_nodes.saturating_sub(1))
+                            .ok_or_else(|| {
+                                RuntimeError::LimitExceeded(
+                                    "contextual repeat node count overflow".into(),
+                                )
+                            })?;
+                        contextual_repeats.push(declaration);
+                        continue;
+                    }
                     let read_only = matches!(
                         kind,
                         BuiltInElementKind::StateText
@@ -2781,6 +2865,7 @@ fn analyze_repeat(
         template_node: identities.identity_for_slot(document, template_slot)?,
         root_node: identities.identity_for_slot(document, root)?,
         descendants,
+        contextual_repeats,
         prototype_nodes: prototype_order,
     })
 }
@@ -2795,6 +2880,332 @@ fn valid_pipewire_property_key(key: &str) -> bool {
         })
 }
 
+fn analyze_contextual_repeat(
+    document: &HtmlDocument,
+    template_slot: usize,
+    template_prototype_order: usize,
+    ordinal: usize,
+    context: &str,
+) -> Result<ContextualRepeatDeclaration, RuntimeError> {
+    let template = document
+        .get_node(template_slot)
+        .ok_or_else(|| invalid_declaration(context, "contextual template lookup failed"))?;
+    let element = template
+        .element_data()
+        .ok_or_else(|| invalid_declaration(context, "contextual repeat must be an element"))?;
+    if element.name.local.as_ref() != "template" {
+        return Err(invalid_declaration(
+            context,
+            "contextual repeat requires a `<template>` element",
+        ));
+    }
+    for attribute in element.attrs() {
+        let name = attribute.name.local.as_ref();
+        if name.starts_with("data-htm-") && !matches!(name, ELEMENT_ATTRIBUTE | SOURCE_ATTRIBUTE) {
+            return Err(invalid_declaration(
+                context,
+                format!("unsupported contextual-repeat attribute `{name}`"),
+            ));
+        }
+    }
+    let mut roots = Vec::new();
+    for child in &template.children {
+        let node = document
+            .get_node(*child)
+            .ok_or_else(|| invalid_declaration(context, "contextual template child disappeared"))?;
+        match &node.data {
+            NodeData::Text(text) if text.content.trim().is_empty() => {}
+            NodeData::Text(_) => {
+                return Err(invalid_declaration(
+                    context,
+                    "contextual repeat top-level text must be whitespace",
+                ));
+            }
+            NodeData::Element(_) => roots.push(*child),
+            _ => {}
+        }
+    }
+    if roots.len() != 1 {
+        return Err(invalid_declaration(
+            context,
+            format!(
+                "contextual repeat must contain exactly one root element; found {}",
+                roots.len()
+            ),
+        ));
+    }
+    let root = roots[0];
+    let mut descendants = Vec::new();
+    let mut local_ids = BTreeSet::new();
+    let mut stack = vec![(root, 1usize)];
+    let mut prototype_order = 0usize;
+    while let Some((slot, depth)) = stack.pop() {
+        if depth > MAX_REPEAT_TEMPLATE_DEPTH {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "{context}: contextual template depth exceeds {MAX_REPEAT_TEMPLATE_DEPTH}"
+            )));
+        }
+        let node = document
+            .get_node(slot)
+            .ok_or_else(|| invalid_declaration(context, "contextual subtree disappeared"))?;
+        let order = prototype_order;
+        prototype_order = prototype_order.saturating_add(1);
+        if let Some(element) = node.element_data() {
+            if element.has_attr(local_name!("id")) {
+                return Err(invalid_declaration(
+                    context,
+                    "normal `id` attributes are forbidden inside contextual repeats",
+                ));
+            }
+            let local_id = element.attr(LocalName::from(LOCAL_ID_ATTRIBUTE));
+            let kind_name = element.attr(LocalName::from(ELEMENT_ATTRIBUTE));
+            if let Some(kind_name) = kind_name {
+                let kind = BuiltInElementKind::parse(kind_name).ok_or_else(|| {
+                    invalid_declaration(
+                        context,
+                        format!("unknown contextual built-in element `{kind_name}`"),
+                    )
+                })?;
+                if !matches!(
+                    kind,
+                    BuiltInElementKind::StateText
+                        | BuiltInElementKind::StateToken
+                        | BuiltInElementKind::StateValue
+                        | BuiltInElementKind::RangeControl
+                ) {
+                    return Err(invalid_declaration(
+                        context,
+                        format!("`{}` is forbidden inside `item.channels`", kind.as_str()),
+                    ));
+                }
+                let definition = definition(kind);
+                let tag = element.name.local.as_ref();
+                if !definition.allowed_tags.contains(&tag) {
+                    return Err(invalid_declaration(
+                        context,
+                        format!("`{}` is not allowed on <{tag}>", kind.as_str()),
+                    ));
+                }
+                for attribute in element.attrs() {
+                    let name = attribute.name.local.as_ref();
+                    if name.starts_with("data-htm-")
+                        && name != LOCAL_ID_ATTRIBUTE
+                        && !allowed_behavior_attributes(kind).contains(&name)
+                    {
+                        return Err(invalid_declaration(
+                            context,
+                            format!("unsupported contextual behavior attribute `{name}`"),
+                        ));
+                    }
+                }
+                let local_id = local_id.filter(|value| !value.is_empty()).ok_or_else(|| {
+                    invalid_declaration(
+                        context,
+                        "registered channel descendant requires `data-htm-local-id`",
+                    )
+                })?;
+                if !local_ids.insert(local_id.to_owned()) {
+                    return Err(invalid_declaration(
+                        context,
+                        format!("duplicate channel local id `{local_id}`"),
+                    ));
+                }
+                let binding;
+                let mut action = None;
+                let mut enabled_binding = None;
+                let mut range = None;
+                let mut value_format = None;
+                match kind {
+                    BuiltInElementKind::StateText
+                    | BuiltInElementKind::StateToken
+                    | BuiltInElementKind::StateValue => {
+                        let binding_value = element
+                            .attr(LocalName::from(BIND_ATTRIBUTE))
+                            .filter(|value| !value.is_empty())
+                            .ok_or_else(|| {
+                                invalid_declaration(
+                                    context,
+                                    format!("`{}` requires `data-htm-bind`", kind.as_str()),
+                                )
+                            })?;
+                        let parsed = binding_value.parse::<ItemBindingKey>().map_err(|()| {
+                            invalid_declaration(
+                                context,
+                                format!("unsupported channel binding `{binding_value}`"),
+                            )
+                        })?;
+                        if !parsed.supports_channel() {
+                            return Err(invalid_declaration(
+                                context,
+                                format!("`{binding_value}` is not a channel binding"),
+                            ));
+                        }
+                        value_format = match kind {
+                            BuiltInElementKind::StateText if parsed.supports_text() => {
+                                validate_state_text_children(document, slot, context)?;
+                                None
+                            }
+                            BuiltInElementKind::StateToken if parsed.supports_token() => {
+                                if element.has_attr(LocalName::from(STATE_ATTRIBUTE)) {
+                                    return Err(invalid_declaration(
+                                        context,
+                                        "`data-htm-state` is runtime-owned",
+                                    ));
+                                }
+                                None
+                            }
+                            BuiltInElementKind::StateValue if parsed.supports_value() => {
+                                validate_state_text_children(document, slot, context)?;
+                                if element.has_attr(local_name!("value")) {
+                                    return Err(invalid_declaration(
+                                        context,
+                                        "`value` is runtime-owned for `state-value`",
+                                    ));
+                                }
+                                Some(parse_value_format(
+                                    element.attr(LocalName::from(FORMAT_ATTRIBUTE)),
+                                    item_value_formats(parsed),
+                                    context,
+                                )?)
+                            }
+                            _ => {
+                                return Err(invalid_declaration(
+                                    context,
+                                    format!(
+                                        "channel binding `{binding_value}` does not support `{}`",
+                                        kind.as_str()
+                                    ),
+                                ));
+                            }
+                        };
+                        binding = Some(parsed);
+                    }
+                    BuiltInElementKind::RangeControl => {
+                        if element.attr(local_name!("type")) != Some("range")
+                            || !node.children.is_empty()
+                        {
+                            return Err(invalid_declaration(
+                                context,
+                                "channel range control requires an empty `<input type=\"range\">`",
+                            ));
+                        }
+                        if element.has_attr(LocalName::from(TARGET_ATTRIBUTE)) {
+                            return Err(invalid_declaration(
+                                context,
+                                "channel range controls forbid `data-htm-target`",
+                            ));
+                        }
+                        if element.attr(LocalName::from(BIND_ATTRIBUTE)) != Some("item.volume")
+                            || element.attr(LocalName::from(ACTION_ATTRIBUTE))
+                                != Some("pipewire.audio.set_channel_volume")
+                            || element.attr(LocalName::from(ENABLED_BIND_ATTRIBUTE))
+                                != Some("item.can_set_volume")
+                        {
+                            return Err(invalid_declaration(
+                                context,
+                                "channel range control requires `item.volume`, `pipewire.audio.set_channel_volume`, and `item.can_set_volume`",
+                            ));
+                        }
+                        if element.has_attr(local_name!("value"))
+                            || element.has_attr(LocalName::from(STATE_ATTRIBUTE))
+                        {
+                            return Err(invalid_declaration(
+                                context,
+                                "`value` and `data-htm-state` are runtime-owned for channel controls",
+                            ));
+                        }
+                        binding = Some(ItemBindingKey::Volume);
+                        action = Some(ShellAction::PipeWireAudioSetChannelVolume);
+                        enabled_binding = Some(ItemBindingKey::CanSetVolume);
+                        range = Some(parse_range_control(
+                            element,
+                            PipeWireControlTarget::CurrentItem,
+                            context,
+                        )?);
+                    }
+                    _ => unreachable!("contextual kind was checked above"),
+                }
+                descendants.push(RepeatedElementDeclaration {
+                    local_id: local_id.to_owned(),
+                    kind,
+                    binding,
+                    action,
+                    enabled_binding,
+                    range,
+                    disabled: element.has_attr(local_name!("disabled")),
+                    property_key: None,
+                    value_format,
+                    prototype_order: order,
+                });
+                if descendants.len() > MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM {
+                    return Err(RuntimeError::LimitExceeded(format!(
+                        "{context}: channel template exceeds {MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM} registered bindings"
+                    )));
+                }
+            } else {
+                if let Some(local_id) = local_id
+                    && (local_id.is_empty() || !local_ids.insert(local_id.to_owned()))
+                {
+                    return Err(invalid_declaration(
+                        context,
+                        "static channel local IDs must be nonempty and template-unique",
+                    ));
+                }
+                for attribute in element.attrs() {
+                    if attribute.name.local.as_ref().starts_with("data-htm-")
+                        && attribute.name.local.as_ref() != LOCAL_ID_ATTRIBUTE
+                    {
+                        return Err(invalid_declaration(
+                            context,
+                            format!(
+                                "unsupported channel-template attribute `{}`",
+                                attribute.name.local
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        stack.extend(
+            node.children
+                .iter()
+                .rev()
+                .copied()
+                .map(|child| (child, depth.saturating_add(1))),
+        );
+    }
+    let range_controls = descendants
+        .iter()
+        .filter(|descendant| descendant.range.is_some())
+        .count();
+    if range_controls > MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM {
+        return Err(RuntimeError::LimitExceeded(format!(
+            "{context}: channel template exceeds {MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM} range controls"
+        )));
+    }
+    Ok(ContextualRepeatDeclaration {
+        id: format!("channels-{ordinal}"),
+        template_prototype_order,
+        descendants,
+        prototype_nodes: prototype_order,
+    })
+}
+
+fn subtree_node_count(document: &HtmlDocument, root: usize) -> Result<usize, RuntimeError> {
+    let mut count = 0usize;
+    let mut stack = vec![root];
+    while let Some(slot) = stack.pop() {
+        let node = document.get_node(slot).ok_or_else(|| {
+            RuntimeError::InvalidMutationTarget("repeat subtree disappeared".into())
+        })?;
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| RuntimeError::LimitExceeded("repeat node count overflow".into()))?;
+        stack.extend(node.children.iter().rev().copied());
+    }
+    Ok(count)
+}
+
 fn item_value_formats(binding: ItemBindingKey) -> &'static [StateValueFormat] {
     match binding {
         ItemBindingKey::Energy | ItemBindingKey::EnergyCapacity => {
@@ -2807,7 +3218,9 @@ fn item_value_formats(binding: ItemBindingKey) -> &'static [StateValueFormat] {
         ItemBindingKey::Percentage | ItemBindingKey::HealthPercentage => {
             &[StateValueFormat::Raw, StateValueFormat::Percent]
         }
-        ItemBindingKey::RawId => &[StateValueFormat::Raw],
+        ItemBindingKey::RawId | ItemBindingKey::ChannelCount | ItemBindingKey::Index => {
+            &[StateValueFormat::Raw]
+        }
         ItemBindingKey::Volume => &[StateValueFormat::Raw, StateValueFormat::Percent],
         _ => &[],
     }
@@ -3038,7 +3451,7 @@ mod tests {
         assert_eq!(StateBindingKey::ALL.len(), 81);
         assert!(StateBindingKey::ALL.contains(&StateBindingKey::UPowerOnBattery));
         assert!(StateBindingKey::ALL.contains(&StateBindingKey::PowerProfileCurrent));
-        assert_eq!(ShellAction::ALL.len(), 13);
+        assert_eq!(ShellAction::ALL.len(), 14);
         assert!(ShellAction::ALL.contains(&ShellAction::PowerProfileSetPerformance));
         for key in StateBindingKey::ALL {
             assert_eq!(key.as_str().parse::<StateBindingKey>(), Ok(key));
@@ -3398,6 +3811,118 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn pipewire_channel_context_is_one_level_and_narrowly_typed() {
+        let index = discover(
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes">
+                 <article>
+                   <data data-htm-element="state-value"
+                         data-htm-local-id="channel-count"
+                         data-htm-bind="item.channel_count"></data>
+                   <template data-htm-element="repeat" data-htm-source="item.channels">
+                     <div data-htm-local-id="channel">
+                       <span data-htm-element="state-text"
+                             data-htm-local-id="position-name"
+                             data-htm-bind="item.position_name"></span>
+                       <span data-htm-element="state-token"
+                             data-htm-local-id="position"
+                             data-htm-bind="item.position"></span>
+                       <data data-htm-element="state-value"
+                             data-htm-local-id="index"
+                             data-htm-bind="item.index"></data>
+                       <input type="range"
+                              data-htm-element="range-control"
+                              data-htm-local-id="volume"
+                              data-htm-bind="item.volume"
+                              data-htm-action="pipewire.audio.set_channel_volume"
+                              data-htm-enabled-bind="item.can_set_volume">
+                     </div>
+                   </template>
+                 </article>
+               </template>"#,
+            BuiltInSurfaceKind::Overlay,
+        )
+        .unwrap();
+        let declaration = &index.repeat_declarations()[0];
+        assert_eq!(declaration.contextual_repeats.len(), 1);
+        assert_eq!(
+            declaration.contextual_repeats[0]
+                .descendants
+                .iter()
+                .find(|element| element.local_id == "volume")
+                .and_then(|element| element.action),
+            Some(ShellAction::PipeWireAudioSetChannelVolume)
+        );
+
+        for invalid in [
+            r#"<template id="channels" data-htm-element="repeat" data-htm-source="item.channels"><div></div></template>"#,
+            r#"<template id="devices" data-htm-element="repeat" data-htm-source="upower.devices"><div><template data-htm-element="repeat" data-htm-source="item.channels"><div></div></template></div></template>"#,
+            r#"<template id="holds" data-htm-element="repeat" data-htm-source="power_profile.holds"><div><template data-htm-element="repeat" data-htm-source="item.channels"><div></div></template></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><template data-htm-element="repeat" data-htm-source="item.other"><div></div></template></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><template data-htm-element="repeat" data-htm-source="item.channels"><div><template data-htm-element="repeat" data-htm-source="item.channels"><div></div></template></div></template></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><template data-htm-element="repeat" data-htm-source="item.channels"><div id="channel"></div></template></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><template data-htm-element="repeat" data-htm-source="item.channels"><div><button data-htm-element="action-button" data-htm-local-id="action" data-htm-action="pipewire.audio.toggle_mute"></button></div></template></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><template data-htm-element="repeat" data-htm-source="item.channels"><div><time data-htm-element="clock-text" data-htm-local-id="clock" data-htm-format="%H"></time></div></template></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><template data-htm-element="repeat" data-htm-source="item.channels"><div><span data-htm-element="state-text" data-htm-local-id="parent" data-htm-bind="parent.name"></span></div></template></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><template data-htm-element="repeat" data-htm-source="item.channels"><div><input type="range" data-htm-element="range-control" data-htm-local-id="volume" data-htm-bind="item.volume" data-htm-action="pipewire.audio.set_channel_volume" data-htm-enabled-bind="item.can_set_volume" data-htm-target="0"></div></template></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><input type="range" data-htm-element="range-control" data-htm-local-id="volume" data-htm-bind="item.volume" data-htm-action="pipewire.audio.set_channel_volume" data-htm-enabled-bind="item.can_set_volume"></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><template data-htm-element="repeat" data-htm-source="{{item.channels}}"><div></div></template></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><template data-htm-element="repeat" data-htm-source="item.channels"><div><input type="range" data-htm-element="range-control" data-htm-local-id="volume" data-htm-bind="item.volume" data-htm-enabled-bind="item.can_set_volume"></div></template></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><template data-htm-element="repeat" data-htm-source="item.channels"><div><input type="range" data-htm-element="range-control" data-htm-local-id="volume" data-htm-bind="item.volume" data-htm-action="pipewire.audio.set_volume" data-htm-enabled-bind="item.can_set_volume"></div></template></div></template>"#,
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><template data-htm-element="repeat" data-htm-source="item.channels"><div><button data-htm-element="action-button" data-htm-local-id="volume" data-htm-action="pipewire.audio.set_channel_volume"></button></div></template></div></template>"#,
+        ] {
+            assert!(
+                discover(invalid, BuiltInSurfaceKind::Overlay).is_err(),
+                "{invalid}"
+            );
+        }
+
+        let repeats = (0..=MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE)
+            .map(|_| {
+                r#"<template data-htm-element="repeat" data-htm-source="item.channels"><div></div></template>"#
+            })
+            .collect::<String>();
+        let excessive = format!(
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div>{repeats}</div></template>"#
+        );
+        assert!(discover(&excessive, BuiltInSurfaceKind::Overlay).is_err());
+
+        let ranges = (0..=MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM)
+            .map(|index| {
+                format!(
+                    r#"<input type="range" data-htm-element="range-control" data-htm-local-id="volume-{index}" data-htm-bind="item.volume" data-htm-action="pipewire.audio.set_channel_volume" data-htm-enabled-bind="item.can_set_volume">"#
+                )
+            })
+            .collect::<String>();
+        let excessive = format!(
+            r#"<template id="nodes" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div><template data-htm-element="repeat" data-htm-source="item.channels"><div>{ranges}</div></template></div></template>"#
+        );
+        assert!(discover(&excessive, BuiltInSurfaceKind::Overlay).is_err());
+
+        let valid_ranges = (0..MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM)
+            .map(|index| {
+                format!(
+                    r#"<input type="range" data-htm-element="range-control" data-htm-local-id="volume-{index}" data-htm-bind="item.volume" data-htm-action="pipewire.audio.set_channel_volume" data-htm-enabled-bind="item.can_set_volume">"#
+                )
+            })
+            .collect::<String>();
+        let valid_contextuals = (0..MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE)
+            .map(|_| {
+                format!(
+                    r#"<template data-htm-element="repeat" data-htm-source="item.channels"><div>{valid_ranges}</div></template>"#
+                )
+            })
+            .collect::<String>();
+        let excessive = (0..5)
+            .map(|index| {
+                format!(
+                    r#"<template id="nodes-{index}" data-htm-element="repeat" data-htm-source="pipewire.nodes"><div>{valid_contextuals}</div></template>"#
+                )
+            })
+            .collect::<String>();
+        assert!(discover(&excessive, BuiltInSurfaceKind::Overlay).is_err());
     }
 
     #[test]

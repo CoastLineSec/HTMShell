@@ -97,7 +97,85 @@ The range defaults are `min="0"`, `max="1"`, and `step="0.01"`. The runtime maxi
 
 Amplification can clip or distort. The runtime never enables it through an omitted bound and never rewrites an externally amplified value merely because a control has a lower visual maximum.
 
-Average-volume writes preserve the current channel balance. Channel values remain internal in this release.
+Average-volume writes preserve the current channel balance.
+
+## Ordered channels
+
+`item.channel_status` is `unsupported`, `unavailable`, or `ready`.
+`item.channel_count` is zero until an authoritative channel vector is ready.
+
+One contextual repeat may appear inside `pipewire.nodes`:
+
+```html
+<template data-htm-element="repeat"
+          data-htm-source="item.channels">
+  <div class="channel">
+    <span data-htm-element="state-text"
+          data-htm-local-id="position"
+          data-htm-bind="item.position_name"></span>
+    <data data-htm-element="state-value"
+          data-htm-local-id="index"
+          data-htm-bind="item.index"></data>
+    <data data-htm-element="state-value"
+          data-htm-local-id="volume"
+          data-htm-bind="item.volume"
+          data-htm-format="percent"></data>
+    <input type="range"
+           data-htm-element="range-control"
+           data-htm-local-id="control"
+           data-htm-bind="item.volume"
+           data-htm-action="pipewire.audio.set_channel_volume"
+           data-htm-enabled-bind="item.can_set_volume"
+           min="0"
+           max="1"
+           step="0.01">
+  </div>
+</template>
+```
+
+Inside `item.channels`, `item.*` means the current channel. It shadows the
+outer node item. The parent node is the implicit control target; there is no
+`parent.*`, selector, index target, or traversal syntax. Put node fields outside
+the contextual repeat.
+
+Channel order is the authoritative PipeWire vector order. `item.index` is a
+zero-based, layout-local label and is not an identity or action target.
+`item.position` supplies a stable CSS token and `item.position_name` supplies
+human-readable text. `item.status`, `item.can_set_volume`,
+`item.is_auxiliary`, and `item.is_custom` are finite state bindings.
+
+Named SPA positions remain distinct. Auxiliary values use `aux-1` through
+`aux-4096`. Custom values use `custom-1` through `custom-4294901760`.
+Unrecognized values use `unknown`.
+
+If a channel map is absent, HTMShell uses mono, stereo, three-channel, quad,
+5.1, 7-channel, and 7.1 layouts for vectors of one through eight channels.
+Larger vectors use `unknown` positions. A short position vector is extended
+with `unknown`; a long one is ignored past the volume-vector length. Duplicate
+positions remain separate ordered items.
+
+A volume-only update preserves channel identity. Count, order, position, or
+fallback-layout changes replace that node's channel-layout generation. A
+layout replacement cancels stale controls.
+
+## Average and channel writes
+
+`pipewire.audio.set_channel_volume` is valid only on `range-control` inside
+`item.channels`. It has no explicit `data-htm-target`. The write starts from the
+latest coordinated full vector, replaces one channel, and sends the entire
+vector. Other channels keep their values.
+
+Average and channel controls share one node coordinator. An average intent
+scales the latest desired vector. A later channel intent replaces only that
+channel. A later average intent scales the vector including earlier channel
+changes. Only the latest complete vector is retained, so pointer motion does
+not create an unbounded queue.
+
+Public channel volume remains authoritative PipeWire state. Confirmation,
+failure, timeout, removal, layout replacement, and reconnect use the same
+`idle`, `pending`, `failed`, and `unavailable` control states as node-average
+controls. The default range remains `0` to `1` with step `0.01`; an explicit
+larger `max`, up to the runtime maximum `2.0`, is required for amplification.
 
 ## Confirmation and failures
 
@@ -135,6 +213,11 @@ Common keys include `application.name`, `application.icon-name`, `media.name`, `
 
 Documents activate only the PipeWire state they consume. Audio parameter subscriptions and write coordinators are shared process-wide. Removing the final audio consumer releases audio demand. Closed retained overlays may update without receiving a frame.
 
+Channel projection and channel-write demand are tracked separately. Several
+contextual repeats and outputs share one normalized channel vector per node.
+Removing the last channel consumer releases public channel projection when no
+average-volume consumer still needs the internal vector.
+
 Limits include:
 
 - 16 `pipewire.nodes` repeats per document
@@ -144,12 +227,21 @@ Limits include:
 - 16 PipeWire audio controls per repeated item
 - 64 range controls per document
 - 8 range controls per repeated item
+- 8 `item.channels` repeats per outer node template
+- 32 contextual repeats per document
+- 64 public channels per node
+- 64 registered bindings per channel item
+- 8 channel range controls per channel item
+- 256 channel range controls per document
+- exactly one contextual repeat level
 - 4,096 node write coordinators, bounded by the graph limit
 - one pending mute intent and one pending volume intent per node
 - a two-second confirmation timeout
 
 ## Current limitations
 
-Public channels, per-channel controls, preferred-default writes, links, link groups, peak monitoring, and stream movement are not available.
+Channel mute, channel-map writes, preferred-default writes, links, link groups,
+peak monitoring, stream movement, and spatial graph rendering are not
+available.
 
 See the tracked [audio inspector dashboard](../../examples/audio-inspector/shell.json).
