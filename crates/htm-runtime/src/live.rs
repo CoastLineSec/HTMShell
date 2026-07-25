@@ -1056,6 +1056,14 @@ impl LiveDocument {
     }
 
     pub fn pointer_move(&mut self, x: f64, y: f64) -> Result<bool, RuntimeError> {
+        if !x.is_finite() || !y.is_finite() {
+            return Err(RuntimeError::InvalidMutationTarget(
+                "pointer coordinates must be finite".into(),
+            ));
+        }
+        if x < 0.0 || y < 0.0 {
+            return Ok(self.pointer_leave());
+        }
         let point = checked_point(x, y)?;
         self.last_pointer = Some(point);
         if self.pressed_range.is_some() {
@@ -4720,9 +4728,9 @@ fn pixel_len(width: u32, height: u32) -> Result<usize, RuntimeError> {
 }
 
 fn checked_point(x: f64, y: f64) -> Result<Point<f32>, RuntimeError> {
-    if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+    if !x.is_finite() || !y.is_finite() {
         return Err(RuntimeError::InvalidMutationTarget(
-            "pointer coordinates must be finite and nonnegative".into(),
+            "pointer coordinates must be finite".into(),
         ));
     }
     Ok(Point {
@@ -6473,6 +6481,29 @@ mod tests {
         assert!(!panel.pointer_primary(true).unwrap());
         assert!(!panel.pointer_primary(false).unwrap());
         assert_eq!(panel.take_action(), None);
+    }
+
+    #[test]
+    fn finite_negative_pointer_motion_is_a_contained_leave() {
+        let mut panel = LiveDocument::load_surface_document(
+            built_in_fixture(),
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            58,
+        )
+        .unwrap();
+        let toggle = panel.element_bounds("overlay-toggle").unwrap();
+        let x = f64::from(toggle.x + toggle.width / 2.0);
+        let y = f64::from(toggle.y + toggle.height / 2.0);
+
+        assert!(panel.pointer_move(x, y).unwrap());
+        assert!(panel.pointer_primary(true).unwrap());
+        assert!(panel.pointer_move(-0.25, y).unwrap());
+        assert!(!panel.pointer_primary(false).unwrap());
+        assert_eq!(panel.take_action(), None);
+        assert!(panel.pointer_move(-1.0, -1.0).is_ok());
+        assert!(panel.pointer_move(f64::NAN, y).is_err());
     }
 
     #[test]

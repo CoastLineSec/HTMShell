@@ -1,20 +1,25 @@
 use htm_runtime::{
     CLOCK_FORMAT_CONVERSIONS, CLOCK_FORMAT_FLAGS, CLOCK_PUBLIC_ATTRIBUTES, ClockFormat,
-    ContextualRepeatSource, ItemBindingKey, MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT,
-    MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
+    ContextualRepeatSource, ItemBindingKey, LiveDocument, LiveDocumentKind, LiveRenderRequest,
+    MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT, MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
     MAX_CONTEXTUAL_LINK_REPEATS_PER_GROUP_TEMPLATE, MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT,
-    MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT,
-    MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM, MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM,
+    MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE, MAX_PIPEWIRE_ACTIVE_PEAK_STREAMS,
+    MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM,
+    MAX_PIPEWIRE_BINDINGS_PER_ITEM, MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM,
     MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_DOCUMENT, MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM,
     MAX_PIPEWIRE_CHANNELS_PER_NODE, MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_DOCUMENT,
-    MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_ITEM, MAX_PIPEWIRE_GRAPH_BINDINGS_PER_ITEM,
-    MAX_PIPEWIRE_LINK_GROUP_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_PIPEWIRE_LINK_GROUPS_PER_PROCESS,
-    MAX_PIPEWIRE_LINK_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_PIPEWIRE_LINKS_PER_PROCESS,
+    MAX_PIPEWIRE_DEFAULT_CONTROLS_PER_ITEM, MAX_PIPEWIRE_ENABLED_PEAK_MONITORS_PER_DOCUMENT,
+    MAX_PIPEWIRE_GRAPH_BINDINGS_PER_ITEM, MAX_PIPEWIRE_LINK_GROUP_REPEAT_DECLARATIONS_PER_DOCUMENT,
+    MAX_PIPEWIRE_LINK_GROUPS_PER_PROCESS, MAX_PIPEWIRE_LINK_REPEAT_DECLARATIONS_PER_DOCUMENT,
+    MAX_PIPEWIRE_LINKS_PER_PROCESS, MAX_PIPEWIRE_NODES_PER_PROCESS,
     MAX_PIPEWIRE_PEAK_ACTIONS_PER_MONITOR, MAX_PIPEWIRE_PEAK_BINDINGS_PER_MONITOR,
     MAX_PIPEWIRE_PEAK_CHANNEL_BINDINGS_PER_ITEM, MAX_PIPEWIRE_PEAK_CHANNEL_REPEATS_PER_MONITOR,
-    MAX_PIPEWIRE_PEAK_CHANNELS_PER_STREAM, MAX_PIPEWIRE_PEAK_MONITORS_PER_DOCUMENT,
-    MAX_PIPEWIRE_PEAK_MONITORS_PER_ITEM, MAX_PIPEWIRE_PERCEPTUAL_VOLUME,
-    MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM, MAX_RANGE_CONTROLS_PER_DOCUMENT,
+    MAX_PIPEWIRE_PEAK_CHANNELS_PER_STREAM, MAX_PIPEWIRE_PEAK_DECLARATIONS_PER_TARGET,
+    MAX_PIPEWIRE_PEAK_MONITORS_PER_DOCUMENT, MAX_PIPEWIRE_PEAK_MONITORS_PER_ITEM,
+    MAX_PIPEWIRE_PERCEPTUAL_VOLUME, MAX_PIPEWIRE_PROPERTY_KEY_BYTES,
+    MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT, MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS,
+    MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM, MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM,
+    MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_RANGE_CONTROLS_PER_DOCUMENT,
     MAX_RANGE_CONTROLS_PER_ITEM, PeakBindingKey, RepeatSource, ShellAction, StateBindingKey,
     StateToken, StateValueFormat, built_in_registry_names,
 };
@@ -148,6 +153,14 @@ fn public_documentation_links_and_example_paths_resolve() {
         "examples/audio-inspector/panel.html",
         "examples/audio-inspector/overlay.html",
         "examples/audio-inspector/style.css",
+        "examples/audio-basic/shell.json",
+        "examples/audio-basic/index.html",
+        "examples/audio-basic/overlay.html",
+        "examples/audio-basic/style.css",
+        "examples/audio-control-center/shell.json",
+        "examples/audio-control-center/panel.html",
+        "examples/audio-control-center/overlay.html",
+        "examples/audio-control-center/style.css",
     ] {
         assert!(
             root.join(path).is_file(),
@@ -348,6 +361,31 @@ fn typed_public_names_are_covered_by_the_reference() {
             MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM,
             "PipeWire relation bindings per item",
         ),
+        (
+            MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT,
+            "PipeWire node repeats per document",
+        ),
+        (MAX_PIPEWIRE_NODES_PER_PROCESS, "public PipeWire nodes"),
+        (
+            MAX_PIPEWIRE_BINDINGS_PER_ITEM,
+            "PipeWire node bindings per item",
+        ),
+        (
+            MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM,
+            "PipeWire property lookups per item",
+        ),
+        (
+            MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT,
+            "PipeWire property keys per document",
+        ),
+        (
+            MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS,
+            "PipeWire property keys per process",
+        ),
+        (
+            MAX_PIPEWIRE_PROPERTY_KEY_BYTES,
+            "PipeWire property key bytes",
+        ),
         (MAX_PIPEWIRE_LINKS_PER_PROCESS, "public PipeWire links"),
         (
             MAX_PIPEWIRE_LINK_GROUPS_PER_PROCESS,
@@ -505,11 +543,14 @@ fn peak_monitor_reference_example_and_limits_are_complete() {
     for limit in [
         MAX_PIPEWIRE_PEAK_MONITORS_PER_DOCUMENT,
         MAX_PIPEWIRE_PEAK_MONITORS_PER_ITEM,
+        MAX_PIPEWIRE_ENABLED_PEAK_MONITORS_PER_DOCUMENT,
         MAX_PIPEWIRE_PEAK_ACTIONS_PER_MONITOR,
         MAX_PIPEWIRE_PEAK_CHANNEL_REPEATS_PER_MONITOR,
         MAX_PIPEWIRE_PEAK_BINDINGS_PER_MONITOR,
         MAX_PIPEWIRE_PEAK_CHANNEL_BINDINGS_PER_ITEM,
         MAX_PIPEWIRE_PEAK_CHANNELS_PER_STREAM,
+        MAX_PIPEWIRE_ACTIVE_PEAK_STREAMS,
+        MAX_PIPEWIRE_PEAK_DECLARATIONS_PER_TARGET,
     ] {
         assert!(
             public.contains(&limit.to_string()),
@@ -527,6 +568,8 @@ fn documented_manifests_validate_without_wayland() {
         "examples/formatted-clock/shell.json",
         "examples/battery-panel/shell.json",
         "examples/power/shell.json",
+        "examples/audio-basic/shell.json",
+        "examples/audio-control-center/shell.json",
         "examples/audio-inspector/shell.json",
     ] {
         let manifest = ValidatedManifest::load(root.join(path))
@@ -595,6 +638,251 @@ fn audio_example_uses_only_the_typed_control_surface() {
         assert!(
             !overlay.contains(forbidden),
             "audio example uses forbidden control surface `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn all_audio_examples_validate_built_ins_css_and_headless_rendering() {
+    let root = workspace_root();
+    for (package, document, kind, width, height) in [
+        (
+            "examples/audio-basic",
+            "index.html",
+            LiveDocumentKind::Panel,
+            1280,
+            72,
+        ),
+        (
+            "examples/audio-basic",
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            1280,
+            720,
+        ),
+        (
+            "examples/audio-control-center",
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            58,
+        ),
+        (
+            "examples/audio-control-center",
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            1280,
+            720,
+        ),
+        (
+            "examples/audio-inspector",
+            "panel.html",
+            LiveDocumentKind::Panel,
+            1280,
+            54,
+        ),
+        (
+            "examples/audio-inspector",
+            "overlay.html",
+            LiveDocumentKind::TransientOverlay,
+            1280,
+            720,
+        ),
+    ] {
+        let mut live =
+            LiveDocument::load_surface_document(root.join(package), document, kind, width, height)
+                .unwrap_or_else(|error| panic!("{package}/{document} is invalid: {error}"));
+        live.render_for(LiveRenderRequest::new(width, height, 120).unwrap())
+            .unwrap_or_else(|error| panic!("{package}/{document} did not render: {error}"));
+        assert_eq!(live.snapshot().unwrap().document_parse_count, 1);
+    }
+}
+
+#[test]
+fn audio_examples_form_a_narrow_progression() {
+    let root = workspace_root();
+    let basic = read_joined(&[
+        root.join("examples/audio-basic/index.html"),
+        root.join("examples/audio-basic/overlay.html"),
+        root.join("examples/audio-basic/style.css"),
+    ]);
+    for required in [
+        "pipewire.availability",
+        "pipewire.default_sink.description",
+        "pipewire.default_sink.volume",
+        "pipewire.default_sink.mute_state",
+        "pipewire.audio.toggle_mute",
+        "pipewire.audio.set_volume",
+    ] {
+        assert!(basic.contains(required), "audio-basic omits `{required}`");
+    }
+    for excluded in [
+        "pipewire.nodes",
+        "pipewire.links",
+        "item.channels",
+        "peak-monitor",
+        "pipewire.defaults.",
+    ] {
+        assert!(
+            !basic.contains(excluded),
+            "audio-basic exceeds its onboarding scope with `{excluded}`"
+        );
+    }
+
+    let control_center = read_joined(&[
+        root.join("examples/audio-control-center/panel.html"),
+        root.join("examples/audio-control-center/overlay.html"),
+        root.join("examples/audio-control-center/style.css"),
+    ]);
+    for required in [
+        "pipewire.configured_sink.description",
+        "pipewire.configured_source.description",
+        "pipewire.defaults.set_preferred_sink",
+        "pipewire.defaults.set_preferred_source",
+        "pipewire.nodes",
+        "item.is_stream",
+        "item.channels",
+        "pipewire.audio.set_channel_volume",
+        r#"[data-htm-state="pending"]"#,
+        r#"[data-htm-state="failed"]"#,
+    ] {
+        assert!(
+            control_center.contains(required),
+            "audio-control-center omits `{required}`"
+        );
+    }
+    for excluded in [
+        "pipewire.links",
+        "pipewire.link_groups",
+        "peak-monitor",
+        "peak.channels",
+    ] {
+        assert!(
+            !control_center.contains(excluded),
+            "audio-control-center exceeds its control scope with `{excluded}`"
+        );
+    }
+
+    let inspector = read_joined(&[
+        root.join("examples/audio-inspector/panel.html"),
+        root.join("examples/audio-inspector/overlay.html"),
+        root.join("examples/audio-inspector/style.css"),
+    ]);
+    for required in [
+        "pipewire.links",
+        "pipewire.link_groups",
+        "item.link_groups",
+        "item.peer.description",
+        "peak-monitor",
+        "peak.channels",
+        "capture-adjacent",
+    ] {
+        assert!(
+            inspector.contains(required),
+            "audio-inspector omits `{required}`"
+        );
+    }
+    assert!(
+        inspector.contains(
+            r#"data-htm-target="pipewire.default_source"
+                 data-htm-enabled="false""#
+        ),
+        "the public inspector must not enable source monitoring by default"
+    );
+    for example in [&basic, &control_center, &inspector] {
+        assert!(!example.contains(r#"max="2""#));
+        assert!(!example.contains("/home/"));
+        assert!(!example.contains(".internal"));
+    }
+}
+
+#[test]
+fn pipewire_reference_is_derived_from_the_typed_public_inventory() {
+    let root = workspace_root();
+    let reference = read_joined(&markdown_files(
+        &root.join("docs/types/HTMShell.Services.PipeWire"),
+    ));
+
+    for key in StateBindingKey::ALL
+        .into_iter()
+        .filter(|key| key.as_str().starts_with("pipewire."))
+    {
+        assert!(
+            documented_name(&reference, key.as_str()),
+            "PipeWire state key is absent from the module reference: {}",
+            key.as_str()
+        );
+        for token in key.token_values() {
+            assert!(
+                documented_name(&reference, token),
+                "PipeWire token `{token}` for `{}` is undocumented",
+                key.as_str()
+            );
+        }
+    }
+    for key in ItemBindingKey::ALL.into_iter().filter(|key| {
+        key.supports_source(RepeatSource::PipeWireNodes)
+            || key.supports_source(RepeatSource::PipeWireLinks)
+            || key.supports_source(RepeatSource::PipeWireLinkGroups)
+            || ContextualRepeatSource::ALL
+                .into_iter()
+                .any(|source| key.supports_contextual(source))
+            || key.supports_peak_channel()
+    }) {
+        assert!(
+            documented_name(&reference, key.as_str()),
+            "PipeWire item key is absent from the module reference: {}",
+            key.as_str()
+        );
+    }
+    for key in PeakBindingKey::ALL {
+        assert!(
+            documented_name(&reference, key.as_str()),
+            "PipeWire peak key is absent from the module reference: {}",
+            key.as_str()
+        );
+    }
+}
+
+#[test]
+fn private_pipewire_final_parity_is_complete_when_present() {
+    let path = workspace_root().join(".internal/research/pipewire-final-parity.md");
+    if !path.is_file() {
+        return;
+    }
+    let text = fs::read_to_string(&path).expect("private parity matrix is UTF-8");
+    let rows = text
+        .lines()
+        .filter(|line| line.starts_with("| PW-"))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 101, "PipeWire parity row count changed");
+    for (index, row) in rows.iter().enumerate() {
+        assert!(
+            row.starts_with(&format!("| PW-{:03} |", index + 1)),
+            "PipeWire parity row ordering changed: {row}"
+        );
+        assert_eq!(
+            row.matches('|').count(),
+            12,
+            "PipeWire parity row must contain all eleven fields: {row}"
+        );
+        let fields = row.split('|').map(str::trim).collect::<Vec<_>>();
+        assert!(
+            matches!(
+                fields[10],
+                "IMPLEMENTED" | "EQUIVALENT" | "NOT APPLICABLE" | "DEFERRED BY JAMES"
+            ),
+            "invalid final PipeWire classification: {row}"
+        );
+        assert!(
+            !fields[11].is_empty(),
+            "PipeWire parity row omits notes: {row}"
+        );
+    }
+    for unresolved in ["UNRESOLVED", "| PLANNED |", "| PENDING |", "TODO"] {
+        assert!(
+            !text.contains(unresolved),
+            "PipeWire parity matrix remains unresolved: {unresolved}"
         );
     }
 }

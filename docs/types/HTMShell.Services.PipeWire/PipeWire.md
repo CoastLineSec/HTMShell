@@ -4,8 +4,8 @@
 **Scope:** Process
 
 `PipeWire` exposes connection state, nodes, the read-only link graph, default
-audio state, ordered channels, typed volume and mute controls, and configured
-default selection.
+audio state, ordered channels, typed volume and mute controls, configured
+default selection, and explicit scalar peak monitoring.
 
 ## State
 
@@ -77,3 +77,6 @@ session-local node or link IDs cannot alias old items.
 - [`PeakMonitor`](PeakMonitor.md)
 - [`PeakChannel`](PeakChannel.md)
 - [PipeWire audio and routing guide](../../guide/audio.md)
+- [Basic audio example](../../../examples/audio-basic/shell.json)
+- [Audio control center](../../../examples/audio-control-center/shell.json)
+- [Full audio inspector](../../../examples/audio-inspector/shell.json)

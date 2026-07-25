@@ -35,3 +35,8 @@ Wayland compositor
 ## Project status
 
 The authoring API, runtime, and supported CSS profile are experimental and may change as development continues.
+
+HTMShell includes direct native PipeWire integration for nodes, application
+streams, actual and configured defaults, volume, mute, ordered channels,
+read-only routing links and groups, and explicit scalar peak monitoring. The
+integration uses no subprocess wrapper, browser, or WebView.

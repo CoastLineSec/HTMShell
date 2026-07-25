@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="panel-root">
+    <strong>Audio</strong>
+    <span id="panel-sink"
+          data-htm-element="state-text"
+          data-htm-bind="pipewire.default_sink.description"></span>
+    <data id="panel-volume"
+          data-htm-element="state-value"
+          data-htm-bind="pipewire.default_sink.volume"
+          data-htm-format="percent"></data>
+    <span id="panel-mute"
+          data-htm-element="state-token"
+          data-htm-bind="pipewire.default_sink.mute_state"></span>
+    <button id="overlay-toggle"
+            data-htm-element="action-button"
+            data-htm-action="overlay.toggle">Open audio controls</button>
+  </main>
+</body>
+</html>

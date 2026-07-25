@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="overlay-card">
+    <header>
+      <div>
+        <small>Actual default output</small>
+        <h1>
+          <span id="overlay-sink-name"
+                data-htm-element="state-text"
+                data-htm-bind="pipewire.default_sink.description"></span>
+        </h1>
+      </div>
+      <button id="overlay-close"
+              data-htm-element="action-button"
+              data-htm-action="overlay.close">Close</button>
+    </header>
+    <data id="overlay-sink-volume"
+          data-htm-element="state-value"
+          data-htm-bind="pipewire.default_sink.volume"
+          data-htm-format="percent"></data>
+    <input id="overlay-sink-volume-control"
+           type="range"
+           aria-label="Default output volume"
+           data-htm-element="range-control"
+           data-htm-bind="pipewire.default_sink.volume"
+           data-htm-action="pipewire.audio.set_volume"
+           data-htm-target="pipewire.default_sink"
+           data-htm-enabled-bind="pipewire.default_sink.can_set_volume"
+           min="0"
+           max="1"
+           step="0.01">
+    <span id="overlay-sink-mute"
+          data-htm-element="state-token"
+          data-htm-bind="pipewire.default_sink.mute_state"></span>
+    <button id="overlay-sink-mute-control"
+            data-htm-element="action-button"
+            data-htm-action="pipewire.audio.toggle_mute"
+            data-htm-target="pipewire.default_sink"
+            data-htm-enabled-bind="pipewire.default_sink.can_set_mute">
+      Toggle mute
+    </button>
+    <button id="overlay-action"
+            data-htm-element="action-button"
+            data-htm-action="overlay.activate">Refresh local state</button>
+    <span id="overlay-status"
+          data-htm-element="state-text"
+          data-htm-bind="overlay.status"></span>
+    <span id="activation-count"
+          data-htm-element="state-text"
+          data-htm-bind="overlay.activation_count"></span>
+  </main>
+</body>
+</html>

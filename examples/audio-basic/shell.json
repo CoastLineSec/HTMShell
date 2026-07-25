@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "audio-basic",
+  "surfaces": [
+    {
+      "id": "panel",
+      "kind": "panel",
+      "document": "index.html",
+      "outputs": "all",
+      "edge": "top",
+      "thickness": 72,
+      "reserveSpace": true
+    },
+    {
+      "id": "overlay",
+      "kind": "overlay",
+      "document": "overlay.html",
+      "outputs": "all",
+      "initiallyOpen": false
+    }
+  ]
+}

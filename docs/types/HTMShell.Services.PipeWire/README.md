@@ -27,4 +27,11 @@ Process-scoped PipeWire graph state and typed audio controls.
 - [`PeakChannel`](PeakChannel.md): ordered per-channel scalar peaks
 
 The module does not expose channel mute, channel-map writes, link mutation,
-stream movement, recording, spectra, peak history, or spatial graph rendering.
+stream movement, arbitrary metadata or property writes, waveforms, spectra,
+recording, persistent peak history, or spatial graph rendering.
+
+## Examples
+
+- [`audio-basic`](../../../examples/audio-basic/shell.json)
+- [`audio-control-center`](../../../examples/audio-control-center/shell.json)
+- [`audio-inspector`](../../../examples/audio-inspector/shell.json)

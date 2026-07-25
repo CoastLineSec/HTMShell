@@ -1,0 +1,231 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="overlay-card">
+    <header>
+      <div>
+        <p class="eyebrow">Desktop audio</p>
+        <h1>Audio control center</h1>
+      </div>
+      <button id="overlay-close"
+              data-htm-element="action-button"
+              data-htm-action="overlay.close">Close</button>
+    </header>
+
+    <section class="defaults">
+      <article>
+        <p class="eyebrow">Output</p>
+        <h2>
+          <span id="actual-output"
+                data-htm-element="state-text"
+                data-htm-bind="pipewire.default_sink.description"></span>
+        </h2>
+        <p>Preferred:
+          <span id="configured-output"
+                data-htm-element="state-text"
+                data-htm-bind="pipewire.configured_sink.description"></span>
+        </p>
+        <div class="default-control">
+          <input id="output-volume"
+                 type="range"
+                 aria-label="Default output volume"
+                 data-htm-element="range-control"
+                 data-htm-bind="pipewire.default_sink.volume"
+                 data-htm-action="pipewire.audio.set_volume"
+                 data-htm-target="pipewire.default_sink"
+                 data-htm-enabled-bind="pipewire.default_sink.can_set_volume"
+                 min="0"
+                 max="1"
+                 step="0.01">
+          <button id="output-mute"
+                  data-htm-element="action-button"
+                  data-htm-action="pipewire.audio.toggle_mute"
+                  data-htm-target="pipewire.default_sink"
+                  data-htm-enabled-bind="pipewire.default_sink.can_set_mute">
+            Toggle mute
+          </button>
+          <button id="clear-output"
+                  data-htm-element="action-button"
+                  data-htm-action="pipewire.defaults.clear_preferred_sink"
+                  data-htm-enabled-bind="pipewire.configured_sink.can_clear">
+            Clear preference
+          </button>
+        </div>
+      </article>
+
+      <article>
+        <p class="eyebrow">Input</p>
+        <h2>
+          <span id="actual-input"
+                data-htm-element="state-text"
+                data-htm-bind="pipewire.default_source.description"></span>
+        </h2>
+        <p>Preferred:
+          <span id="configured-input"
+                data-htm-element="state-text"
+                data-htm-bind="pipewire.configured_source.description"></span>
+        </p>
+        <div class="default-control">
+          <input id="input-volume"
+                 type="range"
+                 aria-label="Default input volume"
+                 data-htm-element="range-control"
+                 data-htm-bind="pipewire.default_source.volume"
+                 data-htm-action="pipewire.audio.set_volume"
+                 data-htm-target="pipewire.default_source"
+                 data-htm-enabled-bind="pipewire.default_source.can_set_volume"
+                 min="0"
+                 max="1"
+                 step="0.01">
+          <button id="input-mute"
+                  data-htm-element="action-button"
+                  data-htm-action="pipewire.audio.toggle_mute"
+                  data-htm-target="pipewire.default_source"
+                  data-htm-enabled-bind="pipewire.default_source.can_set_mute">
+            Toggle mute
+          </button>
+          <button id="clear-input"
+                  data-htm-element="action-button"
+                  data-htm-action="pipewire.defaults.clear_preferred_source"
+                  data-htm-enabled-bind="pipewire.configured_source.can_clear">
+            Clear preference
+          </button>
+        </div>
+      </article>
+    </section>
+
+    <section>
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Devices and applications</p>
+          <h2>Session nodes</h2>
+        </div>
+        <p>Application streams and endpoints share the same item-local controls.</p>
+      </div>
+
+      <div class="nodes">
+        <template id="nodes"
+                  data-htm-element="repeat"
+                  data-htm-source="pipewire.nodes">
+          <div class="node"
+               data-htm-element="state-token"
+               data-htm-local-id="node"
+               data-htm-bind="item.node_type">
+            <header>
+              <div>
+                <strong>
+                  <span data-htm-element="state-text"
+                        data-htm-local-id="description"
+                        data-htm-bind="item.description"></span>
+                </strong>
+                <span data-htm-element="state-token"
+                      data-htm-local-id="role"
+                      data-htm-bind="item.default_role"></span>
+                <span data-htm-element="state-token"
+                      data-htm-local-id="configured-role"
+                      data-htm-bind="item.configured_role"></span>
+              </div>
+              <span data-htm-element="state-token"
+                    data-htm-local-id="stream"
+                    data-htm-bind="item.is_stream"></span>
+            </header>
+
+            <p data-htm-element="state-text"
+               data-htm-local-id="application"
+               data-htm-bind="item.property"
+               data-htm-property-key="application.name"></p>
+
+            <div class="node-controls">
+              <data data-htm-element="state-value"
+                    data-htm-local-id="volume-value"
+                    data-htm-bind="item.volume"
+                    data-htm-format="percent"></data>
+              <input type="range"
+                     aria-label="Node volume"
+                     data-htm-element="range-control"
+                     data-htm-local-id="volume"
+                     data-htm-bind="item.volume"
+                     data-htm-action="pipewire.audio.set_volume"
+                     data-htm-enabled-bind="item.can_set_volume"
+                     min="0"
+                     max="1"
+                     step="0.01">
+              <button data-htm-element="action-button"
+                      data-htm-local-id="mute"
+                      data-htm-action="pipewire.audio.toggle_mute"
+                      data-htm-enabled-bind="item.can_set_mute">
+                Toggle mute
+              </button>
+            </div>
+
+            <div class="preference-controls">
+              <button data-htm-element="action-button"
+                      data-htm-local-id="prefer-output"
+                      data-htm-action="pipewire.defaults.set_preferred_sink"
+                      data-htm-enabled-bind="item.can_set_preferred_sink">
+                Use as preferred output
+              </button>
+              <button data-htm-element="action-button"
+                      data-htm-local-id="prefer-input"
+                      data-htm-action="pipewire.defaults.set_preferred_source"
+                      data-htm-enabled-bind="item.can_set_preferred_source">
+                Use as preferred input
+              </button>
+            </div>
+
+            <div class="channel-summary">
+              <span data-htm-element="state-token"
+                    data-htm-local-id="channel-status"
+                    data-htm-bind="item.channel_status"></span>
+              <data data-htm-element="state-value"
+                    data-htm-local-id="channel-count"
+                    data-htm-bind="item.channel_count"></data>
+            </div>
+            <div class="channels">
+              <template data-htm-element="repeat"
+                        data-htm-source="item.channels">
+                <div class="channel" data-htm-local-id="channel">
+                  <span data-htm-element="state-text"
+                        data-htm-local-id="position"
+                        data-htm-bind="item.position_name"></span>
+                  <data data-htm-element="state-value"
+                        data-htm-local-id="value"
+                        data-htm-bind="item.volume"
+                        data-htm-format="percent"></data>
+                  <input type="range"
+                         aria-label="Channel volume"
+                         data-htm-element="range-control"
+                         data-htm-local-id="control"
+                         data-htm-bind="item.volume"
+                         data-htm-action="pipewire.audio.set_channel_volume"
+                         data-htm-enabled-bind="item.can_set_volume"
+                         min="0"
+                         max="1"
+                         step="0.01">
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </section>
+
+    <footer>
+      <span>Configured preferences affect session policy. Existing streams are not moved.</span>
+      <button id="overlay-action"
+              data-htm-element="action-button"
+              data-htm-action="overlay.activate">Refresh local state</button>
+      <span id="overlay-status"
+            data-htm-element="state-text"
+            data-htm-bind="overlay.status"></span>
+      <span id="activation-count"
+            data-htm-element="state-text"
+            data-htm-bind="overlay.activation_count"></span>
+    </footer>
+  </main>
+</body>
+</html>

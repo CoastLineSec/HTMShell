@@ -1,16 +1,20 @@
 # PipeWire audio
 
-HTMShell presents PipeWire nodes, default audio relationships, volume, mute
-state, channels, and the read-only link graph. One process connection serves
-every output.
+## Overview
 
-## Service state
+HTMShell presents PipeWire nodes, default audio relationships, volume, mute
+state, ordered channels, the read-only routing graph, preferred-default
+controls, and explicit scalar peak monitoring. One native process connection
+serves every document and output. The integration uses no subprocess, browser,
+or WebView transport.
+
+## Service lifecycle
 
 `pipewire.availability` is `unavailable`, `synchronizing`, or `ready`. `pipewire.ready` becomes true after initial graph synchronization. `pipewire.node_count` is the number of published nodes.
 
 PipeWire absence does not stop the shell. Reconnection clears the old generation before publishing fresh node identities.
 
-## Audio nodes
+## Nodes and application streams
 
 Use the `pipewire.nodes` repeat source:
 
@@ -41,7 +45,7 @@ Use the `pipewire.nodes` repeat source:
 
 Application streams, sinks, sources, and virtual audio nodes use the same bindings.
 
-## Item-local controls
+## Volume and mute
 
 Controls inside `pipewire.nodes` target the current keyed item:
 
@@ -66,7 +70,7 @@ Controls inside `pipewire.nodes` target the current keyed item:
 
 The mute actions are `pipewire.audio.mute`, `pipewire.audio.unmute`, and `pipewire.audio.toggle_mute`. They do not accept a target inside the node repeat. The keyed item identity is captured for dispatch. Raw PipeWire IDs are never targets.
 
-## Default controls
+### Actual-default controls
 
 Actual default sink and source controls are allowed outside a repeat:
 
@@ -93,7 +97,7 @@ Actual default sink and source controls are allowed outside a repeat:
 
 `pipewire.default_source` is the other writable target. Configured defaults expose read-only audio state but cannot be targeted.
 
-## Volume behavior
+### Volume semantics
 
 The range defaults are `min="0"`, `max="1"`, and `step="0.01"`. The runtime maximum is `2.0`. A value above `1.0` is allowed only when the author explicitly sets a larger `max`.
 
@@ -101,7 +105,7 @@ Amplification can clip or distort. The runtime never enables it through an omitt
 
 Average-volume writes preserve the current channel balance.
 
-## Ordered channels
+## Channels
 
 `item.channel_status` is `unsupported`, `unavailable`, or `ready`.
 `item.channel_count` is zero until an authoritative channel vector is ready.
@@ -160,7 +164,7 @@ A volume-only update preserves channel identity. Count, order, position, or
 fallback-layout changes replace that node's channel-layout generation. A
 layout replacement cancels stale controls.
 
-## Average and channel writes
+### Average and channel controls
 
 `pipewire.audio.set_channel_volume` is valid only on `range-control` inside
 `item.channels`. It has no explicit `data-htm-target`. The write starts from the
@@ -179,7 +183,7 @@ failure, timeout, removal, layout replacement, and reconnect use the same
 controls. The default range remains `0` to `1` with step `0.01`; an explicit
 larger `max`, up to the runtime maximum `2.0`, is required for amplification.
 
-## Confirmation and failures
+## Controls and confirmation
 
 PipeWire state is authoritative. A range thumb can follow the pointer locally, but bound volume changes only after PipeWire reports the new value.
 
@@ -196,9 +200,7 @@ Queued volume writes are spaced by at least 16 milliseconds.
 
 External volume and mute changes update idle controls. A failed range returns to the latest authoritative value.
 
-## Defaults and exact properties
-
-Actual defaults describe current session policy. Configured defaults describe stored preferences. Each relationship can be `unavailable`, `unresolved`, or `available`.
+## Properties and classifications
 
 Inside `pipewire.nodes`, `item.property` reads one static key:
 
@@ -211,13 +213,20 @@ Inside `pipewire.nodes`, `item.property` reads one static key:
 
 Common keys include `application.name`, `application.icon-name`, `media.name`, `media.title`, and `media.artist`. Presence is not guaranteed.
 
-## Preferred output and input
+## Actual and configured defaults
 
 Actual defaults and configured defaults remain separate. The actual default is
 the current result of session policy. The configured default is the user's
 stored preference for future policy decisions. Selecting a preference does not
 guarantee that the actual default changes immediately, and existing streams
 can remain routed to their current nodes.
+
+Each relationship can be `unavailable`, `unresolved`, or `available`. Actual
+relationships expose the node chosen by current policy. Configured
+relationships expose the metadata preference, including when policy has not
+made it actual.
+
+## Preferred defaults
 
 Inside `pipewire.nodes`, eligible nodes expose
 `item.can_set_preferred_sink` and `item.can_set_preferred_source`:
@@ -263,7 +272,7 @@ Several documents and outputs share the same metadata proxy and role
 coordinators. Removing the final preferred-write consumer releases that role's
 write state without disabling read-only configured-default consumers.
 
-## Links and grouped connections
+## Links and routing
 
 `pipewire.link_count` and `pipewire.link_group_count` report the authoritative
 collection sizes after synchronization. Repeat over individual port links with
@@ -333,7 +342,7 @@ generation and source-target pair.
 Top-level links and groups include monitor routes. `item.is_monitor` is true
 when the target node has PipeWire media category `Monitor` or `Manager`.
 
-## Node connection tracking
+### Node link tracking
 
 Inside `pipewire.nodes`, `item.link_group_count`,
 `item.link_group_status`, and contextual `item.link_groups` provide the
@@ -367,7 +376,7 @@ forms of one contextual level. The inner `item.*` shadows the outer scope.
 They cannot be nested inside one another and there is no `parent.*`, `../`,
 selector, interpolation, or arbitrary relation syntax.
 
-## Explicit peak monitoring
+## Peak monitoring
 
 Peak monitoring is capture-adjacent work and is never activated by ordinary
 node, volume, mute, channel, link, or default bindings. An author must declare
@@ -465,7 +474,7 @@ Denial and stream errors are contained to monitor state; all non-peak PipeWire
 features remain usable. No permission bypass, recording, persistence, or
 transmission occurs.
 
-## Demand and limits
+## Demand and lifecycle
 
 Documents activate only the PipeWire state they consume. Audio parameter subscriptions and write coordinators are shared process-wide. Removing the final audio consumer releases audio demand. Closed retained overlays may update without receiving a frame.
 
@@ -483,6 +492,26 @@ channel consumers.
 Configured-default read demand and write demand are separate. Preferred sink
 and source write demand are also independent. A document without a preferred
 action creates no configured-default write demand.
+
+Disabled peak declarations record no active stream demand. Enabled declarations
+contribute stream demand only while their owning surface is mapped. Disconnect,
+reconnect, node replacement, metadata replacement, document replacement, and
+output removal invalidate stale identities before new state is published.
+
+## Permissions and privacy
+
+PipeWire permissions remain authoritative for reads, controls, metadata writes,
+and monitor streams. Denial changes the affected capability or control state
+without disabling unrelated shell features. HTMShell adds no permission
+bypass, privileged helper, Polkit agent, PulseAudio fallback, or command-line
+fallback.
+
+Peak monitoring is capture-adjacent even though only scalar values cross the
+transport boundary. Source monitoring can activate session capture indicators.
+Raw sample buffers are returned immediately. They are not exposed to markup,
+logged, retained as history, written to disk, or transmitted.
+
+## Limits
 
 Limits include:
 
@@ -523,10 +552,21 @@ Limits include:
 - at most 60 peak publications per second per active node
 - a two-second confirmation timeout
 
-## Current limitations
+## Examples
+
+The public examples form a progression:
+
+- [`audio-basic`](../../examples/audio-basic/shell.json) is the smallest default-output volume and mute example.
+- [`audio-control-center`](../../examples/audio-control-center/shell.json) combines actual and configured defaults, device and application-stream controls, and ordered channels.
+- [`audio-inspector`](../../examples/audio-inspector/shell.json) adds the complete read-only routing graph and explicit peak monitoring.
+
+None of the examples performs a write during startup. Their controls dispatch
+only after explicit user interaction. The inspector keeps default-source peak
+monitoring disabled in its authored initial state.
+
+## Current boundaries
 
 Channel mute, channel-map writes, link mutation, stream movement, arbitrary
-graph queries, spatial graph rendering, waveforms, spectra, FFT, persistent
-peak history, recording, and arbitrary media capture are not available.
-
-See the tracked [audio inspector dashboard](../../examples/audio-inspector/shell.json).
+metadata or property writes, generic graph queries, parent traversal, scripts,
+spatial graph rendering, waveforms, spectra, FFT, persistent peak history,
+recording, and arbitrary media capture are not available.
