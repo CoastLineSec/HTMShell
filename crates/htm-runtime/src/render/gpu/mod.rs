@@ -1046,6 +1046,10 @@ fn effect_coverage(effect: &SceneEffect) -> GpuCoverage {
         | SceneEffect::Transform { .. }
         | SceneEffect::BackgroundLayers { .. }
         | SceneEffect::BoxShadows { .. } => GpuCoverage::Native,
+        SceneEffect::RejectedForegroundFilter { .. } => GpuCoverage::Native,
+        SceneEffect::ForegroundFilter { list, .. } if list.is_visual_identity() => {
+            GpuCoverage::Native
+        }
         SceneEffect::ForegroundFilter { .. } | SceneEffect::BackdropFilter { .. } => {
             GpuCoverage::CpuFrameFallback
         }
@@ -1161,8 +1165,10 @@ mod tests {
     use super::*;
     use crate::model::{LogicalRect, ViewportSpec};
     use crate::render::{
-        FrameReason, FrameReasonSet, ResourceKind, ResourceOwner, RetainedScene, SceneBounds,
-        SceneDelta, SceneNode, SceneNodeId, SceneResource, SceneResourceKey, SceneSubpart,
+        CanonicalF32, ColorEffect, ColorEffectKind, ForegroundEffect, ForegroundEffectCoverage,
+        ForegroundEffectId, ForegroundEffectLayerMetadata, ForegroundEffectList, FrameReason,
+        FrameReasonSet, ResourceKind, ResourceOwner, RetainedScene, SceneBounds, SceneDelta,
+        SceneNode, SceneNodeId, SceneResource, SceneResourceKey, SceneSubpart,
     };
     use crate::{ExperimentalDocumentIdentity, ExperimentalNodeIdentity};
     use anyrender::render_to_buffer;
@@ -1286,6 +1292,38 @@ mod tests {
             reasons: FrameReasonSet::from([FrameReason::InitialPresentation]),
             full_repaint: true,
             presentation_eligible: true,
+        }
+    }
+
+    fn modeled_foreground_filter(value: f32) -> SceneEffect {
+        let bounds = LogicalRect {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 48.0,
+        };
+        let list = ForegroundEffectList::from_functions(
+            ForegroundEffectId::for_node(
+                ExperimentalDocumentIdentity { serial: 41 },
+                ExperimentalNodeIdentity {
+                    slot: 2,
+                    generation: 7,
+                },
+            ),
+            vec![ForegroundEffect::Color(ColorEffect {
+                kind: ColorEffectKind::Brightness,
+                value: CanonicalF32::new(value).unwrap(),
+            })],
+        )
+        .unwrap();
+        let future_layer = ForegroundEffectLayerMetadata::for_list(&list);
+        SceneEffect::ForegroundFilter {
+            list,
+            source_graphic_bounds: bounds.clone(),
+            filtered_bounds: bounds,
+            nesting_depth: 1,
+            coverage: ForegroundEffectCoverage::MODEL_ONLY,
+            future_layer,
         }
     }
 
@@ -1547,10 +1585,7 @@ mod tests {
         assert_eq!(
             VelloOffscreenRenderer::coverage(&proof_plan(
                 surface,
-                Some(SceneEffect::ForegroundFilter {
-                    signature: 7,
-                    conservative_full_bounds: true,
-                })
+                Some(modeled_foreground_filter(1.1))
             ))
             .unwrap(),
             GpuCoverage::CpuFrameFallback
@@ -1595,10 +1630,7 @@ mod tests {
             assert_eq!(effect_coverage(&effect), GpuCoverage::Native);
         }
         for effect in [
-            SceneEffect::ForegroundFilter {
-                signature: 3,
-                conservative_full_bounds: true,
-            },
+            modeled_foreground_filter(1.1),
             SceneEffect::BackdropFilter {
                 signature: 4,
                 conservative_full_bounds: true,
@@ -1606,6 +1638,23 @@ mod tests {
         ] {
             assert_eq!(effect_coverage(&effect), GpuCoverage::CpuFrameFallback);
         }
+        assert_eq!(
+            effect_coverage(&modeled_foreground_filter(1.0)),
+            GpuCoverage::Native
+        );
+        assert_eq!(
+            effect_coverage(&SceneEffect::RejectedForegroundFilter {
+                id: ForegroundEffectId::for_node(
+                    ExperimentalDocumentIdentity { serial: 41 },
+                    ExperimentalNodeIdentity {
+                        slot: 2,
+                        generation: 7,
+                    },
+                ),
+                reason: crate::render::ForegroundEffectRejection::FactorRange,
+            }),
+            GpuCoverage::Native
+        );
     }
 
     #[test]
@@ -2017,13 +2066,7 @@ mod tests {
             instance: 14,
             generation: 1,
         };
-        let fallback_plan = proof_plan(
-            fallback_surface,
-            Some(SceneEffect::ForegroundFilter {
-                signature: 55,
-                conservative_full_bounds: true,
-            }),
-        );
+        let fallback_plan = proof_plan(fallback_surface, Some(modeled_foreground_filter(1.1)));
         let mut facade = OffscreenRenderer::new(false);
         let prepared = CpuPreparedScene {
             revision: fallback_plan.scene_revision,

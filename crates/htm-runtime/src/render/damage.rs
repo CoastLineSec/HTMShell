@@ -28,8 +28,7 @@ impl DamageRegion {
             change.kinds.iter().any(|kind| {
                 matches!(
                     kind,
-                    SceneChangeKind::Effect
-                        | SceneChangeKind::Clip
+                    SceneChangeKind::Clip
                         | SceneChangeKind::StackingOrOrder
                         | SceneChangeKind::Reparented
                 )
@@ -515,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn clip_order_and_unsafe_geometry_use_full_damage() {
+    fn effect_changes_use_bounds_while_clip_and_order_changes_use_full_damage() {
         let current = RetainedScene {
             document: ExperimentalDocumentIdentity { serial: 1 },
             revision: SceneRevision(2),
@@ -529,8 +528,30 @@ mod tests {
             resources: Vec::new(),
             content_fingerprint: 2,
         };
+        let effect = delta(SceneNodeChange {
+            id: id(1),
+            kinds: BTreeSet::from([SceneChangeKind::Effect]),
+            old_bounds: Some(bounds(1.0, 1.0, 2.0, 2.0)),
+            new_bounds: Some(bounds(4.0, 4.0, 2.0, 2.0)),
+        });
+        assert_eq!(
+            DamageRegion::from_delta(Some(&current), &current, &effect),
+            DamageRegion::Rects(vec![
+                LogicalRect {
+                    x: 1.0,
+                    y: 1.0,
+                    width: 2.0,
+                    height: 2.0,
+                },
+                LogicalRect {
+                    x: 4.0,
+                    y: 4.0,
+                    width: 2.0,
+                    height: 2.0,
+                },
+            ])
+        );
         for kind in [
-            SceneChangeKind::Effect,
             SceneChangeKind::Clip,
             SceneChangeKind::StackingOrOrder,
             SceneChangeKind::Reparented,

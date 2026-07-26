@@ -1,3 +1,9 @@
+use super::effects::normalize_computed_filter;
+use super::{
+    ForegroundEffectCoverage, ForegroundEffectId, ForegroundEffectLayerMetadata,
+    ForegroundEffectList, ForegroundEffectRejection, MAX_ACTIVE_FILTERED_ELEMENTS_PER_SURFACE,
+    MAX_FILTER_DECLARATIONS_PER_DOCUMENT, MAX_FILTER_NESTING_DEPTH,
+};
 use super::{stable_hash_bytes, stable_hash_parts};
 use crate::adapter::{
     border_radii, collect_fonts, collect_retained_paint_order, image_diagnostic, round, safe_rect,
@@ -94,8 +100,16 @@ pub enum SceneEffect {
         conservative_full_bounds: bool,
     },
     ForegroundFilter {
-        signature: u64,
-        conservative_full_bounds: bool,
+        list: ForegroundEffectList,
+        source_graphic_bounds: LogicalRect,
+        filtered_bounds: LogicalRect,
+        nesting_depth: u8,
+        coverage: ForegroundEffectCoverage,
+        future_layer: ForegroundEffectLayerMetadata,
+    },
+    RejectedForegroundFilter {
+        id: ForegroundEffectId,
+        reason: ForegroundEffectRejection,
     },
     BackdropFilter {
         signature: u64,
@@ -351,6 +365,9 @@ pub(crate) fn build_retained_scene(
     let mut ancestor_suppression = BTreeMap::new();
     let mut visual_parents = BTreeMap::new();
     let mut computed_visibility = BTreeMap::new();
+    let mut filter_depths = BTreeMap::new();
+    let mut filter_declarations = BTreeSet::new();
+    let mut active_filtered_elements = 0usize;
     for (tree_order, slot) in slots.iter().copied().enumerate() {
         let node = document.get_node(slot).ok_or_else(|| {
             RuntimeError::InvalidMutationTarget(format!(
@@ -359,6 +376,38 @@ pub(crate) fn build_retained_scene(
         })?;
         let identity = live[&slot];
         let id = primary_ids[&slot];
+        let effect_id = ForegroundEffectId::for_node(document_identity, identity);
+        let mut foreground_filter = node.primary_styles().and_then(|styles| {
+            (!styles.get_effects().filter.0.is_empty()).then(|| {
+                normalize_computed_filter(
+                    &styles.get_effects().filter.0,
+                    &styles.clone_color(),
+                    effect_id,
+                )
+            })
+        });
+        let inherited_filter_depth = node
+            .parent
+            .and_then(|parent| filter_depths.get(&parent).copied())
+            .unwrap_or(0usize);
+        if let Some(Ok(list)) = foreground_filter.as_ref() {
+            filter_declarations.insert(list.version);
+            if filter_declarations.len() > MAX_FILTER_DECLARATIONS_PER_DOCUMENT {
+                filter_declarations.remove(&list.version);
+                foreground_filter = Some(Err(ForegroundEffectRejection::DeclarationCount));
+            }
+        }
+        let filter_depth = if foreground_filter.as_ref().is_some_and(Result::is_ok) {
+            inherited_filter_depth.saturating_add(1)
+        } else {
+            inherited_filter_depth
+        };
+        if filter_depth > MAX_FILTER_NESTING_DEPTH {
+            foreground_filter = Some(Err(ForegroundEffectRejection::NestingDepth));
+            filter_depths.insert(slot, inherited_filter_depth);
+        } else {
+            filter_depths.insert(slot, filter_depth);
+        }
         let visual_parent = node
             .parent
             .and_then(|parent| visual_parents.get(&parent).copied())
@@ -426,6 +475,13 @@ pub(crate) fn build_retained_scene(
             visual_parents.insert(slot, visual_parent);
             continue;
         }
+        if foreground_filter.as_ref().is_some_and(Result::is_ok) {
+            active_filtered_elements = active_filtered_elements.saturating_add(1);
+            if active_filtered_elements > MAX_ACTIVE_FILTERED_ELEMENTS_PER_SURFACE {
+                foreground_filter = Some(Err(ForegroundEffectRejection::ActiveElementCount));
+                filter_depths.insert(slot, inherited_filter_depth);
+            }
+        }
         let parent = Some(visual_parent);
         visual_parents.insert(slot, id);
 
@@ -461,24 +517,18 @@ pub(crate) fn build_retained_scene(
         let style_effects = node.primary_styles().map(|styles| {
             let background = format!("{:?}", styles.get_background().background_image);
             let shadows = format!("{:?}", styles.get_effects().box_shadow);
-            let filter = format!("{:?}", styles.get_effects().filter);
             let backdrop = format!("{:?}", styles.get_effects().backdrop_filter);
             (
                 background,
                 shadows,
                 !styles.get_effects().box_shadow.0.is_empty(),
-                filter,
-                !styles.get_effects().filter.0.is_empty(),
                 backdrop,
                 !styles.get_effects().backdrop_filter.0.is_empty(),
             )
         });
-        let expands_conservatively =
-            style_effects
-                .as_ref()
-                .is_some_and(|(_, _, shadows, _, filter, _, backdrop)| {
-                    *shadows || *filter || *backdrop
-                });
+        let expands_conservatively = style_effects
+            .as_ref()
+            .is_some_and(|(_, _, shadows, _, backdrop)| *shadows || *backdrop);
         let visual = if expands_conservatively {
             effective_clip.clone()
         } else {
@@ -491,28 +541,8 @@ pub(crate) fn build_retained_scene(
         };
 
         let mut effects = Vec::new();
-        if opacity != 1.0 {
-            effects.push(SceneEffect::Opacity { value: opacity });
-        }
-        if establishes_clip {
-            effects.push(SceneEffect::Clip {
-                bounds: layout.clone(),
-                rounded: border_radii(node),
-            });
-        }
-        if let Some(coefficients) = transform {
-            effects.push(SceneEffect::Transform { coefficients });
-        }
-        if let Some((
-            background,
-            shadows,
-            has_shadows,
-            filter,
-            has_filter,
-            backdrop,
-            has_backdrop,
-        )) = style_effects
-        {
+        let mut backdrop_effect = None;
+        if let Some((background, shadows, has_shadows, backdrop, has_backdrop)) = style_effects {
             effects.push(SceneEffect::BackgroundLayers {
                 signature: stable_hash_bytes(background.as_bytes()),
             });
@@ -522,19 +552,51 @@ pub(crate) fn build_retained_scene(
                     conservative_full_bounds: true,
                 });
             }
-            if has_filter {
-                effects.push(SceneEffect::ForegroundFilter {
-                    signature: stable_hash_bytes(filter.as_bytes()),
-                    conservative_full_bounds: true,
-                });
-            }
             if has_backdrop {
-                effects.push(SceneEffect::BackdropFilter {
+                backdrop_effect = Some(SceneEffect::BackdropFilter {
                     signature: stable_hash_bytes(backdrop.as_bytes()),
                     conservative_full_bounds: true,
                 });
             }
         }
+        if let Some(filter) = foreground_filter {
+            match filter {
+                Ok(list) => {
+                    let filtered_bounds = list
+                        .propagated_bounds(&visual)
+                        .map(|bounds| intersect_rect(&bounds, &effective_clip))
+                        .unwrap_or_else(|_| visual.clone());
+                    let future_layer = ForegroundEffectLayerMetadata::for_list(&list);
+                    effects.push(SceneEffect::ForegroundFilter {
+                        list,
+                        source_graphic_bounds: visual.clone(),
+                        filtered_bounds,
+                        nesting_depth: u8::try_from(filter_depth).unwrap_or(u8::MAX),
+                        coverage: ForegroundEffectCoverage::MODEL_ONLY,
+                        future_layer,
+                    });
+                }
+                Err(reason) => {
+                    effects.push(SceneEffect::RejectedForegroundFilter {
+                        id: effect_id,
+                        reason,
+                    });
+                }
+            }
+        }
+        if establishes_clip {
+            effects.push(SceneEffect::Clip {
+                bounds: layout.clone(),
+                rounded: border_radii(node),
+            });
+        }
+        if opacity != 1.0 {
+            effects.push(SceneEffect::Opacity { value: opacity });
+        }
+        if let Some(coefficients) = transform {
+            effects.push(SceneEffect::Transform { coefficients });
+        }
+        effects.extend(backdrop_effect);
 
         let background = node.primary_styles().map(|styles| {
             let current = styles.clone_color();
@@ -554,15 +616,19 @@ pub(crate) fn build_retained_scene(
         let style_debug = paint_node
             .primary_styles()
             .map(|styles| {
+                let effects = styles.get_effects();
                 format!(
-                    "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+                    "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
                     styles.get_inherited_text(),
                     styles.get_font(),
                     styles.get_inherited_box(),
                     styles.get_background(),
                     styles.get_border(),
                     styles.get_box(),
-                    styles.get_effects()
+                    effects.box_shadow,
+                    effects.clip,
+                    effects.opacity,
+                    effects.mix_blend_mode,
                 )
             })
             .unwrap_or_else(|| format!("{:?}", paint_node.style));
@@ -708,6 +774,7 @@ pub(crate) fn build_retained_scene(
     for node in &mut nodes {
         node.children = children.remove(&node.id).unwrap_or_default();
     }
+    apply_foreground_effect_bounds(&mut nodes)?;
 
     let resources: Vec<_> = resources.into_values().collect();
     let fingerprint = stable_hash_parts(&[
@@ -978,6 +1045,108 @@ fn intersect_rect(left: &LogicalRect, right: &LogicalRect) -> LogicalRect {
     safe_rect(x1, y1, (x2 - x1).max(0.0), (y2 - y1).max(0.0))
 }
 
+fn union_rect(left: &LogicalRect, right: &LogicalRect) -> LogicalRect {
+    let x1 = left.x.min(right.x);
+    let y1 = left.y.min(right.y);
+    let x2 = (left.x + left.width).max(right.x + right.width);
+    let y2 = (left.y + left.height).max(right.y + right.height);
+    safe_rect(x1, y1, (x2 - x1).max(0.0), (y2 - y1).max(0.0))
+}
+
+fn apply_foreground_effect_bounds(nodes: &mut [SceneNode]) -> Result<(), RuntimeError> {
+    let indices: BTreeMap<_, _> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id, index))
+        .collect();
+    let mut ordered: Vec<_> = nodes
+        .iter()
+        .map(|node| (node.tree_order, node.id))
+        .collect();
+    ordered.sort_by_key(|(tree_order, id)| (std::cmp::Reverse(*tree_order), *id));
+
+    let mut subtree_outputs = BTreeMap::new();
+    let mut filtered_outputs = BTreeMap::new();
+    for (_, id) in ordered {
+        let index = indices[&id];
+        let mut source = nodes[index].bounds.visual.clone();
+        for child in nodes[index].children.clone() {
+            if let Some(bounds) = subtree_outputs.get(&child) {
+                source = union_rect(&source, bounds);
+            }
+        }
+
+        let filter_index = nodes[index]
+            .effects
+            .iter()
+            .position(|effect| matches!(effect, SceneEffect::ForegroundFilter { .. }));
+        let mut output = source.clone();
+        if let Some(filter_index) = filter_index {
+            let (list, nesting_depth, coverage, future_layer) =
+                match &nodes[index].effects[filter_index] {
+                    SceneEffect::ForegroundFilter {
+                        list,
+                        nesting_depth,
+                        coverage,
+                        future_layer,
+                        ..
+                    } => (list.clone(), *nesting_depth, *coverage, *future_layer),
+                    _ => unreachable!("position selected a foreground filter"),
+                };
+            match list.propagated_bounds(&source) {
+                Ok(filtered) => {
+                    let transformed = nodes[index]
+                        .effects
+                        .iter()
+                        .any(|effect| matches!(effect, SceneEffect::Transform { .. }));
+                    output = if transformed && list.expands_geometry() {
+                        nodes[index].bounds.clip.clone()
+                    } else {
+                        intersect_rect(&filtered, &nodes[index].bounds.clip)
+                    };
+                    nodes[index].effects[filter_index] = SceneEffect::ForegroundFilter {
+                        list,
+                        source_graphic_bounds: source,
+                        filtered_bounds: output.clone(),
+                        nesting_depth,
+                        coverage,
+                        future_layer,
+                    };
+                    nodes[index].bounds.visual = output.clone();
+                    nodes[index].bounds.damage = output.clone();
+                    filtered_outputs.insert(id, output.clone());
+                }
+                Err(reason) => {
+                    nodes[index].effects[filter_index] = SceneEffect::RejectedForegroundFilter {
+                        id: list.id,
+                        reason,
+                    };
+                }
+            }
+        }
+        subtree_outputs.insert(id, output);
+    }
+
+    let parents: BTreeMap<_, _> = nodes.iter().map(|node| (node.id, node.parent)).collect();
+    for node in nodes {
+        let mut ancestor = node.parent;
+        let mut remaining = MAX_SCENE_DEPTH;
+        while let Some(parent) = ancestor {
+            if let Some(filtered) = filtered_outputs.get(&parent) {
+                node.bounds.damage = union_rect(&node.bounds.damage, filtered);
+            }
+            ancestor = parents.get(&parent).copied().flatten();
+            if remaining == 0 {
+                return Err(RuntimeError::LimitExceeded(
+                    "foreground effect ancestry exceeds the scene-depth limit".into(),
+                ));
+            }
+            remaining -= 1;
+        }
+    }
+    Ok(())
+}
+
 fn outset_rect(rect: &LogicalRect, amount: f32) -> LogicalRect {
     safe_rect(
         rect.x - amount,
@@ -1041,10 +1210,13 @@ fn transformed_bounds(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::{ForegroundEffect, ForegroundEffectColorSpace};
     use blitz_dom::{DocumentConfig, StyleThreading};
     use blitz_html::HtmlProvider;
     use blitz_traits::shell::{ColorScheme, Viewport};
+    use std::fmt::Write as _;
     use std::sync::Arc;
+    use std::time::Instant;
 
     fn document(html: &str) -> HtmlDocument {
         let mut document = HtmlDocument::from_html(
@@ -1118,6 +1290,36 @@ mod tests {
             resource: None,
             paint_signature: 1,
         }
+    }
+
+    fn node_by_selector<'a>(
+        document: &HtmlDocument,
+        scene: &'a RetainedScene,
+        selector: &str,
+    ) -> &'a SceneNode {
+        let slot = document.query_selector(selector).unwrap().unwrap();
+        scene
+            .nodes
+            .iter()
+            .find(|node| node.id.dom.is_some_and(|identity| identity.slot == slot))
+            .expect("selector has a retained scene node")
+    }
+
+    fn foreground_filter(node: &SceneNode) -> &ForegroundEffectList {
+        node.effects
+            .iter()
+            .find_map(|effect| match effect {
+                SceneEffect::ForegroundFilter { list, .. } => Some(list),
+                _ => None,
+            })
+            .expect("node has a normalized foreground filter")
+    }
+
+    fn rejected_filter(node: &SceneNode) -> Option<ForegroundEffectRejection> {
+        node.effects.iter().find_map(|effect| match effect {
+            SceneEffect::RejectedForegroundFilter { reason, .. } => Some(*reason),
+            _ => None,
+        })
     }
 
     #[test]
@@ -1454,7 +1656,943 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, SceneEffect::ForegroundFilter { .. }))
         );
-        assert_eq!(node.bounds.damage, safe_rect(0.0, 0.0, 200.0, 120.0));
+        let effect_position = |predicate: fn(&SceneEffect) -> bool| {
+            node.effects
+                .iter()
+                .position(predicate)
+                .expect("modeled effect stage")
+        };
+        assert!(
+            effect_position(|effect| matches!(effect, SceneEffect::BackgroundLayers { .. }))
+                < effect_position(|effect| matches!(effect, SceneEffect::BoxShadows { .. }))
+        );
+        assert!(
+            effect_position(|effect| matches!(effect, SceneEffect::BoxShadows { .. }))
+                < effect_position(|effect| matches!(effect, SceneEffect::ForegroundFilter { .. }))
+        );
+        assert!(
+            effect_position(|effect| matches!(effect, SceneEffect::ForegroundFilter { .. }))
+                < effect_position(|effect| matches!(effect, SceneEffect::Clip { .. }))
+        );
+        assert!(
+            effect_position(|effect| matches!(effect, SceneEffect::Clip { .. }))
+                < effect_position(|effect| matches!(effect, SceneEffect::Opacity { .. }))
+        );
+        assert!(
+            effect_position(|effect| matches!(effect, SceneEffect::Opacity { .. }))
+                < effect_position(|effect| matches!(effect, SceneEffect::Transform { .. }))
+        );
+        assert_eq!(node.bounds.damage, safe_rect(8.0, 8.0, 40.0, 20.0));
+    }
+
+    #[test]
+    fn stylo_extraction_normalizes_all_approved_filter_functions_in_order() {
+        let document = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"color:rgba(10,20,30,.4);width:20px;height:10px;filter:brightness(.5) contrast(120%) grayscale(2) hue-rotate(.5turn) invert(25%) opacity(.75) saturate(2) sepia(50%) blur(3.5px) drop-shadow(4px -5px 2px currentColor)\"></div></body></html>",
+        );
+        let scene = retained(&document, 1);
+        let list = foreground_filter(node_by_selector(&document, &scene, "#effect"));
+        assert_eq!(list.functions.len(), 10);
+        assert_eq!(
+            list.functions
+                .iter()
+                .map(ForegroundEffect::variant_name)
+                .collect::<Vec<_>>(),
+            vec![
+                "brightness",
+                "contrast",
+                "grayscale",
+                "hue_rotate",
+                "invert",
+                "opacity",
+                "saturate",
+                "sepia",
+                "blur",
+                "drop_shadow",
+            ]
+        );
+        assert_eq!(
+            list.serialize_semantics(),
+            "foreground_effects_v1[brightness(0.5),contrast(1.2),grayscale(1),hue_rotate(3.1415927),invert(0.25),opacity(0.75),saturate(2),sepia(0.5),blur(3.5),drop_shadow(4,-5,2,0.039215688,0.078431375,0.11764706,0.4)]"
+        );
+        assert_eq!(list.color_space, ForegroundEffectColorSpace::EncodedSrgb);
+        assert_eq!(list.color_matrix_runs().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn foreground_and_backdrop_models_remain_independent() {
+        let first = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"filter:brightness(1.2);backdrop-filter:blur(2px)\"></div></body></html>",
+        );
+        let second = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"filter:brightness(1.2);backdrop-filter:blur(6px)\"></div></body></html>",
+        );
+        let first_scene = retained(&first, 1);
+        let second_scene = retained(&second, 1);
+        let first_node = node_by_selector(&first, &first_scene, "#effect");
+        let second_node = node_by_selector(&second, &second_scene, "#effect");
+        assert_eq!(
+            foreground_filter(first_node).version,
+            foreground_filter(second_node).version
+        );
+        assert!(
+            first_node
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, SceneEffect::BackdropFilter { .. }))
+        );
+        assert!(
+            second_node
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, SceneEffect::BackdropFilter { .. }))
+        );
+    }
+
+    #[test]
+    fn computed_equivalents_share_versions_and_structure_remains_significant() {
+        let numeric = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"filter:brightness(1.5) hue-rotate(180deg)\"></div></body></html>",
+        );
+        let percentage = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"filter:brightness(150%) hue-rotate(.5turn)\"></div></body></html>",
+        );
+        let numeric_scene = retained(&numeric, 1);
+        let percentage_scene = retained(&percentage, 1);
+        let numeric_list = foreground_filter(node_by_selector(&numeric, &numeric_scene, "#effect"));
+        let percentage_list =
+            foreground_filter(node_by_selector(&percentage, &percentage_scene, "#effect"));
+        assert_eq!(numeric_list.version, percentage_list.version);
+        assert_eq!(
+            numeric_list.serialize_semantics(),
+            percentage_list.serialize_semantics()
+        );
+
+        let repeated = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"filter:brightness(1) brightness(1)\"></div></body></html>",
+        );
+        let reordered = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"filter:hue-rotate(.5turn) brightness(1.5)\"></div></body></html>",
+        );
+        let repeated_scene = retained(&repeated, 1);
+        let reordered_scene = retained(&reordered, 1);
+        assert_eq!(
+            foreground_filter(node_by_selector(&repeated, &repeated_scene, "#effect"))
+                .functions
+                .len(),
+            2
+        );
+        assert_ne!(
+            numeric_list.version,
+            foreground_filter(node_by_selector(&reordered, &reordered_scene, "#effect")).version
+        );
+    }
+
+    #[test]
+    fn angle_length_and_profile_boundaries_normalize_through_stylo() {
+        let declarations = [
+            "hue-rotate(0)",
+            "hue-rotate(180deg)",
+            "hue-rotate(200grad)",
+            "hue-rotate(3.14159265rad)",
+            "hue-rotate(.5turn)",
+            "hue-rotate(-100turn)",
+            "blur(64px)",
+            "drop-shadow(-256px 256px 64px transparent)",
+            "brightness(8)",
+            "contrast(800%)",
+            "saturate(8)",
+        ];
+        for declaration in declarations {
+            let html = format!(
+                "<!doctype html><html><body><div id=\"effect\" style=\"font-size:10px;filter:{declaration}\"></div></body></html>"
+            );
+            let document = document(&html);
+            let scene = retained(&document, 1);
+            assert!(
+                rejected_filter(node_by_selector(&document, &scene, "#effect")).is_none(),
+                "{declaration}"
+            );
+            assert_eq!(
+                foreground_filter(node_by_selector(&document, &scene, "#effect"))
+                    .functions
+                    .len(),
+                1,
+                "{declaration}"
+            );
+        }
+
+        let em = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"font-size:10px;filter:blur(.5em)\"></div></body></html>",
+        );
+        let em_scene = retained(&em, 1);
+        assert_eq!(
+            foreground_filter(node_by_selector(&em, &em_scene, "#effect")).serialize_semantics(),
+            "foreground_effects_v1[blur(5)]"
+        );
+
+        let degrees = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"filter:hue-rotate(180deg)\"></div></body></html>",
+        );
+        let grad = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"filter:hue-rotate(200grad)\"></div></body></html>",
+        );
+        let radians = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"filter:hue-rotate(3.14159265rad)\"></div></body></html>",
+        );
+        let turn = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"filter:hue-rotate(.5turn)\"></div></body></html>",
+        );
+        let versions = [&degrees, &grad, &radians, &turn].map(|document| {
+            let scene = retained(document, 1);
+            foreground_filter(node_by_selector(document, &scene, "#effect")).version
+        });
+        assert!(versions.windows(2).all(|pair| pair[0] == pair[1]));
+
+        let clamped = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"filter:grayscale(2) invert(200%) opacity(3) sepia(400%)\"></div></body></html>",
+        );
+        let clamped_scene = retained(&clamped, 1);
+        assert_eq!(
+            foreground_filter(node_by_selector(&clamped, &clamped_scene, "#effect"))
+                .serialize_semantics(),
+            "foreground_effects_v1[grayscale(1),invert(1),opacity(1),sepia(1)]"
+        );
+    }
+
+    #[test]
+    fn omitted_filter_arguments_use_standard_computed_defaults() {
+        let document = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"filter:blur() brightness() contrast() grayscale() hue-rotate() invert() opacity() saturate() sepia()\"></div></body></html>",
+        );
+        let scene = retained(&document, 1);
+        assert_eq!(
+            foreground_filter(node_by_selector(&document, &scene, "#effect")).serialize_semantics(),
+            "foreground_effects_v1[blur(0),brightness(1),contrast(1),grayscale(1),hue_rotate(0),invert(1),opacity(1),saturate(1),sepia(1)]"
+        );
+    }
+
+    #[test]
+    fn stylo_nonfinite_calc_results_never_publish_nonfinite_descriptors() {
+        for (filter, expected) in [
+            ("brightness(calc(infinity))", None),
+            (
+                "brightness(calc(NaN))",
+                Some("foreground_effects_v1[brightness(0)]"),
+            ),
+            ("blur(calc(infinity * 1px))", None),
+        ] {
+            let html = format!(
+                "<!doctype html><html><body><div id=\"effect\" style=\"filter:{filter}\"></div></body></html>"
+            );
+            let document = document(&html);
+            let scene = retained(&document, 1);
+            let node = node_by_selector(&document, &scene, "#effect");
+            let normalized = node.effects.iter().find_map(|effect| match effect {
+                SceneEffect::ForegroundFilter { list, .. } => Some(list.serialize_semantics()),
+                _ => None,
+            });
+            assert_eq!(normalized.as_deref(), expected, "{filter}");
+        }
+    }
+
+    #[test]
+    fn profile_invalid_lists_are_rejected_whole_without_prefix_application() {
+        for (filter, reason) in [
+            (
+                "brightness(1) brightness(1) brightness(1) brightness(1) brightness(1) brightness(1) brightness(1) brightness(1) brightness(1) brightness(1) brightness(1) brightness(1) brightness(1) brightness(1) brightness(1) brightness(1) brightness(1)",
+                ForegroundEffectRejection::FunctionCount,
+            ),
+            (
+                "drop-shadow(1px 1px) drop-shadow(2px 2px)",
+                ForegroundEffectRejection::DropShadowCount,
+            ),
+            ("brightness(8.01)", ForegroundEffectRejection::FactorRange),
+            (
+                "hue-rotate(100.01turn)",
+                ForegroundEffectRejection::HueRange,
+            ),
+            ("blur(64.01px)", ForegroundEffectRejection::BlurRange),
+            (
+                "drop-shadow(256.01px 0)",
+                ForegroundEffectRejection::ShadowOffsetRange,
+            ),
+            (
+                "blur(64px) blur(64px) blur(64px)",
+                ForegroundEffectRejection::ExpansionLimit,
+            ),
+        ] {
+            let html = format!(
+                "<!doctype html><html><body><div id=\"effect\" style=\"width:10px;height:10px;filter:{filter}\"></div></body></html>"
+            );
+            let document = document(&html);
+            let scene = retained(&document, 1);
+            let node = node_by_selector(&document, &scene, "#effect");
+            assert_eq!(rejected_filter(node), Some(reason), "{filter}");
+            assert!(
+                !node
+                    .effects
+                    .iter()
+                    .any(|effect| matches!(effect, SceneEffect::ForegroundFilter { .. })),
+                "{filter}"
+            );
+        }
+    }
+
+    #[test]
+    fn parser_invalid_filter_declarations_resolve_as_none() {
+        for filter in [
+            "unknown(1)",
+            "url(#legacy)",
+            "blur(10%)",
+            "brightness(-1)",
+            "hue-rotate(2)",
+            "drop-shadow(1px 1px 1px 1px black)",
+        ] {
+            let html = format!(
+                "<!doctype html><html><body><div id=\"effect\" style=\"filter:{filter}\"></div></body></html>"
+            );
+            let document = document(&html);
+            let scene = retained(&document, 1);
+            let node = node_by_selector(&document, &scene, "#effect");
+            assert!(
+                !node.effects.iter().any(|effect| matches!(
+                    effect,
+                    SceneEffect::ForegroundFilter { .. }
+                        | SceneEffect::RejectedForegroundFilter { .. }
+                )),
+                "{filter}"
+            );
+        }
+    }
+
+    #[test]
+    fn foreground_identity_survives_parameter_change_and_damage_uses_old_and_new_bounds() {
+        let mut document = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"width:20px;height:10px;filter:blur(1px)\"></div></body></html>",
+        );
+        let identities = IdentityRegistry::from_document(&document);
+        let first = build_retained_scene(
+            &document,
+            &identities,
+            ExperimentalDocumentIdentity { serial: 5 },
+            SceneRevision(1),
+            ViewportSpec {
+                logical_width: 200,
+                logical_height: 120,
+                ..ViewportSpec::default()
+            },
+        )
+        .unwrap();
+        let element = document.query_selector("#effect").unwrap().unwrap();
+        let old = node_by_selector(&document, &first, "#effect");
+        let old_node_id = old.id;
+        let old_effect_id = foreground_filter(old).id;
+        let old_version = foreground_filter(old).version;
+        let old_damage = old.bounds.damage.clone();
+
+        document.mutate().set_attribute(
+            element,
+            blitz_dom::QualName {
+                prefix: None,
+                ns: blitz_dom::Namespace::from(""),
+                local: blitz_dom::LocalName::from("style"),
+            },
+            "width:20px;height:10px;filter:blur(3px)",
+        );
+        document.resolve(0.0);
+        let second = build_retained_scene(
+            &document,
+            &identities,
+            ExperimentalDocumentIdentity { serial: 5 },
+            SceneRevision(2),
+            ViewportSpec {
+                logical_width: 200,
+                logical_height: 120,
+                ..ViewportSpec::default()
+            },
+        )
+        .unwrap();
+        let new = node_by_selector(&document, &second, "#effect");
+        assert_eq!(new.id, old_node_id);
+        assert_eq!(foreground_filter(new).id, old_effect_id);
+        assert_ne!(foreground_filter(new).version, old_version);
+        assert_ne!(new.bounds.damage, old_damage);
+
+        let delta = diff_retained_scenes(Some(&first), &second);
+        let change = delta
+            .changes
+            .iter()
+            .find(|change| change.id == old_node_id)
+            .expect("filter parameter change");
+        assert!(change.kinds.contains(&SceneChangeKind::Effect));
+        assert!(!change.kinds.contains(&SceneChangeKind::Inserted));
+        assert!(!change.kinds.contains(&SceneChangeKind::Removed));
+        let damage = super::super::damage::DamageRegion::from_delta(Some(&first), &second, &delta);
+        let rects = damage.logical_rects(200, 120);
+        assert_eq!(rects.len(), 1);
+        let rect = &rects[0];
+        assert!(rect.x <= old_damage.x);
+        assert!(rect.y <= old_damage.y);
+        assert!(rect.x + rect.width >= new.bounds.damage.x + new.bounds.damage.width);
+        assert!(rect.y + rect.height >= new.bounds.damage.y + new.bounds.damage.height);
+    }
+
+    #[test]
+    fn filter_parameter_change_does_not_reclassify_source_paint_or_text_resource() {
+        let mut document = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"filter:brightness(1.1)\">text</div></body></html>",
+        );
+        let identities = IdentityRegistry::from_document(&document);
+        let viewport = ViewportSpec {
+            logical_width: 200,
+            logical_height: 120,
+            ..ViewportSpec::default()
+        };
+        let first = build_retained_scene(
+            &document,
+            &identities,
+            ExperimentalDocumentIdentity { serial: 5 },
+            SceneRevision(1),
+            viewport,
+        )
+        .unwrap();
+        let element = document.query_selector("#effect").unwrap().unwrap();
+        let node_id = node_by_selector(&document, &first, "#effect").id;
+        let resource_versions: BTreeMap<_, _> = first
+            .resources
+            .iter()
+            .map(|resource| (resource.id.clone(), resource.version))
+            .collect();
+
+        document.mutate().set_attribute(
+            element,
+            blitz_dom::QualName {
+                prefix: None,
+                ns: blitz_dom::Namespace::from(""),
+                local: blitz_dom::LocalName::from("style"),
+            },
+            "filter:brightness(1.2)",
+        );
+        document.resolve(0.0);
+        let second = build_retained_scene(
+            &document,
+            &identities,
+            ExperimentalDocumentIdentity { serial: 5 },
+            SceneRevision(2),
+            viewport,
+        )
+        .unwrap();
+        let delta = diff_retained_scenes(Some(&first), &second);
+        let effect_change = delta
+            .changes
+            .iter()
+            .find(|change| change.id == node_id)
+            .expect("foreground effect parameter change");
+        assert_eq!(
+            effect_change.kinds,
+            BTreeSet::from([SceneChangeKind::Effect])
+        );
+        assert!(delta.resource_changes.is_empty());
+        assert_eq!(
+            second
+                .resources
+                .iter()
+                .map(|resource| (resource.id.clone(), resource.version))
+                .collect::<BTreeMap<_, _>>(),
+            resource_versions
+        );
+    }
+
+    #[test]
+    fn adding_removing_and_reordering_filters_preserves_scene_identity() {
+        let mut document = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"width:20px;height:10px\"></div></body></html>",
+        );
+        let identities = IdentityRegistry::from_document(&document);
+        let viewport = ViewportSpec {
+            logical_width: 200,
+            logical_height: 120,
+            ..ViewportSpec::default()
+        };
+        let first = build_retained_scene(
+            &document,
+            &identities,
+            ExperimentalDocumentIdentity { serial: 5 },
+            SceneRevision(1),
+            viewport,
+        )
+        .unwrap();
+        let element = document.query_selector("#effect").unwrap().unwrap();
+        let node_id = node_by_selector(&document, &first, "#effect").id;
+
+        let mut revisions = Vec::new();
+        for (revision, style) in [
+            (
+                2,
+                "width:20px;height:10px;filter:brightness(1) contrast(.5)",
+            ),
+            (
+                3,
+                "width:20px;height:10px;filter:contrast(.5) brightness(1)",
+            ),
+            (4, "width:20px;height:10px;filter:none"),
+        ] {
+            document.mutate().set_attribute(
+                element,
+                blitz_dom::QualName {
+                    prefix: None,
+                    ns: blitz_dom::Namespace::from(""),
+                    local: blitz_dom::LocalName::from("style"),
+                },
+                style,
+            );
+            document.resolve(0.0);
+            revisions.push(
+                build_retained_scene(
+                    &document,
+                    &identities,
+                    ExperimentalDocumentIdentity { serial: 5 },
+                    SceneRevision(revision),
+                    viewport,
+                )
+                .unwrap(),
+            );
+        }
+
+        assert!(
+            revisions
+                .iter()
+                .all(|scene| node_by_selector(&document, scene, "#effect").id == node_id)
+        );
+        let first_list = foreground_filter(revisions[0].node(node_id).unwrap());
+        let reordered_list = foreground_filter(revisions[1].node(node_id).unwrap());
+        assert_eq!(first_list.id, reordered_list.id);
+        assert_ne!(first_list.version, reordered_list.version);
+        assert!(
+            revisions[2]
+                .node(node_id)
+                .unwrap()
+                .effects
+                .iter()
+                .all(|effect| !matches!(effect, SceneEffect::ForegroundFilter { .. }))
+        );
+        for (old, new) in [
+            (&first, &revisions[0]),
+            (&revisions[0], &revisions[1]),
+            (&revisions[1], &revisions[2]),
+        ] {
+            let delta = diff_retained_scenes(Some(old), new);
+            let change = delta
+                .changes
+                .iter()
+                .find(|change| change.id == node_id)
+                .expect("effect update");
+            assert!(change.kinds.contains(&SceneChangeKind::Effect));
+            assert!(!change.kinds.contains(&SceneChangeKind::Inserted));
+            assert!(!change.kinds.contains(&SceneChangeKind::Removed));
+        }
+    }
+
+    #[test]
+    fn filtered_movement_and_removal_damage_old_and_new_expanded_bounds() {
+        let mut document = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"position:absolute;left:10px;top:10px;width:10px;height:10px;filter:blur(2px)\"></div></body></html>",
+        );
+        let identities = IdentityRegistry::from_document(&document);
+        let viewport = ViewportSpec {
+            logical_width: 200,
+            logical_height: 120,
+            ..ViewportSpec::default()
+        };
+        let first = build_retained_scene(
+            &document,
+            &identities,
+            ExperimentalDocumentIdentity { serial: 5 },
+            SceneRevision(1),
+            viewport,
+        )
+        .unwrap();
+        let element = document.query_selector("#effect").unwrap().unwrap();
+        let node_id = node_by_selector(&document, &first, "#effect").id;
+        let old_bounds = first.node(node_id).unwrap().bounds.damage.clone();
+
+        document.mutate().set_attribute(
+            element,
+            blitz_dom::QualName {
+                prefix: None,
+                ns: blitz_dom::Namespace::from(""),
+                local: blitz_dom::LocalName::from("style"),
+            },
+            "position:absolute;left:80px;top:30px;width:10px;height:10px;filter:blur(2px)",
+        );
+        document.resolve(0.0);
+        let second = build_retained_scene(
+            &document,
+            &identities,
+            ExperimentalDocumentIdentity { serial: 5 },
+            SceneRevision(2),
+            viewport,
+        )
+        .unwrap();
+        let new_bounds = second.node(node_id).unwrap().bounds.damage.clone();
+        let movement_delta = diff_retained_scenes(Some(&first), &second);
+        let movement_damage =
+            super::super::damage::DamageRegion::from_delta(Some(&first), &second, &movement_delta);
+        let movement_rects = movement_damage.logical_rects(200, 120);
+        assert!(
+            movement_rects
+                .iter()
+                .any(|rect| contains(rect, &old_bounds))
+        );
+        assert!(
+            movement_rects
+                .iter()
+                .any(|rect| contains(rect, &new_bounds))
+        );
+
+        assert!(document.mutate().remove_and_drop_node(element).is_some());
+        document.resolve(0.0);
+        let third = build_retained_scene(
+            &document,
+            &identities,
+            ExperimentalDocumentIdentity { serial: 5 },
+            SceneRevision(3),
+            viewport,
+        )
+        .unwrap();
+        let removal_delta = diff_retained_scenes(Some(&second), &third);
+        let removal = removal_delta
+            .changes
+            .iter()
+            .find(|change| change.id == node_id)
+            .expect("filtered node removal");
+        assert!(
+            removal.kinds.contains(&SceneChangeKind::Removed),
+            "{removal:?}"
+        );
+        let removal_damage =
+            super::super::damage::DamageRegion::from_delta(Some(&second), &third, &removal_delta);
+        assert!(
+            removal_damage
+                .logical_rects(200, 120)
+                .iter()
+                .any(|rect| contains(rect, &new_bounds))
+        );
+    }
+
+    #[test]
+    fn current_color_resolution_changes_effect_version_without_changing_identity() {
+        let mut live_document = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"color:red;width:20px;height:10px;filter:drop-shadow(1px 2px currentColor)\"></div></body></html>",
+        );
+        let identities = IdentityRegistry::from_document(&live_document);
+        let first = build_retained_scene(
+            &live_document,
+            &identities,
+            ExperimentalDocumentIdentity { serial: 5 },
+            SceneRevision(1),
+            ViewportSpec::default(),
+        )
+        .unwrap();
+        let element = live_document.query_selector("#effect").unwrap().unwrap();
+        let first_node = node_by_selector(&live_document, &first, "#effect");
+        let effect_id = foreground_filter(first_node).id;
+        let first_version = foreground_filter(first_node).version;
+        live_document.mutate().set_attribute(
+            element,
+            blitz_dom::QualName {
+                prefix: None,
+                ns: blitz_dom::Namespace::from(""),
+                local: blitz_dom::LocalName::from("style"),
+            },
+            "color:blue;width:20px;height:10px;filter:drop-shadow(1px 2px currentColor)",
+        );
+        live_document.resolve(0.0);
+        let second = build_retained_scene(
+            &live_document,
+            &identities,
+            ExperimentalDocumentIdentity { serial: 5 },
+            SceneRevision(2),
+            ViewportSpec::default(),
+        )
+        .unwrap();
+        let second_node = node_by_selector(&live_document, &second, "#effect");
+        assert_eq!(foreground_filter(second_node).id, effect_id);
+        assert_ne!(foreground_filter(second_node).version, first_version);
+
+        let explicit = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"color:blue;width:20px;height:10px;filter:drop-shadow(1px 2px blue)\"></div></body></html>",
+        );
+        let explicit_scene = retained(&explicit, 2);
+        assert_eq!(
+            foreground_filter(second_node).version,
+            foreground_filter(node_by_selector(&explicit, &explicit_scene, "#effect")).version
+        );
+    }
+
+    #[test]
+    fn filtered_source_graphic_includes_descendants_and_propagates_ancestor_damage() {
+        let document = document(
+            "<!doctype html><html><body><div id=\"parent\" style=\"width:20px;height:20px;filter:blur(2px)\"><span id=\"child\" style=\"display:block;width:40px;height:10px\">child</span></div></body></html>",
+        );
+        let scene = retained(&document, 1);
+        let parent = node_by_selector(&document, &scene, "#parent");
+        let child = node_by_selector(&document, &scene, "#child");
+        let (source, filtered) = parent
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                SceneEffect::ForegroundFilter {
+                    source_graphic_bounds,
+                    filtered_bounds,
+                    ..
+                } => Some((source_graphic_bounds, filtered_bounds)),
+                _ => None,
+            })
+            .expect("filtered SourceGraphic metadata");
+        assert!(source.width >= child.bounds.visual.width);
+        assert!(filtered.width >= source.width);
+        assert!(child.bounds.damage.x <= filtered.x);
+        assert!(child.bounds.damage.y <= filtered.y);
+        assert!(child.bounds.damage.x + child.bounds.damage.width >= filtered.x + filtered.width);
+        assert!(child.bounds.damage.y + child.bounds.damage.height >= filtered.y + filtered.height);
+    }
+
+    #[test]
+    fn active_filter_and_nesting_limits_use_central_constants() {
+        let mut html = String::from("<!doctype html><html><body>");
+        for index in 0..=MAX_ACTIVE_FILTERED_ELEMENTS_PER_SURFACE {
+            write!(
+                html,
+                "<div id=\"effect-{index}\" style=\"filter:brightness(1)\"></div>"
+            )
+            .unwrap();
+        }
+        html.push_str("</body></html>");
+        let active_document = document(&html);
+        let scene = retained(&active_document, 1);
+        let normalized = scene
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.effects
+                    .iter()
+                    .any(|effect| matches!(effect, SceneEffect::ForegroundFilter { .. }))
+            })
+            .count();
+        let rejected = scene
+            .nodes
+            .iter()
+            .filter(|node| {
+                rejected_filter(node) == Some(ForegroundEffectRejection::ActiveElementCount)
+            })
+            .count();
+        assert_eq!(normalized, MAX_ACTIVE_FILTERED_ELEMENTS_PER_SURFACE);
+        assert_eq!(rejected, 1);
+
+        let mut declarations = String::from("<!doctype html><html><body>");
+        for index in 0..MAX_FILTER_DECLARATIONS_PER_DOCUMENT {
+            write!(
+                declarations,
+                "<div style=\"display:none;filter:brightness({})\"></div>",
+                index as f32 / 100.0
+            )
+            .unwrap();
+        }
+        write!(
+            declarations,
+            "<div id=\"declaration-overflow\" style=\"filter:brightness({})\"></div>",
+            MAX_FILTER_DECLARATIONS_PER_DOCUMENT as f32 / 100.0
+        )
+        .unwrap();
+        declarations.push_str("</body></html>");
+        let declaration_document = document(&declarations);
+        let declaration_scene = retained(&declaration_document, 1);
+        assert_eq!(
+            rejected_filter(node_by_selector(
+                &declaration_document,
+                &declaration_scene,
+                "#declaration-overflow"
+            )),
+            Some(ForegroundEffectRejection::DeclarationCount)
+        );
+
+        let mut nested = String::from("<!doctype html><html><body>");
+        for index in 0..=MAX_FILTER_NESTING_DEPTH {
+            write!(
+                nested,
+                "<div id=\"nested-{index}\" style=\"filter:brightness(1)\">"
+            )
+            .unwrap();
+        }
+        for _ in 0..=MAX_FILTER_NESTING_DEPTH {
+            nested.push_str("</div>");
+        }
+        nested.push_str("</body></html>");
+        let nested_document = document(&nested);
+        let scene = retained(&nested_document, 1);
+        assert_eq!(
+            rejected_filter(node_by_selector(
+                &nested_document,
+                &scene,
+                &format!("#nested-{}", MAX_FILTER_NESTING_DEPTH)
+            )),
+            Some(ForegroundEffectRejection::NestingDepth)
+        );
+    }
+
+    #[test]
+    fn foreground_effect_measurement_probe_is_bounded() {
+        const EXTRACTION_ITERATIONS: usize = 100;
+        const MODEL_ITERATIONS: usize = 10_000;
+
+        let one = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"width:20px;height:10px;filter:brightness(1.2)\"></div></body></html>",
+        );
+        let one_identities = IdentityRegistry::from_document(&one);
+        let one_started = Instant::now();
+        for revision in 0..EXTRACTION_ITERATIONS {
+            std::hint::black_box(
+                build_retained_scene(
+                    &one,
+                    &one_identities,
+                    ExperimentalDocumentIdentity { serial: 5 },
+                    SceneRevision(revision as u64),
+                    ViewportSpec::default(),
+                )
+                .unwrap(),
+            );
+        }
+        let one_extraction_ns = one_started.elapsed().as_nanos() / EXTRACTION_ITERATIONS as u128;
+
+        let ten = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"color:#1238;width:20px;height:10px;filter:brightness(.5) contrast(120%) grayscale(.2) hue-rotate(.5turn) invert(.25) opacity(.75) saturate(2) sepia(.5) blur(3px) drop-shadow(4px -5px 2px currentColor)\"></div></body></html>",
+        );
+        let ten_identities = IdentityRegistry::from_document(&ten);
+        let ten_started = Instant::now();
+        for revision in 0..EXTRACTION_ITERATIONS {
+            std::hint::black_box(
+                build_retained_scene(
+                    &ten,
+                    &ten_identities,
+                    ExperimentalDocumentIdentity { serial: 6 },
+                    SceneRevision(revision as u64),
+                    ViewportSpec::default(),
+                )
+                .unwrap(),
+            );
+        }
+        let ten_extraction_ns = ten_started.elapsed().as_nanos() / EXTRACTION_ITERATIONS as u128;
+        let ten_scene = retained(&ten, 1);
+        let list = foreground_filter(node_by_selector(&ten, &ten_scene, "#effect")).clone();
+
+        let matrix_started = Instant::now();
+        for _ in 0..MODEL_ITERATIONS {
+            std::hint::black_box(list.color_matrix_runs().unwrap());
+        }
+        let matrix_ns = matrix_started.elapsed().as_nanos() / MODEL_ITERATIONS as u128;
+
+        let serialization_started = Instant::now();
+        for _ in 0..MODEL_ITERATIONS {
+            std::hint::black_box(list.serialize_semantics());
+        }
+        let serialization_ns =
+            serialization_started.elapsed().as_nanos() / MODEL_ITERATIONS as u128;
+
+        let equality_started = Instant::now();
+        let comparison = list.clone();
+        for _ in 0..MODEL_ITERATIONS {
+            std::hint::black_box(list.eq(&comparison));
+        }
+        let equality_ns = equality_started.elapsed().as_nanos() / MODEL_ITERATIONS as u128;
+
+        let bounds = safe_rect(10.0, 20.0, 100.0, 40.0);
+        let bounds_started = Instant::now();
+        for _ in 0..MODEL_ITERATIONS {
+            std::hint::black_box(list.propagated_bounds(&bounds).unwrap());
+        }
+        let bounds_ns = bounds_started.elapsed().as_nanos() / MODEL_ITERATIONS as u128;
+
+        let no_op_started = Instant::now();
+        for _ in 0..MODEL_ITERATIONS {
+            std::hint::black_box(diff_retained_scenes(Some(&ten_scene), &ten_scene));
+        }
+        let no_op_ns = no_op_started.elapsed().as_nanos() / MODEL_ITERATIONS as u128;
+
+        let mut update_document = document(
+            "<!doctype html><html><body><div id=\"effect\" style=\"filter:brightness(1.1)\"></div></body></html>",
+        );
+        let update_identities = IdentityRegistry::from_document(&update_document);
+        let update_before = build_retained_scene(
+            &update_document,
+            &update_identities,
+            ExperimentalDocumentIdentity { serial: 9 },
+            SceneRevision(1),
+            ViewportSpec::default(),
+        )
+        .unwrap();
+        let update_slot = update_document.query_selector("#effect").unwrap().unwrap();
+        update_document.mutate().set_attribute(
+            update_slot,
+            blitz_dom::QualName {
+                prefix: None,
+                ns: blitz_dom::Namespace::from(""),
+                local: blitz_dom::LocalName::from("style"),
+            },
+            "filter:brightness(1.2)",
+        );
+        update_document.resolve(0.0);
+        let update_started = Instant::now();
+        let update_after = build_retained_scene(
+            &update_document,
+            &update_identities,
+            ExperimentalDocumentIdentity { serial: 9 },
+            SceneRevision(2),
+            ViewportSpec::default(),
+        )
+        .unwrap();
+        let update_delta = diff_retained_scenes(Some(&update_before), &update_after);
+        let effect_update_us = update_started.elapsed().as_micros();
+        assert!(
+            update_delta
+                .changes
+                .iter()
+                .any(|change| change.kinds.contains(&SceneChangeKind::Effect))
+        );
+
+        let mut nested_html = String::from("<!doctype html><html><body>");
+        for _ in 0..MAX_FILTER_NESTING_DEPTH {
+            nested_html.push_str("<div style=\"filter:brightness(1.1)\">");
+        }
+        nested_html.push_str("<span>nested</span>");
+        for _ in 0..MAX_FILTER_NESTING_DEPTH {
+            nested_html.push_str("</div>");
+        }
+        nested_html.push_str("</body></html>");
+        let nested = document(&nested_html);
+        let nested_identities = IdentityRegistry::from_document(&nested);
+        let nested_started = Instant::now();
+        let nested_scene = build_retained_scene(
+            &nested,
+            &nested_identities,
+            ExperimentalDocumentIdentity { serial: 8 },
+            SceneRevision(1),
+            ViewportSpec::default(),
+        )
+        .unwrap();
+        let nested_scene_us = nested_started.elapsed().as_micros();
+        assert!(nested_scene.nodes.len() > MAX_FILTER_NESTING_DEPTH);
+        eprintln!(
+            "foreground_effect_model one_extraction_ns={one_extraction_ns} ten_extraction_ns={ten_extraction_ns} matrix_ns={matrix_ns} serialization_ns={serialization_ns} equality_ns={equality_ns} bounds_ns={bounds_ns} effect_update_us={effect_update_us} noop_delta_ns={no_op_ns} nested_scene_us={nested_scene_us}"
+        );
+    }
+
+    fn contains(outer: &LogicalRect, inner: &LogicalRect) -> bool {
+        outer.x <= inner.x
+            && outer.y <= inner.y
+            && outer.x + outer.width >= inner.x + inner.width
+            && outer.y + outer.height >= inner.y + inner.height
     }
 
     #[test]
