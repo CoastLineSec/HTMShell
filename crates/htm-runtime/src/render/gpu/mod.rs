@@ -1,5 +1,6 @@
 mod live;
 mod painter;
+mod partial;
 
 pub use live::{
     LiveGpuBackendInfo, LiveGpuConfiguration, LiveGpuError, LiveGpuErrorKind, LiveGpuPresenter,

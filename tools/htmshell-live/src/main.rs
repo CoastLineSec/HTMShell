@@ -294,6 +294,12 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
                 key.generation, panel.metrics.busy_buffer_skips, panel.metrics.action_count
             );
             println!(
+                "output_{}_panel_render_us={} pixel_conversion_us={}",
+                key.generation,
+                panel.metrics.last_render_us,
+                panel.metrics.last_pixel_conversion_us
+            );
+            println!(
                 "output_{}_panel_pointer={}/{}/{}",
                 key.generation,
                 panel.metrics.pointer_enters,
@@ -347,6 +353,12 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
             println!(
                 "output_{}_overlay_busy_skips={} actions={}",
                 key.generation, overlay.metrics.busy_buffer_skips, overlay.metrics.action_count
+            );
+            println!(
+                "output_{}_overlay_render_us={} pixel_conversion_us={}",
+                key.generation,
+                overlay.metrics.last_render_us,
+                overlay.metrics.last_pixel_conversion_us
             );
             println!(
                 "output_{}_overlay_pointer={}/{}/{}",
@@ -990,7 +1002,7 @@ fn print_gpu_metrics(prefix: &str, summary: &htm_shell_host::GpuSurfaceHostSumma
         summary.target_recreations,
     );
     println!(
-        "{prefix}_gpu_frames=planned:{} rendered:{} submitted:{} presented:{} acquisitions:{} acquisition_failures:{} conversion_passes:{} full_target:{} cpu_fallbacks:{} shm:{}",
+        "{prefix}_gpu_frames=planned:{} rendered:{} submitted:{} presented:{} acquisitions:{} acquisition_failures:{} conversion_passes:{} partial:{} full_target:{} cpu_fallbacks:{} shm:{}",
         summary.frames_planned,
         summary.frames_rendered,
         summary.frames_submitted,
@@ -998,9 +1010,24 @@ fn print_gpu_metrics(prefix: &str, summary: &htm_shell_host::GpuSurfaceHostSumma
         summary.surface_acquisitions,
         summary.acquisition_failures,
         summary.conversion_passes,
+        summary.partial_renders,
         summary.full_target_renders,
         summary.cpu_fallbacks,
         summary.shm_frames,
+    );
+    println!(
+        "{prefix}_gpu_damage=logical_rects:{} physical_rects:{} physical_pixels:{} tiles:{} vello_pixels:{} backing_pixels:{} surface_pixels:{} wayland_rects:{} wayland_pixels:{} wayland_full:{} wayland_narrow:{}",
+        summary.logical_damage_rectangles,
+        summary.physical_damage_rectangles,
+        summary.physical_damaged_pixels,
+        summary.selected_tiles,
+        summary.vello_rasterized_pixels,
+        summary.backing_updated_pixels,
+        summary.surface_converted_pixels,
+        summary.wayland_damage_rectangles,
+        summary.wayland_damaged_pixels,
+        summary.full_wayland_damage_frames,
+        summary.narrow_wayland_damage_frames,
     );
     println!(
         "{prefix}_gpu_callbacks=requested:{} completed:{} losses:{} timeouts:{} outdated:{} device_losses:{} closed_suppressions:{} duplicate_suppressions:{}",

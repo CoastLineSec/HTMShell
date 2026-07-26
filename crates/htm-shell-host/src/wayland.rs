@@ -267,6 +267,18 @@ pub struct GpuSurfaceHostSummary {
     pub acquisition_failures: u64,
     pub conversion_passes: u64,
     pub full_target_renders: u64,
+    pub partial_renders: u64,
+    pub logical_damage_rectangles: u64,
+    pub physical_damage_rectangles: u64,
+    pub physical_damaged_pixels: u64,
+    pub selected_tiles: u64,
+    pub vello_rasterized_pixels: u64,
+    pub backing_updated_pixels: u64,
+    pub surface_converted_pixels: u64,
+    pub wayland_damage_rectangles: u64,
+    pub wayland_damaged_pixels: u64,
+    pub full_wayland_damage_frames: u64,
+    pub narrow_wayland_damage_frames: u64,
     pub cpu_fallbacks: u64,
     pub shm_frames: u64,
     pub frame_callbacks_requested: u64,
@@ -283,6 +295,50 @@ pub struct GpuSurfaceHostSummary {
     pub resource_uploads: u64,
     pub cache_hits: u64,
     pub last_error: String,
+}
+
+#[cfg(feature = "gpu-renderer")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GpuWaylandDamageMode {
+    Buffer,
+    SurfaceFull,
+}
+
+#[cfg(feature = "gpu-renderer")]
+fn queue_gpu_wayland_damage(
+    surface: &wl_surface::WlSurface,
+    physical_damage: &[[u32; 4]],
+    logical_width: u32,
+    logical_height: u32,
+) -> GpuWaylandDamageMode {
+    if select_gpu_wayland_damage_mode(surface.version()) == GpuWaylandDamageMode::Buffer {
+        for [x, y, width, height] in physical_damage {
+            surface.damage_buffer(
+                (*x).min(i32::MAX as u32) as i32,
+                (*y).min(i32::MAX as u32) as i32,
+                (*width).min(i32::MAX as u32) as i32,
+                (*height).min(i32::MAX as u32) as i32,
+            );
+        }
+        GpuWaylandDamageMode::Buffer
+    } else {
+        surface.damage(
+            0,
+            0,
+            logical_width.min(i32::MAX as u32) as i32,
+            logical_height.min(i32::MAX as u32) as i32,
+        );
+        GpuWaylandDamageMode::SurfaceFull
+    }
+}
+
+#[cfg(feature = "gpu-renderer")]
+fn select_gpu_wayland_damage_mode(surface_version: u32) -> GpuWaylandDamageMode {
+    if surface_version >= 4 {
+        GpuWaylandDamageMode::Buffer
+    } else {
+        GpuWaylandDamageMode::SurfaceFull
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1346,6 +1402,9 @@ impl State {
 
     #[cfg(feature = "gpu-renderer")]
     fn fall_back_gpu_surface(&mut self, index: usize, error: &LiveGpuError) {
+        if let Some(gpu) = &mut self.gpu {
+            gpu.record_cpu_fallback();
+        }
         self.release_gpu_surface(index, false);
         let summary = &mut self.surfaces[index].summary.gpu;
         summary.cpu_fallbacks = summary.cpu_fallbacks.saturating_add(1);
@@ -2348,13 +2407,46 @@ impl State {
                 return self.gpu_frame_fallback(index, prepared, error);
             }
         };
+        let partial = pending.partial();
+        let logical_damage_rectangles = pending.logical_damage_rectangles();
+        let physical_damage = pending.physical_damage_rects();
+        let physical_damaged_pixels = pending.physical_damaged_pixels();
+        let selected_tiles = pending.selected_tiles();
+        let rasterized_pixels = pending.rasterized_pixels();
+        let backing_updated_pixels = pending.backing_updated_pixels();
+        let surface_converted_pixels = pending.surface_converted_pixels();
         {
             let summary = &mut self.surfaces[index].summary.gpu;
             summary.frames_rendered = summary.frames_rendered.saturating_add(1);
             summary.frames_submitted = summary.frames_submitted.saturating_add(1);
             summary.surface_acquisitions = summary.surface_acquisitions.saturating_add(1);
             summary.conversion_passes = summary.conversion_passes.saturating_add(1);
-            summary.full_target_renders = summary.full_target_renders.saturating_add(1);
+            summary.physical_damage_rectangles = summary
+                .physical_damage_rectangles
+                .saturating_add(u64::try_from(physical_damage.len()).unwrap_or(u64::MAX));
+            summary.logical_damage_rectangles = summary
+                .logical_damage_rectangles
+                .saturating_add(u64::try_from(logical_damage_rectangles).unwrap_or(u64::MAX));
+            summary.physical_damaged_pixels = summary
+                .physical_damaged_pixels
+                .saturating_add(physical_damaged_pixels);
+            summary.selected_tiles = summary
+                .selected_tiles
+                .saturating_add(u64::try_from(selected_tiles).unwrap_or(u64::MAX));
+            summary.vello_rasterized_pixels = summary
+                .vello_rasterized_pixels
+                .saturating_add(rasterized_pixels);
+            summary.backing_updated_pixels = summary
+                .backing_updated_pixels
+                .saturating_add(backing_updated_pixels);
+            summary.surface_converted_pixels = summary
+                .surface_converted_pixels
+                .saturating_add(surface_converted_pixels);
+            if partial {
+                summary.partial_renders = summary.partial_renders.saturating_add(1);
+            } else {
+                summary.full_target_renders = summary.full_target_renders.saturating_add(1);
+            }
         }
         update_input_region(
             compositor,
@@ -2373,12 +2465,63 @@ impl State {
         // wgpu's Wayland present path attaches its wl_buffer and commits this
         // wl_surface. All double-buffered state and the one frame callback must
         // therefore be requested before SurfaceTexture::present().
-        wayland_surface.damage(
-            0,
-            0,
-            logical_width.min(i32::MAX as u32) as i32,
-            logical_height.min(i32::MAX as u32) as i32,
+        let damage_mode = queue_gpu_wayland_damage(
+            wayland_surface,
+            &physical_damage,
+            logical_width,
+            logical_height,
         );
+        let authoritative_full_damage = physical_damage.len() == 1
+            && physical_damage[0][0] == 0
+            && physical_damage[0][1] == 0
+            && physical_damage[0][2] == request.buffer_width
+            && physical_damage[0][3] == request.buffer_height;
+        let (wayland_damage_rectangles, wayland_full_damage) = match damage_mode {
+            GpuWaylandDamageMode::Buffer => (physical_damage.len(), authoritative_full_damage),
+            GpuWaylandDamageMode::SurfaceFull => (1, true),
+        };
+        let wayland_damaged_pixels = if wayland_full_damage {
+            u64::from(request.buffer_width) * u64::from(request.buffer_height)
+        } else {
+            physical_damaged_pixels
+        };
+        self.gpu
+            .as_mut()
+            .expect("configured GPU presenter")
+            .record_wayland_damage(
+                wayland_damage_rectangles,
+                wayland_damaged_pixels,
+                wayland_full_damage,
+            );
+        {
+            let summary = &mut self.surfaces[index].summary.gpu;
+            match damage_mode {
+                GpuWaylandDamageMode::Buffer => {
+                    summary.wayland_damage_rectangles = summary
+                        .wayland_damage_rectangles
+                        .saturating_add(u64::try_from(physical_damage.len()).unwrap_or(u64::MAX));
+                    summary.wayland_damaged_pixels = summary
+                        .wayland_damaged_pixels
+                        .saturating_add(wayland_damaged_pixels);
+                    if authoritative_full_damage {
+                        summary.full_wayland_damage_frames =
+                            summary.full_wayland_damage_frames.saturating_add(1);
+                    } else {
+                        summary.narrow_wayland_damage_frames =
+                            summary.narrow_wayland_damage_frames.saturating_add(1);
+                    }
+                }
+                GpuWaylandDamageMode::SurfaceFull => {
+                    summary.wayland_damage_rectangles =
+                        summary.wayland_damage_rectangles.saturating_add(1);
+                    summary.full_wayland_damage_frames =
+                        summary.full_wayland_damage_frames.saturating_add(1);
+                    summary.wayland_damaged_pixels = summary
+                        .wayland_damaged_pixels
+                        .saturating_add(wayland_damaged_pixels);
+                }
+            }
+        }
         wayland_surface.frame(qh, CallbackData::Frame { owner, generation });
         self.surfaces[index].summary.gpu.frame_callbacks_requested = self.surfaces[index]
             .summary
@@ -2399,6 +2542,7 @@ impl State {
             .gpu
             .frames_presented
             .saturating_add(1);
+        let mut reconfigured_after_present = false;
         if suboptimal {
             let id = self.gpu_surface_id(index);
             let reconfigured = self
@@ -2423,6 +2567,7 @@ impl State {
                 Ok(configuration) => {
                     self.record_gpu_configuration(index, &configuration);
                     self.surfaces[index].scheduler.mark_dirty();
+                    reconfigured_after_present = true;
                 }
                 Err(error) => {
                     self.record_gpu_render_error(index, &error);
@@ -2431,11 +2576,14 @@ impl State {
                 }
             }
         }
-        let runtime_render_ms = self.surfaces[index]
+        let runtime = self.surfaces[index]
             .runtime
             .as_mut()
-            .expect("runtime initialized before presentation")
-            .accept_gpu_frame(prepared);
+            .expect("runtime initialized before presentation");
+        let runtime_render_ms = runtime.accept_gpu_frame(prepared);
+        if reconfigured_after_present {
+            runtime.request_gpu_full_repaint();
+        }
         self.surfaces[index].presenter.gpu_presented();
         self.surfaces[index].gpu_consecutive_timeouts = 0;
         self.sync_gpu_summary(index);
@@ -5420,5 +5568,22 @@ mod tests {
         for value in [None, Some(""), Some("cpu"), Some("Vello"), Some("vello ")] {
             assert!(!internal_gpu_renderer_value(value));
         }
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    #[test]
+    fn gpu_damage_uses_buffer_coordinates_when_protocol_supports_them() {
+        assert_eq!(
+            select_gpu_wayland_damage_mode(4),
+            GpuWaylandDamageMode::Buffer
+        );
+        assert_eq!(
+            select_gpu_wayland_damage_mode(6),
+            GpuWaylandDamageMode::Buffer
+        );
+        assert_eq!(
+            select_gpu_wayland_damage_mode(3),
+            GpuWaylandDamageMode::SurfaceFull
+        );
     }
 }

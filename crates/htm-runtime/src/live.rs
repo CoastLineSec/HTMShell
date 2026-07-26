@@ -1335,6 +1335,12 @@ impl LiveDocument {
         self.render_session.reject_prepared(recoverable);
     }
 
+    /// Requests one full retained repaint after presenter-only state changes.
+    #[cfg(feature = "gpu-renderer")]
+    pub fn request_gpu_full_repaint(&mut self) {
+        self.render_session.reject_prepared(true);
+    }
+
     fn render_internal(
         &mut self,
         request: LiveRenderRequest,
