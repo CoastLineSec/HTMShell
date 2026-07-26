@@ -62,6 +62,7 @@ fn markdown_files(root: &Path) -> Vec<PathBuf> {
 fn public_reference_files(root: &Path) -> Vec<PathBuf> {
     let docs = root.join("docs");
     let mut files = vec![docs.join("README.md")];
+    files.extend(markdown_files(&docs.join("architecture")));
     files.extend(markdown_files(&docs.join("guide")));
     files.extend(markdown_files(&docs.join("types")));
     files.sort();

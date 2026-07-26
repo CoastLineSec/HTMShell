@@ -21,6 +21,7 @@ use wgpu::rwh::{HasDisplayHandle, RawDisplayHandle, RawWindowHandle};
 
 const MAX_LIVE_BACKING_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_LIVE_SCRATCH_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_LIVE_GPU_ERROR_MESSAGE_BYTES: usize = 1_024;
 
 const CONVERSION_SHADER_LINEAR: &str = r#"
 @group(0) @binding(0) var source: texture_2d<f32>;
@@ -143,13 +144,13 @@ pub struct LiveGpuError {
 impl LiveGpuError {
     fn new(kind: LiveGpuErrorKind, message: impl Into<String>, recoverable: bool) -> Self {
         let mut message = message.into();
-        message.truncate(
-            message
-                .char_indices()
-                .take_while(|(index, _)| *index <= 1_024)
-                .last()
-                .map_or(0, |(index, character)| index + character.len_utf8()),
-        );
+        if message.len() > MAX_LIVE_GPU_ERROR_MESSAGE_BYTES {
+            let mut boundary = MAX_LIVE_GPU_ERROR_MESSAGE_BYTES;
+            while !message.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            message.truncate(boundary);
+        }
         Self {
             kind,
             message,
@@ -1785,6 +1786,19 @@ mod tests {
         }
         .unwrap_err();
         assert_eq!(error.kind, LiveGpuErrorKind::SurfaceCreation);
+    }
+
+    #[test]
+    fn live_gpu_errors_are_utf8_safe_and_strictly_bounded() {
+        let error = LiveGpuError::host(
+            LiveGpuErrorKind::Render,
+            "é".repeat(MAX_LIVE_GPU_ERROR_MESSAGE_BYTES),
+            true,
+        );
+        assert_eq!(error.kind, LiveGpuErrorKind::Render);
+        assert!(error.recoverable);
+        assert!(error.message.len() <= MAX_LIVE_GPU_ERROR_MESSAGE_BYTES);
+        assert!(error.message.is_char_boundary(error.message.len()));
     }
 
     fn partial_plan(revision: u64, damage: DamageRegion) -> FramePlan {

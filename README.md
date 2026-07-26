@@ -36,6 +36,12 @@ Wayland compositor
 
 The authoring API, runtime, and supported CSS profile are experimental and may change as development continues.
 
+Rendering uses one retained renderer-neutral scene with a CPU reference path.
+An optional experimental Vello backend supports offscreen rendering, direct
+Wayland presentation, damage-limited scene rasterization, and complete CPU
+fallback. GPU surface population remains full target, and foreground and
+backdrop filters currently use CPU fallback.
+
 HTMShell includes direct native PipeWire integration for nodes, application
 streams, actual and configured defaults, volume, mute, ordered channels,
 read-only routing links and groups, and explicit scalar peak monitoring. The

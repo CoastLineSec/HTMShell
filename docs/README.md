@@ -23,3 +23,7 @@ HTMShell is an experimental native shell runtime authored with local HTML, CSS, 
 - [`HTMShell.Services.Clock`](types/HTMShell.Services.Clock/README.md)
 - [`HTMShell.Services.UPower`](types/HTMShell.Services.UPower/README.md)
 - [`HTMShell.Services.PipeWire`](types/HTMShell.Services.PipeWire/README.md)
+
+## Architecture
+
+- [Renderer architecture](architecture/renderer.md)
