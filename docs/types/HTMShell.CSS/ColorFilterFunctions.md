@@ -39,4 +39,4 @@ For functions that accept percentages, `100%` equals `1`. Negative and nonfinite
 
 Identity-valued lists remain represented but skip CPU effect-image allocation. Reordering or repeating functions remains semantically significant.
 
-`blur()` and `drop-shadow()` are not rendered yet. `backdrop-filter`, URL filters, arbitrary matrices, and author shaders are unsupported.
+`blur()` is documented separately and may be ordered with these color functions. `drop-shadow()` is not rendered yet. `backdrop-filter`, URL filters, arbitrary matrices, and author shaders are unsupported.

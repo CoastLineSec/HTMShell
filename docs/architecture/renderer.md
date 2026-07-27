@@ -20,7 +20,7 @@ shared-memory presentation consume the same retained scene and frame-plan
 contract. Exact CPU fixtures remain the source of truth for deterministic
 pixels.
 
-Color-only foreground filters isolate the complete element SourceGraphic in a bounded CPU image. The reference compositor applies normalized brightness, contrast, grayscale, hue rotation, invert, opacity, saturation, and sepia stages from left to right in encoded sRGB, clamps after every stage, and emits premultiplied RGBA8 once after the list. Spatial foreground filters and backdrop filters remain outside this execution path.
+CPU foreground filters isolate the complete element SourceGraphic in a bounded image. The reference compositor applies normalized brightness, contrast, grayscale, hue rotation, invert, opacity, saturation, sepia, and blur stages from left to right in encoded sRGB. Color runs use safe straight-RGBA matrix processing, while blur convolves canonical premultiplied RGBA with transparent-black edge samples. Direct separable Gaussian convolution handles sigma below 2 physical pixels; a deterministic three-box approximation handles larger sigma. Scratch and output images share the existing per-surface effect budget. Drop shadow and backdrop filters remain outside this execution path.
 
 The optional `gpu-renderer` build feature provides an experimental Vello
 backend. It supports offscreen rendering and deterministic readback for tests,

@@ -1,6 +1,5 @@
 use super::cpu_effects::{
-    CpuEffectPlan, CpuEffectScratch, CpuEffectStatistics, collect_effect_plans,
-    execute_color_effects,
+    CpuEffectPlan, CpuEffectScratch, CpuEffectStatistics, collect_effect_plans, execute_cpu_effects,
 };
 use super::{
     BackendError, BackendErrorKind, DamageRegion, FramePlan, FrameReason, FrameReasonSet,
@@ -113,7 +112,7 @@ impl Renderer for CpuReferenceRenderer {
                 true,
             )
         })?;
-        let (recording, statistics) = execute_color_effects(
+        let (recording, statistics) = execute_cpu_effects(
             &prepared.recording,
             plans,
             target.width,
@@ -564,10 +563,28 @@ mod tests {
     }
 
     fn render_html(html: &str, width: u32, height: u32) -> CpuFrame {
+        render_html_scaled(html, width, height, width, height, 120, 120)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_html_scaled(
+        html: &str,
+        logical_width: u32,
+        logical_height: u32,
+        physical_width: u32,
+        physical_height: u32,
+        scale_numerator: u32,
+        scale_denominator: u32,
+    ) -> CpuFrame {
         let mut document = HtmlDocument::from_html(
             html,
             DocumentConfig {
-                viewport: Some(Viewport::new(width, height, 1.0, ColorScheme::Dark)),
+                viewport: Some(Viewport::new(
+                    logical_width,
+                    logical_height,
+                    1.0,
+                    ColorScheme::Dark,
+                )),
                 html_parser_provider: Some(Arc::new(HtmlProvider)),
                 style_threading: StyleThreading::Sequential,
                 ..Default::default()
@@ -582,18 +599,18 @@ mod tests {
                 &identities,
                 ExperimentalDocumentIdentity { serial: 19 },
                 ViewportSpec {
-                    logical_width: width,
-                    logical_height: height,
+                    logical_width,
+                    logical_height,
                     ..ViewportSpec::default()
                 },
                 RenderSurfaceId {
                     instance: 21,
                     generation: 1,
                 },
-                width,
-                height,
-                120,
-                120,
+                physical_width,
+                physical_height,
+                scale_numerator,
+                scale_denominator,
                 FrameReasonSet::new(),
                 true,
             )
@@ -746,17 +763,16 @@ mod tests {
     }
 
     #[test]
-    fn mixed_spatial_lists_are_not_partially_executed() {
+    fn drop_shadow_lists_are_not_partially_executed() {
         let baseline = render_html(
             "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{width:20px;height:20px;background:#204060}</style></head><body><div id=\"box\"></div></body></html>",
             30,
             30,
         );
         for filter in [
-            "brightness(2) blur(4px)",
-            "blur(4px) brightness(2)",
-            "contrast(2) drop-shadow(1px 1px 2px black)",
-            "drop-shadow(1px 1px 2px black) sepia(1)",
+            "blur(4px) drop-shadow(1px 1px 2px black)",
+            "drop-shadow(1px 1px 2px black) blur(4px)",
+            "brightness(2) blur(4px) drop-shadow(1px 1px black)",
         ] {
             let filtered = render_html(
                 &format!(
@@ -767,6 +783,310 @@ mod tests {
             );
             assert_eq!(filtered.pixels, baseline.pixels);
         }
+    }
+
+    #[test]
+    fn blur_renders_expanded_source_graphic_with_transparent_black_edges() {
+        let frame = render_html(
+            "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{position:absolute;left:10px;top:10px;width:10px;height:10px;background:#ff0000;filter:blur(1px)}</style></head><body><div id=\"box\"></div></body></html>",
+            30,
+            30,
+        );
+        assert_eq!(pixel(&frame, 30, 6, 15), [0, 0, 0, 0]);
+        let outside = pixel(&frame, 30, 8, 15);
+        assert!(outside[0] > 0);
+        assert_eq!(outside[1], 0);
+        assert_eq!(outside[2], 0);
+        assert_eq!(outside[0], outside[3]);
+        assert_eq!(pixel(&frame, 30, 15, 15), [255, 0, 0, 255]);
+        assert_eq!(pixel(&frame, 30, 23, 15), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn color_blur_order_and_repeated_blur_remain_observable() {
+        let prefix = "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{position:absolute;left:10px;top:10px;width:10px;height:10px;background:#c04020;filter:";
+        let suffix = "}</style></head><body><div id=\"box\"></div></body></html>";
+        let before = render_html(&format!("{prefix}brightness(2) blur(1px){suffix}"), 30, 30);
+        let after = render_html(&format!("{prefix}blur(1px) brightness(2){suffix}"), 30, 30);
+        let once = render_html(&format!("{prefix}blur(1px){suffix}"), 30, 30);
+        let twice = render_html(&format!("{prefix}blur(1px) blur(1px){suffix}"), 30, 30);
+        assert_ne!(before.pixels, after.pixels);
+        assert_ne!(once.pixels, twice.pixels);
+        assert!(pixel(&twice, 30, 7, 15)[3] > pixel(&once, 30, 7, 15)[3]);
+    }
+
+    #[test]
+    fn nested_blur_executes_inside_out_and_reuses_spatial_scratch() {
+        let html = "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#parent{position:absolute;left:8px;top:8px;width:20px;height:20px;filter:blur(2px)}#child{margin:5px;width:10px;height:10px;background:#ff8040;filter:blur(1px)}</style></head><body><div id=\"parent\"><div id=\"child\"></div></div></body></html>";
+        let mut document = HtmlDocument::from_html(
+            html,
+            DocumentConfig {
+                viewport: Some(Viewport::new(40, 40, 1.0, ColorScheme::Dark)),
+                html_parser_provider: Some(Arc::new(HtmlProvider)),
+                style_threading: StyleThreading::Sequential,
+                ..Default::default()
+            },
+        );
+        document.set_incremental_layout(true);
+        document.resolve(0.0);
+        let identities = IdentityRegistry::from_document(&document);
+        let mut session = CpuRenderSession::default();
+        let first = session
+            .render_document(
+                &mut document,
+                &identities,
+                ExperimentalDocumentIdentity { serial: 41 },
+                ViewportSpec {
+                    logical_width: 40,
+                    logical_height: 40,
+                    ..ViewportSpec::default()
+                },
+                RenderSurfaceId {
+                    instance: 42,
+                    generation: 1,
+                },
+                40,
+                40,
+                120,
+                120,
+                FrameReasonSet::new(),
+                true,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.renderer.last_effect_statistics.layer_creations, 2);
+        assert_eq!(session.renderer.last_effect_statistics.blur_stages, 2);
+        assert_eq!(
+            session.renderer.last_effect_statistics.gaussian_blur_stages,
+            1
+        );
+        assert_eq!(
+            session
+                .renderer
+                .last_effect_statistics
+                .three_box_blur_stages,
+            1
+        );
+        assert!(session.renderer.last_effect_statistics.blur_scratch_bytes > 0);
+        assert!(pixel(&first, 40, 12, 18)[3] > 0);
+
+        let repeated = session
+            .render_document(
+                &mut document,
+                &identities,
+                ExperimentalDocumentIdentity { serial: 41 },
+                ViewportSpec {
+                    logical_width: 40,
+                    logical_height: 40,
+                    ..ViewportSpec::default()
+                },
+                RenderSurfaceId {
+                    instance: 42,
+                    generation: 1,
+                },
+                40,
+                40,
+                120,
+                120,
+                FrameReasonSet::new(),
+                true,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.pixels, repeated.pixels);
+        assert!(
+            session
+                .renderer
+                .last_effect_statistics
+                .blur_scratch_replacements
+                >= 2
+        );
+    }
+
+    #[test]
+    fn equal_blur_layers_reuse_scratch_without_pixel_leakage() {
+        let html = "<!doctype html><html><head><style>html,body{margin:0;background:transparent}.box{position:absolute;top:10px;width:8px;height:8px;filter:blur(1px)}#red{left:8px;background:#ff0000}#blue{left:28px;background:#0000ff}</style></head><body><div id=\"red\" class=\"box\"></div><div id=\"blue\" class=\"box\"></div></body></html>";
+        let mut document = HtmlDocument::from_html(
+            html,
+            DocumentConfig {
+                viewport: Some(Viewport::new(48, 28, 1.0, ColorScheme::Dark)),
+                html_parser_provider: Some(Arc::new(HtmlProvider)),
+                style_threading: StyleThreading::Sequential,
+                ..Default::default()
+            },
+        );
+        document.set_incremental_layout(true);
+        document.resolve(0.0);
+        let identities = IdentityRegistry::from_document(&document);
+        let mut session = CpuRenderSession::default();
+        let frame = session
+            .render_document(
+                &mut document,
+                &identities,
+                ExperimentalDocumentIdentity { serial: 43 },
+                ViewportSpec {
+                    logical_width: 48,
+                    logical_height: 28,
+                    ..ViewportSpec::default()
+                },
+                RenderSurfaceId {
+                    instance: 44,
+                    generation: 1,
+                },
+                48,
+                28,
+                120,
+                120,
+                FrameReasonSet::new(),
+                true,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.renderer.last_effect_statistics.blur_stages, 2);
+        assert_eq!(
+            session.renderer.last_effect_statistics.blur_scratch_reuses,
+            1
+        );
+        let red = pixel(&frame, 48, 12, 14);
+        let blue = pixel(&frame, 48, 32, 14);
+        assert!(red[0] > 0 && red[2] == 0);
+        assert!(blue[2] > 0 && blue[0] == 0);
+    }
+
+    #[test]
+    fn blur_precedes_external_clip_opacity_and_transform() {
+        let clipped = render_html(
+            "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#clip{position:absolute;left:5px;top:5px;width:10px;height:10px;overflow:hidden;border-radius:2px}#box{margin:2px;width:6px;height:6px;background:#ff0000;filter:blur(3px)}</style></head><body><div id=\"clip\"><div id=\"box\"></div></div></body></html>",
+            24,
+            24,
+        );
+        assert_eq!(pixel(&clipped, 24, 4, 10), [0, 0, 0, 0]);
+        assert!(pixel(&clipped, 24, 5, 10)[3] > 0);
+        assert_eq!(pixel(&clipped, 24, 15, 10), [0, 0, 0, 0]);
+
+        let transformed = render_html(
+            "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{position:absolute;left:2px;top:8px;width:6px;height:6px;background:#4080c0;filter:blur(1px);opacity:.5;transform:translateX(10px)}</style></head><body><div id=\"box\"></div></body></html>",
+            28,
+            24,
+        );
+        assert_eq!(pixel(&transformed, 28, 5, 11), [0, 0, 0, 0]);
+        let center = pixel(&transformed, 28, 15, 11);
+        assert!(center[3] >= 126 && center[3] <= 128);
+        assert!(center[0] <= center[3]);
+        assert!(center[1] <= center[3]);
+        assert!(center[2] <= center[3]);
+    }
+
+    #[test]
+    fn blur_includes_existing_box_shadow_in_source_graphic() {
+        let without_shadow = render_html(
+            "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{position:absolute;left:8px;top:8px;width:8px;height:8px;background:#ff0000;filter:blur(1px)}</style></head><body><div id=\"box\"></div></body></html>",
+            32,
+            24,
+        );
+        let with_shadow = render_html(
+            "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{position:absolute;left:8px;top:8px;width:8px;height:8px;background:#ff0000;box-shadow:8px 0 0 rgb(0 0 255 / 80%);filter:blur(1px)}</style></head><body><div id=\"box\"></div></body></html>",
+            32,
+            24,
+        );
+        assert_eq!(pixel(&without_shadow, 32, 20, 12), [0, 0, 0, 0]);
+        let shadow = pixel(&with_shadow, 32, 20, 12);
+        assert!(shadow[2] > 0);
+        assert!(shadow[2] <= shadow[3]);
+    }
+
+    #[test]
+    fn blur_is_deterministic_and_conservative_at_supported_fractional_scales() {
+        let html = "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{position:absolute;left:8px;top:8px;width:8px;height:8px;background:rgb(255 96 32 / 75%);filter:blur(1.25px)}</style></head><body><div id=\"box\"></div></body></html>";
+        for (numerator, physical) in [(120_u32, 32_u32), (150, 40), (180, 48)] {
+            let first = render_html_scaled(html, 32, 32, physical, physical, numerator, 120);
+            let second = render_html_scaled(html, 32, 32, physical, physical, numerator, 120);
+            assert_eq!(first.pixels, second.pixels);
+            assert!(
+                first
+                    .pixels
+                    .chunks_exact(4)
+                    .all(|pixel| pixel[0] <= pixel[3]
+                        && pixel[1] <= pixel[3]
+                        && pixel[2] <= pixel[3])
+            );
+            let scale = f64::from(numerator) / 120.0;
+            let fringe_x = (6.0 * scale).floor() as usize;
+            let center_y = (12.0 * scale).floor() as usize;
+            assert!(pixel(&first, physical as usize, fringe_x, center_y)[3] > 0);
+        }
+    }
+
+    #[test]
+    fn approved_blur_sigma_profile_is_byte_deterministic() {
+        for sigma in [0.0_f64, 0.5, 1.0, 1.999, 2.0, 4.0, 8.0, 16.0, 64.0] {
+            let dimension = if sigma == 64.0 { 160 } else { 48 };
+            let box_size = if sigma == 64.0 { 80 } else { 8 };
+            let position = dimension / 2 - box_size / 2;
+            let html = format!(
+                "<!doctype html><html><head><style>html,body{{margin:0;background:transparent}}#box{{position:absolute;left:{position}px;top:{position}px;width:{box_size}px;height:{box_size}px;background:rgb(255 128 64 / 75%);filter:blur({sigma}px)}}</style></head><body><div id=\"box\"></div></body></html>"
+            );
+            let first = render_html(&html, dimension, dimension);
+            let second = render_html(&html, dimension, dimension);
+            assert_eq!(first.pixels, second.pixels, "sigma={sigma}");
+            assert!(
+                first.pixels.chunks_exact(4).any(|pixel| pixel[3] > 0),
+                "sigma={sigma}"
+            );
+            assert!(
+                first
+                    .pixels
+                    .chunks_exact(4)
+                    .all(|pixel| pixel[0] <= pixel[3]
+                        && pixel[1] <= pixel[3]
+                        && pixel[2] <= pixel[3]),
+                "sigma={sigma}"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_blur_layer_fails_instead_of_painting_unfiltered_content() {
+        let mut document = HtmlDocument::from_html(
+            "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{width:4097px;height:1px;background:#ff0000;filter:blur(1px)}</style></head><body><div id=\"box\"></div></body></html>",
+            DocumentConfig {
+                viewport: Some(Viewport::new(4097, 8, 1.0, ColorScheme::Dark)),
+                html_parser_provider: Some(Arc::new(HtmlProvider)),
+                style_threading: StyleThreading::Sequential,
+                ..Default::default()
+            },
+        );
+        document.set_incremental_layout(true);
+        document.resolve(0.0);
+        let identities = IdentityRegistry::from_document(&document);
+        let error = CpuRenderSession::default()
+            .render_document(
+                &mut document,
+                &identities,
+                ExperimentalDocumentIdentity { serial: 45 },
+                ViewportSpec {
+                    logical_width: 4097,
+                    logical_height: 8,
+                    ..ViewportSpec::default()
+                },
+                RenderSurfaceId {
+                    instance: 46,
+                    generation: 1,
+                },
+                4097,
+                8,
+                120,
+                120,
+                FrameReasonSet::new(),
+                true,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("CPU effect layer exceeds the dimension limit"),
+            "{error}"
+        );
     }
 
     #[test]

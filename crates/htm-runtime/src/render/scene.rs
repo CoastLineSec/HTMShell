@@ -1862,6 +1862,37 @@ mod tests {
     }
 
     #[test]
+    fn blur_length_units_resolve_through_stylo_before_profile_validation() {
+        for declaration in [
+            "blur(1px)",
+            "blur(.1in)",
+            "blur(.1cm)",
+            "blur(.1mm)",
+            "blur(.1q)",
+            "blur(.1pt)",
+            "blur(.1pc)",
+            "blur(.5em)",
+            "blur(.5rem)",
+            "blur(.5ex)",
+            "blur(.5ch)",
+            "blur(1vw)",
+            "blur(1vh)",
+            "blur(1vmin)",
+            "blur(1vmax)",
+        ] {
+            let html = format!(
+                "<!doctype html><html><body><div id=\"effect\" style=\"font-size:10px;filter:{declaration}\"></div></body></html>"
+            );
+            let document = document(&html);
+            let scene = retained(&document, 1);
+            assert!(
+                rejected_filter(node_by_selector(&document, &scene, "#effect")).is_none(),
+                "{declaration}"
+            );
+        }
+    }
+
+    #[test]
     fn omitted_filter_arguments_use_standard_computed_defaults() {
         let document = document(
             "<!doctype html><html><body><div id=\"effect\" style=\"filter:blur() brightness() contrast() grayscale() hue-rotate() invert() opacity() saturate() sepia()\"></div></body></html>",

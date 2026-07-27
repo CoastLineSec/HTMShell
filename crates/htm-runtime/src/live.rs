@@ -6491,6 +6491,63 @@ mod tests {
     }
 
     #[test]
+    fn live_cpu_blur_uses_the_reference_compositor_and_returns_to_idle() {
+        let mut live = LiveDocument::load(fixture(), 640, 480).unwrap();
+        let before = live.render().unwrap();
+        let bounds = live.snapshot().unwrap().card_bounds;
+        let outside_x = (bounds.x - 2.0).floor() as usize;
+        let x = (bounds.x + 1.0).floor() as usize;
+        let y = (bounds.y + bounds.height / 2.0).floor() as usize;
+        let offset = (y * 640 + x) * 4;
+        let outside_offset = (y * 640 + outside_x) * 4;
+        assert_eq!(
+            &before.premultiplied_rgba[outside_offset..outside_offset + 4],
+            &[0, 0, 0, 0]
+        );
+        let source: [u8; 4] = before.premultiplied_rgba[offset..offset + 4]
+            .try_into()
+            .unwrap();
+
+        let card = live
+            .document
+            .query_selector("#shell-card")
+            .unwrap()
+            .unwrap();
+        live.document.mutate().set_attribute(
+            card,
+            QualName {
+                prefix: None,
+                ns: blitz_dom::Namespace::from(""),
+                local: LocalName::from("style"),
+            },
+            "filter:blur(2px)",
+        );
+        live.resolve();
+        let filtered = live.render().unwrap();
+        let fringe: [u8; 4] = filtered.premultiplied_rgba[offset..offset + 4]
+            .try_into()
+            .unwrap();
+        assert_ne!(fringe, source);
+        assert!(fringe[3] > 0);
+        assert!(fringe[0] <= fringe[3]);
+        assert!(fringe[1] <= fringe[3]);
+        assert!(fringe[2] <= fringe[3]);
+        assert_eq!(
+            &filtered.premultiplied_rgba[outside_offset..outside_offset + 4],
+            &[0, 0, 0, 0]
+        );
+        assert!(
+            live.render_pending_for(
+                LiveRenderRequest::new(640, 480, LIVE_SCALE_DENOMINATOR).unwrap(),
+                live.document_identity.serial,
+                1,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
     fn rendered_frame_is_premultiplied_rgba_and_has_input_region() {
         let mut live = LiveDocument::load(fixture(), 640, 480).unwrap();
         let frame = live.render().unwrap();
@@ -6579,6 +6636,48 @@ mod tests {
         assert_eq!(live.frame_generation, 1);
         assert!(
             live.prepare_gpu_pending_for(request, 51, 7)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    #[test]
+    fn live_gpu_blur_fallback_matches_the_complete_cpu_reference_frame() {
+        fn set_blur(live: &mut LiveDocument) {
+            let card = live
+                .document
+                .query_selector("#shell-card")
+                .unwrap()
+                .unwrap();
+            live.document.mutate().set_attribute(
+                card,
+                QualName {
+                    prefix: None,
+                    ns: blitz_dom::Namespace::from(""),
+                    local: LocalName::from("style"),
+                },
+                "filter:brightness(1.2) blur(2px)",
+            );
+            live.resolve();
+        }
+
+        let mut reference = LiveDocument::load(fixture(), 640, 480).unwrap();
+        set_blur(&mut reference);
+        let expected = reference.render().unwrap();
+
+        let mut live = LiveDocument::load(fixture(), 640, 480).unwrap();
+        set_blur(&mut live);
+        let request = LiveRenderRequest::new(640, 480, LIVE_SCALE_DENOMINATOR).unwrap();
+        let prepared = live
+            .prepare_gpu_pending_for(request, 61, 13)
+            .unwrap()
+            .expect("blur fallback plan");
+        let actual = live.render_gpu_frame_on_cpu(prepared).unwrap();
+        assert_eq!(actual.premultiplied_rgba, expected.premultiplied_rgba);
+        assert_eq!(actual.generation, 1);
+        assert!(
+            live.prepare_gpu_pending_for(request, 61, 13)
                 .unwrap()
                 .is_none()
         );

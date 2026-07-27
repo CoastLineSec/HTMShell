@@ -1165,10 +1165,11 @@ mod tests {
     use super::*;
     use crate::model::{LogicalRect, ViewportSpec};
     use crate::render::{
-        CanonicalF32, ColorEffect, ColorEffectKind, ForegroundEffect, ForegroundEffectCoverage,
-        ForegroundEffectId, ForegroundEffectLayerMetadata, ForegroundEffectList, FrameReason,
-        FrameReasonSet, ResourceKind, ResourceOwner, RetainedScene, SceneBounds, SceneDelta,
-        SceneNode, SceneNodeId, SceneResource, SceneResourceKey, SceneSubpart,
+        BlurEffect, CanonicalF32, ColorEffect, ColorEffectKind, ForegroundEffect,
+        ForegroundEffectCoverage, ForegroundEffectId, ForegroundEffectLayerMetadata,
+        ForegroundEffectList, FrameReason, FrameReasonSet, ResourceKind, ResourceOwner,
+        RetainedScene, SceneBounds, SceneDelta, SceneNode, SceneNodeId, SceneResource,
+        SceneResourceKey, SceneSubpart,
     };
     use crate::{ExperimentalDocumentIdentity, ExperimentalNodeIdentity};
     use anyrender::render_to_buffer;
@@ -1322,6 +1323,39 @@ mod tests {
             list,
             source_graphic_bounds: bounds.clone(),
             filtered_bounds: bounds,
+            nesting_depth: 1,
+            coverage,
+            future_layer,
+        }
+    }
+
+    fn modeled_blur_filter(sigma: f32) -> SceneEffect {
+        let source_bounds = LogicalRect {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 48.0,
+        };
+        let list = ForegroundEffectList::from_functions(
+            ForegroundEffectId::for_node(
+                ExperimentalDocumentIdentity { serial: 42 },
+                ExperimentalNodeIdentity {
+                    slot: 3,
+                    generation: 8,
+                },
+            ),
+            vec![ForegroundEffect::Blur(BlurEffect {
+                sigma: CanonicalF32::new(sigma).unwrap(),
+            })],
+        )
+        .unwrap();
+        let filtered_bounds = list.propagated_bounds(&source_bounds).unwrap();
+        let future_layer = ForegroundEffectLayerMetadata::for_list(&list);
+        let coverage = ForegroundEffectCoverage::for_list(&list);
+        SceneEffect::ForegroundFilter {
+            list,
+            source_graphic_bounds: source_bounds,
+            filtered_bounds,
             nesting_depth: 1,
             coverage,
             future_layer,
@@ -1613,6 +1647,11 @@ mod tests {
             .unwrap(),
             GpuCoverage::CpuFrameFallback
         );
+        assert_eq!(
+            VelloOffscreenRenderer::coverage(&proof_plan(surface, Some(modeled_blur_filter(2.0))))
+                .unwrap(),
+            GpuCoverage::CpuFrameFallback
+        );
     }
 
     #[test]
@@ -1654,6 +1693,7 @@ mod tests {
         }
         for effect in [
             modeled_foreground_filter(1.1),
+            modeled_blur_filter(2.0),
             SceneEffect::BackdropFilter {
                 signature: 4,
                 conservative_full_bounds: true,
@@ -1663,6 +1703,10 @@ mod tests {
         }
         assert_eq!(
             effect_coverage(&modeled_foreground_filter(1.0)),
+            GpuCoverage::Native
+        );
+        assert_eq!(
+            effect_coverage(&modeled_blur_filter(0.0)),
             GpuCoverage::Native
         );
         assert_eq!(
@@ -2108,6 +2152,32 @@ mod tests {
             .unwrap();
         assert_eq!(path, RenderPath::CpuFallback);
         assert_eq!(pixels.len(), 64 * 48 * 4);
+
+        let blur_surface = RenderSurfaceId {
+            instance: 15,
+            generation: 1,
+        };
+        let blur_plan = proof_plan(blur_surface, Some(modeled_blur_filter(2.0)));
+        let prepared = CpuPreparedScene {
+            revision: blur_plan.scene_revision,
+            recording: filtered_solid_recording(),
+        };
+        let (blurred, path) = facade
+            .render(
+                &blur_plan,
+                RenderTarget {
+                    width: 64,
+                    height: 48,
+                    pixel_format: PixelFormat::PremultipliedRgba8,
+                },
+                prepared,
+            )
+            .unwrap();
+        assert_eq!(path, RenderPath::CpuFallback);
+        assert!(blurred[3] > 0);
+        assert!(blurred[0] <= blurred[3]);
+        assert!(blurred[1] <= blurred[3]);
+        assert!(blurred[2] <= blurred[3]);
 
         assert_eq!(renderer.targets.len(), 6);
         assert_eq!(renderer.statistics.frames_rendered, 8);

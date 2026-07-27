@@ -6,6 +6,7 @@ Bounded CSS rendering behavior.
 
 - [`filter`](HTMShell.CSS/Filter.md)
 - [Color filter functions](HTMShell.CSS/ColorFilterFunctions.md)
+- [`blur()`](HTMShell.CSS/Blur.md)
 
 
 ## `HTMShell`

@@ -13,7 +13,7 @@ HTMShell is an experimental native shell runtime authored with local HTML, CSS, 
 - [Clocks and dates](guide/clock.md)
 - [Power state](guide/power.md)
 - [PipeWire audio](guide/audio.md)
-- [Foreground color filters](guide/visual-effects.md)
+- [Foreground filters](guide/visual-effects.md)
 
 ## HTMShell API
 

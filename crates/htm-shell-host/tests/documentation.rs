@@ -205,7 +205,7 @@ fn public_documentation_style_is_safe_and_page_shape_is_stable() {
 }
 
 #[test]
-fn foreground_color_filter_docs_and_example_cover_the_complete_rendered_subset() {
+fn foreground_filter_docs_and_example_cover_the_complete_cpu_subset() {
     let root = workspace_root();
     let guide = fs::read_to_string(root.join("docs/guide/visual-effects.md")).unwrap();
     let reference = read_joined(&markdown_files(&root.join("docs/types/HTMShell.CSS")));
@@ -215,6 +215,7 @@ fn foreground_color_filter_docs_and_example_cover_the_complete_rendered_subset()
     let public = format!("{guide}\n{reference}\n{html}\n{css}");
 
     for function in [
+        "blur()",
         "brightness()",
         "contrast()",
         "grayscale()",
@@ -240,6 +241,10 @@ fn foreground_color_filter_docs_and_example_cover_the_complete_rendered_subset()
         "not yet faithfully rendered",
         "backdrop-filter` is not supported",
         "distinct from the `opacity` property",
+        "ceil(3 * sigma)",
+        "transparent black",
+        "premultiplied",
+        "64 logical pixels",
     ] {
         assert!(
             public.contains(statement),
@@ -255,23 +260,23 @@ fn foreground_color_filter_docs_and_example_cover_the_complete_rendered_subset()
         "opacity(55%)",
         "saturate(1.8)",
         "sepia(1)",
+        "blur(1px)",
+        "blur(3px)",
+        "blur(8px)",
     ] {
         assert!(css.contains(syntax), "example omits {syntax}");
     }
     assert!(css.matches("brightness(1.1)").count() >= 2);
     assert!(html.contains("nested color filters"));
+    assert!(html.contains("nested blur"));
     assert!(html.contains("Filtered text"));
+    assert!(html.contains("Blurred text"));
     assert!(html.contains("alpha-grid.png"));
     assert!(css.contains("box-shadow:"));
     assert!(css.contains("overflow: hidden"));
     assert!(css.contains("transform:"));
     assert!(svg.contains("<svg"));
-    for forbidden in [
-        "filter: blur(",
-        "filter: drop-shadow(",
-        "backdrop-filter",
-        "<script",
-    ] {
+    for forbidden in ["filter: drop-shadow(", "backdrop-filter", "<script"] {
         assert!(!format!("{html}\n{css}").contains(forbidden));
     }
 
@@ -279,8 +284,8 @@ fn foreground_color_filter_docs_and_example_cover_the_complete_rendered_subset()
         root.join("examples/color-filters"),
         htm_runtime::ExperimentOptions {
             viewport: htm_runtime::ViewportSpec {
-                logical_width: 1024,
-                logical_height: 768,
+                logical_width: 1440,
+                logical_height: 900,
                 ..htm_runtime::ViewportSpec::default()
             },
             render_png: true,

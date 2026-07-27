@@ -1,3 +1,4 @@
+use super::cpu_blur::{CpuBlurAlgorithm, CpuBlurScratch, apply_cpu_blur};
 use super::{
     BackendError, BackendErrorKind, ForegroundEffect, ForegroundEffectList, MAX_EFFECT_IMAGE_BYTES,
     MAX_EFFECT_LAYER_DIMENSION, MAX_EFFECT_SURFACE_BYTES, RetainedScene, SceneEffect,
@@ -13,12 +14,13 @@ use peniko::{Blob, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
 pub(super) struct CpuEffectPlan {
     execution: CpuEffectExecution,
     source_bounds: Option<LogicalRect>,
+    filtered_bounds: Option<LogicalRect>,
     element_transform: Option<Affine>,
 }
 
 #[derive(Clone)]
 enum CpuEffectExecution {
-    Color(ForegroundEffectList),
+    Ready(ForegroundEffectList),
     Identity,
     Deferred,
 }
@@ -30,12 +32,21 @@ pub(super) struct CpuEffectStatistics {
     pub identity_fast_paths: u64,
     pub deferred_layers: u64,
     pub filtered_pixels: u64,
+    pub blur_stages: u64,
+    pub gaussian_blur_stages: u64,
+    pub three_box_blur_stages: u64,
+    pub blur_passes: u64,
+    pub blur_pixels: u64,
+    pub blur_scratch_reuses: u64,
+    pub blur_scratch_replacements: u64,
+    pub blur_scratch_bytes: usize,
     pub allocated_image_bytes: usize,
 }
 
 #[derive(Default)]
 pub(super) struct CpuEffectScratch {
     renderer: Option<(u32, u32, VelloCpuImageRenderer)>,
+    blur: CpuBlurScratch,
 }
 
 #[derive(Clone, Copy)]
@@ -70,16 +81,24 @@ pub(super) fn collect_effect_plans(scene: &RetainedScene) -> Vec<CpuEffectPlan> 
                 SceneEffect::ForegroundFilter {
                     list,
                     source_graphic_bounds,
+                    filtered_bounds,
                     ..
                 } => {
-                    let execution = if list.is_visual_identity() {
-                        CpuEffectExecution::Identity
-                    } else if list
+                    let has_drop_shadow = list
                         .functions
                         .iter()
-                        .all(|effect| matches!(effect, ForegroundEffect::Color(_)))
-                    {
-                        CpuEffectExecution::Color(list.clone())
+                        .any(|effect| matches!(effect, ForegroundEffect::DropShadow(_)));
+                    let execution = if has_drop_shadow {
+                        CpuEffectExecution::Deferred
+                    } else if list.is_visual_identity() {
+                        CpuEffectExecution::Identity
+                    } else if list.functions.iter().all(|effect| {
+                        matches!(
+                            effect,
+                            ForegroundEffect::Color(_) | ForegroundEffect::Blur(_)
+                        )
+                    }) {
+                        CpuEffectExecution::Ready(list.clone())
                     } else {
                         CpuEffectExecution::Deferred
                     };
@@ -88,6 +107,7 @@ pub(super) fn collect_effect_plans(scene: &RetainedScene) -> Vec<CpuEffectPlan> 
                         CpuEffectPlan {
                             execution,
                             source_bounds: Some(source_graphic_bounds.clone()),
+                            filtered_bounds: Some(filtered_bounds.clone()),
                             element_transform,
                         },
                     ))
@@ -97,6 +117,7 @@ pub(super) fn collect_effect_plans(scene: &RetainedScene) -> Vec<CpuEffectPlan> 
                     CpuEffectPlan {
                         execution: CpuEffectExecution::Deferred,
                         source_bounds: None,
+                        filtered_bounds: None,
                         element_transform,
                     },
                 )),
@@ -108,7 +129,7 @@ pub(super) fn collect_effect_plans(scene: &RetainedScene) -> Vec<CpuEffectPlan> 
     nodes.into_iter().map(|(_, plan)| plan).collect()
 }
 
-pub(super) fn execute_color_effects(
+pub(super) fn execute_cpu_effects(
     recording: &Scene,
     plans: &[CpuEffectPlan],
     target_width: u32,
@@ -145,7 +166,9 @@ pub(super) fn execute_color_effects(
 
     let mut output = Scene::with_tolerance(recording.tolerance);
     flatten_nodes(&nodes, &mut output.commands);
-    statistics.allocated_image_bytes = allocated_bytes;
+    statistics.blur_scratch_bytes = scratch.blur.allocated_bytes();
+    statistics.allocated_image_bytes =
+        checked_surface_bytes(allocated_bytes, statistics.blur_scratch_bytes)?;
     Ok((output, statistics))
 }
 
@@ -319,14 +342,24 @@ fn transform_nodes(
             CpuEffectExecution::Deferred => {
                 statistics.deferred_layers = statistics.deferred_layers.saturating_add(1);
             }
-            CpuEffectExecution::Color(list) => {
+            CpuEffectExecution::Ready(list) => {
                 let (to_filter_space, from_filter_space) =
                     filter_space_transforms(push, plan.element_transform)?;
+                let source_bounds = plan.source_bounds.as_ref().ok_or_else(|| {
+                    effect_error(
+                        BackendErrorKind::ResourcePreparation,
+                        "executable CPU effect plan has no SourceGraphic bounds",
+                        false,
+                    )
+                })?;
+                if source_bounds.width <= 0.0 || source_bounds.height <= 0.0 {
+                    continue;
+                }
                 let bounds = physical_bounds(
-                    plan.source_bounds.as_ref().ok_or_else(|| {
+                    plan.filtered_bounds.as_ref().ok_or_else(|| {
                         effect_error(
                             BackendErrorKind::ResourcePreparation,
-                            "executable CPU effect plan has no SourceGraphic bounds",
+                            "executable CPU effect plan has no filtered bounds",
                             false,
                         )
                     })?,
@@ -342,6 +375,15 @@ fn transform_nodes(
                 let height = bounds.height;
                 let image_bytes = checked_image_bytes(width, height)?;
                 let next_total = checked_surface_bytes(*allocated_bytes, image_bytes)?;
+                let has_active_blur = list.functions.iter().any(|effect| {
+                    matches!(effect, ForegroundEffect::Blur(blur) if blur.sigma.get() > 0.0)
+                });
+                if has_active_blur {
+                    checked_surface_bytes(next_total, image_bytes)?;
+                } else if checked_surface_bytes(next_total, scratch.blur.allocated_bytes()).is_err()
+                {
+                    scratch.blur = CpuBlurScratch::default();
+                }
 
                 let mut recorded_source = Scene::new();
                 flatten_nodes(children, &mut recorded_source.commands);
@@ -349,7 +391,16 @@ fn transform_nodes(
                 source.append_scene(recorded_source, to_filter_space);
                 let mut pixels =
                     scratch.render(source, bounds.x0, bounds.y0, width, height, statistics)?;
-                apply_ordered_color_matrices(&mut pixels, &list)?;
+                pixels = apply_ordered_effects(
+                    pixels,
+                    &list,
+                    width,
+                    height,
+                    scale,
+                    &mut scratch.blur,
+                    next_total,
+                    statistics,
+                )?;
                 statistics.filtered_pixels = statistics
                     .filtered_pixels
                     .saturating_add(u64::from(width) * u64::from(height));
@@ -428,9 +479,82 @@ impl CpuEffectScratch {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn apply_ordered_effects(
+    mut pixels: Vec<u8>,
+    list: &ForegroundEffectList,
+    width: u32,
+    height: u32,
+    scale: f64,
+    blur_scratch: &mut CpuBlurScratch,
+    committed_surface_bytes: usize,
+    statistics: &mut CpuEffectStatistics,
+) -> Result<Vec<u8>, BackendError> {
+    let mut index = 0usize;
+    while index < list.functions.len() {
+        match &list.functions[index] {
+            ForegroundEffect::Color(_) => {
+                let start = index;
+                while matches!(list.functions.get(index), Some(ForegroundEffect::Color(_))) {
+                    index += 1;
+                }
+                apply_ordered_color_matrices(&mut pixels, &list.functions[start..index])?;
+            }
+            ForegroundEffect::Blur(blur) => {
+                index += 1;
+                let physical_sigma = f64::from(blur.sigma.get()) * scale;
+                if physical_sigma == 0.0 {
+                    continue;
+                }
+                let result = apply_cpu_blur(
+                    pixels,
+                    width,
+                    height,
+                    physical_sigma,
+                    blur_scratch,
+                    committed_surface_bytes,
+                )?;
+                pixels = result.pixels;
+                statistics.blur_stages = statistics.blur_stages.saturating_add(1);
+                statistics.blur_passes = statistics
+                    .blur_passes
+                    .saturating_add(u64::from(result.pass_count));
+                statistics.blur_pixels = statistics
+                    .blur_pixels
+                    .saturating_add(u64::from(width) * u64::from(height));
+                match result.algorithm {
+                    CpuBlurAlgorithm::DirectGaussian => {
+                        statistics.gaussian_blur_stages =
+                            statistics.gaussian_blur_stages.saturating_add(1);
+                    }
+                    CpuBlurAlgorithm::ThreeBox => {
+                        statistics.three_box_blur_stages =
+                            statistics.three_box_blur_stages.saturating_add(1);
+                    }
+                }
+                if result.scratch_reused {
+                    statistics.blur_scratch_reuses =
+                        statistics.blur_scratch_reuses.saturating_add(1);
+                } else {
+                    statistics.blur_scratch_replacements =
+                        statistics.blur_scratch_replacements.saturating_add(1);
+                }
+            }
+            ForegroundEffect::DropShadow(_) => {
+                return Err(effect_error(
+                    BackendErrorKind::UnsupportedCapability,
+                    "drop shadow cannot enter the CPU blur compositor",
+                    false,
+                ));
+            }
+        }
+    }
+    Ok(pixels)
+}
+
 fn apply_ordered_color_matrices(
     pixels: &mut [u8],
-    list: &ForegroundEffectList,
+    effects: &[ForegroundEffect],
 ) -> Result<(), BackendError> {
     for pixel in pixels.chunks_exact_mut(4) {
         let alpha = f32::from(pixel[3]) / 255.0;
@@ -444,7 +568,7 @@ fn apply_ordered_color_matrices(
                 alpha,
             ]
         };
-        for effect in &list.functions {
+        for effect in effects {
             let ForegroundEffect::Color(_) = effect else {
                 return Err(effect_error(
                     BackendErrorKind::UnsupportedCapability,
@@ -713,7 +837,7 @@ mod tests {
 
     fn filtered(input: [u8; 4], effects: &[(ColorEffectKind, f32)]) -> [u8; 4] {
         let mut pixels = input;
-        apply_ordered_color_matrices(&mut pixels, &list(effects)).unwrap();
+        apply_ordered_color_matrices(&mut pixels, &list(effects).functions).unwrap();
         pixels
     }
 

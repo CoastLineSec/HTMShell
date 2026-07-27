@@ -2,16 +2,17 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <title>HTMShell foreground color filter reference</title>
+    <title>HTMShell foreground filter reference</title>
     <link rel="stylesheet" href="style.css">
   </head>
   <body>
     <main id="reference-grid" class="reference">
       <header>
         <p class="eyebrow">ENCODED SRGB CPU REFERENCE</p>
-        <h1>Foreground color filters</h1>
-        <p>Each labeled tile uses the same local artwork and readable unfiltered label.</p>
+        <h1>Foreground filters</h1>
+        <p>Each labeled tile keeps its explanatory label outside the filtered SourceGraphic.</p>
       </header>
+      <h2 class="section-heading">Color functions</h2>
       <section class="grid" aria-label="Foreground color filter samples">
         <figure class="sample plain"><div class="art"><img src="assets/palette.svg" alt=""></div><figcaption>Plain reference</figcaption></figure>
         <figure class="sample brightness"><div class="art"><img src="assets/palette.svg" alt=""></div><figcaption>brightness(1.35)</figcaption></figure>
@@ -29,6 +30,22 @@
         <figure class="sample nested"><div class="outer"><div class="art"><img src="assets/palette.svg" alt=""></div></div><figcaption>nested color filters</figcaption></figure>
         <figure class="sample filtered-text"><div class="art words">Filtered text</div><figcaption>text SourceGraphic</figcaption></figure>
         <figure class="sample raster"><div class="art"><img src="assets/alpha-grid.png" alt=""></div><figcaption>raster image SourceGraphic</figcaption></figure>
+      </section>
+      <h2 class="section-heading">Bounded blur</h2>
+      <section class="grid blur-grid" aria-label="Foreground blur filter samples">
+        <figure class="sample blur-small"><div class="art"><img src="assets/palette.svg" alt=""></div><figcaption>blur(1px)</figcaption></figure>
+        <figure class="sample blur-medium"><div class="art"><img src="assets/palette.svg" alt=""></div><figcaption>blur(3px)</figcaption></figure>
+        <figure class="sample blur-large"><div class="art"><img src="assets/palette.svg" alt=""></div><figcaption>blur(8px)</figcaption></figure>
+        <figure class="sample blur-bright"><div class="art"><img src="assets/palette.svg" alt=""></div><figcaption>blur then brightness</figcaption></figure>
+        <figure class="sample bright-blur"><div class="art"><img src="assets/palette.svg" alt=""></div><figcaption>brightness then blur</figcaption></figure>
+        <figure class="sample blur-repeated"><div class="art"><img src="assets/palette.svg" alt=""></div><figcaption>repeated blur</figcaption></figure>
+        <figure class="sample blur-text"><div class="art words">Blurred text</div><figcaption>text SourceGraphic</figcaption></figure>
+        <figure class="sample blur-svg"><div class="art"><img src="assets/palette.svg" alt=""></div><figcaption>local SVG</figcaption></figure>
+        <figure class="sample blur-raster"><div class="art"><img src="assets/alpha-grid.png" alt=""></div><figcaption>raster image</figcaption></figure>
+        <figure class="sample blur-shadow"><div class="art"><img src="assets/palette.svg" alt=""></div><figcaption>existing box shadow</figcaption></figure>
+        <figure class="sample blur-clipped"><div class="art"><img src="assets/palette.svg" alt=""></div><figcaption>external rounded clip</figcaption></figure>
+        <figure class="sample blur-transformed"><div class="art"><img src="assets/palette.svg" alt=""></div><figcaption>transform after blur</figcaption></figure>
+        <figure class="sample blur-nested"><div class="outer"><div class="art"><img src="assets/palette.svg" alt=""></div></div><figcaption>nested blur</figcaption></figure>
       </section>
     </main>
   </body>

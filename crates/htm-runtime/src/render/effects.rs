@@ -129,19 +129,24 @@ pub struct ForegroundEffectCoverage {
 
 impl ForegroundEffectCoverage {
     pub fn for_list(list: &ForegroundEffectList) -> Self {
+        let contains_drop_shadow = list
+            .functions
+            .iter()
+            .any(|effect| matches!(effect, ForegroundEffect::DropShadow(_)));
         Self {
             model_ready: true,
-            cpu: if list.is_visual_identity()
-                || list
-                    .functions
-                    .iter()
-                    .all(|effect| matches!(effect, ForegroundEffect::Color(_)))
-            {
+            cpu: if !contains_drop_shadow
+                && list.functions.iter().all(|effect| {
+                    matches!(
+                        effect,
+                        ForegroundEffect::Color(_) | ForegroundEffect::Blur(_)
+                    )
+                }) {
                 ForegroundEffectBackendCoverage::Native
             } else {
                 ForegroundEffectBackendCoverage::Pending
             },
-            gpu: if list.is_visual_identity() {
+            gpu: if !contains_drop_shadow && list.is_visual_identity() {
                 ForegroundEffectBackendCoverage::Native
             } else {
                 ForegroundEffectBackendCoverage::CpuFrameFallbackRequired
@@ -1171,15 +1176,26 @@ mod tests {
     }
 
     #[test]
-    fn coverage_distinguishes_cpu_color_execution_from_spatial_pending_and_gpu_fallback() {
+    fn coverage_distinguishes_cpu_blur_execution_from_drop_shadow_pending_and_gpu_fallback() {
         let identity = list(vec![scalar(ColorEffectKind::Brightness, 1.0)]);
         let color = list(vec![scalar(ColorEffectKind::Invert, 1.0)]);
-        let spatial = list(vec![
+        let blur = list(vec![
             scalar(ColorEffectKind::Brightness, 1.1),
             ForegroundEffect::Blur(BlurEffect {
                 sigma: CanonicalF32::new(2.0).unwrap(),
             }),
         ]);
+        let drop_shadow = list(vec![ForegroundEffect::DropShadow(DropShadowEffect {
+            offset_x: CanonicalF32::new(1.0).unwrap(),
+            offset_y: CanonicalF32::new(1.0).unwrap(),
+            sigma: CanonicalF32::new(2.0).unwrap(),
+            color: EffectColor {
+                red: CanonicalF32::new(0.0).unwrap(),
+                green: CanonicalF32::new(0.0).unwrap(),
+                blue: CanonicalF32::new(0.0).unwrap(),
+                alpha: CanonicalF32::new(1.0).unwrap(),
+            },
+        })]);
         assert_eq!(
             ForegroundEffectCoverage::for_list(&identity),
             ForegroundEffectCoverage {
@@ -1197,7 +1213,15 @@ mod tests {
             }
         );
         assert_eq!(
-            ForegroundEffectCoverage::for_list(&spatial),
+            ForegroundEffectCoverage::for_list(&blur),
+            ForegroundEffectCoverage {
+                model_ready: true,
+                cpu: ForegroundEffectBackendCoverage::Native,
+                gpu: ForegroundEffectBackendCoverage::CpuFrameFallbackRequired,
+            }
+        );
+        assert_eq!(
+            ForegroundEffectCoverage::for_list(&drop_shadow),
             ForegroundEffectCoverage {
                 model_ready: true,
                 cpu: ForegroundEffectBackendCoverage::Pending,
