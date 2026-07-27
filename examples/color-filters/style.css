@@ -1,0 +1,106 @@
+:root {
+  color: #f5f7ff;
+  background: transparent;
+  font-family: "DejaVu Sans", sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html,
+body {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  background: transparent;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.reference {
+  width: min(980px, 100%);
+  padding: 24px;
+  border: 1px solid #536381;
+  border-radius: 24px;
+  background: #121928;
+}
+
+header { margin-bottom: 18px; }
+h1 { margin: 4px 0; font-size: 28px; }
+header p { margin: 0; color: #b9c4da; }
+.eyebrow { color: #8fd7ff; font-size: 11px; letter-spacing: 1.5px; }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  gap: 14px;
+}
+
+.sample {
+  min-width: 0;
+  margin: 0;
+}
+
+.art {
+  display: flex;
+  width: 100%;
+  height: 92px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid #7181a1;
+  border-radius: 16px;
+  background: #31415d;
+}
+
+.art img { width: 78px; height: 78px; }
+
+figcaption {
+  min-height: 32px;
+  padding: 7px 3px 0;
+  color: #edf2ff;
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.brightness .art { filter: brightness(1.35); }
+.contrast .art { filter: contrast(1.35); }
+.grayscale .art { filter: grayscale(1); }
+.hue .art { filter: hue-rotate(90deg); }
+.invert .art { filter: invert(1); }
+.opacity-filter .art { filter: opacity(55%); }
+.saturate .art { filter: saturate(1.8); }
+.sepia .art { filter: sepia(1); }
+.ordered .art { filter: brightness(1.4) contrast(1.2); }
+.repeated .art { filter: brightness(1.1) brightness(1.1); }
+
+.clipped {
+  overflow: hidden;
+  border-radius: 18px;
+}
+
+.clipped .art {
+  filter: hue-rotate(0.25turn) saturate(1.3);
+  transform: rotate(-4deg) scale(1.06);
+}
+
+.shadowed .art {
+  box-shadow: 7px 7px 12px rgb(0 0 0 / 60%);
+  filter: brightness(1.2) saturate(1.25);
+}
+
+.nested .outer { filter: invert(18%); }
+.nested .art { filter: saturate(1.5) contrast(1.1); }
+
+.words {
+  color: #ffb765;
+  font-size: 18px;
+  font-weight: 700;
+  filter: hue-rotate(100deg) contrast(1.15);
+}
+
+.raster .art { filter: invert(0.35) saturate(1.5); }

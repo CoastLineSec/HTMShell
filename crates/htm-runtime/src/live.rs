@@ -6439,6 +6439,58 @@ mod tests {
     }
 
     #[test]
+    fn live_cpu_color_filters_use_the_reference_compositor_and_return_to_idle() {
+        let mut live = LiveDocument::load(fixture(), 640, 480).unwrap();
+        let before = live.render().unwrap();
+        let bounds = live.snapshot().unwrap().card_bounds;
+        let x = (bounds.x + 12.0).floor() as usize;
+        let y = (bounds.y + 12.0).floor() as usize;
+        let offset = (y * 640 + x) * 4;
+        let source: [u8; 4] = before.premultiplied_rgba[offset..offset + 4]
+            .try_into()
+            .unwrap();
+        assert!(source[3] > 0);
+
+        let card = live
+            .document
+            .query_selector("#shell-card")
+            .unwrap()
+            .unwrap();
+        live.document.mutate().set_attribute(
+            card,
+            QualName {
+                prefix: None,
+                ns: blitz_dom::Namespace::from(""),
+                local: LocalName::from("style"),
+            },
+            "filter:invert(1)",
+        );
+        live.resolve();
+        let filtered = live.render().unwrap();
+        let actual: [u8; 4] = filtered.premultiplied_rgba[offset..offset + 4]
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            actual,
+            [
+                source[3] - source[0],
+                source[3] - source[1],
+                source[3] - source[2],
+                source[3],
+            ]
+        );
+        assert!(
+            live.render_pending_for(
+                LiveRenderRequest::new(640, 480, LIVE_SCALE_DENOMINATOR).unwrap(),
+                live.document_identity.serial,
+                1,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
     fn rendered_frame_is_premultiplied_rgba_and_has_input_region() {
         let mut live = LiveDocument::load(fixture(), 640, 480).unwrap();
         let frame = live.render().unwrap();
@@ -6465,7 +6517,32 @@ mod tests {
     #[cfg(feature = "gpu-renderer")]
     #[test]
     fn live_gpu_preparation_is_provisional_and_cpu_fallback_is_complete() {
+        let mut reference = LiveDocument::load(fixture(), 640, 480).unwrap();
+        let reference_frame = reference.render().unwrap();
+        let bounds = reference.snapshot().unwrap().card_bounds;
+        let x = (bounds.x + 12.0).floor() as usize;
+        let y = (bounds.y + 12.0).floor() as usize;
+        let offset = (y * 640 + x) * 4;
+        let source: [u8; 4] = reference_frame.premultiplied_rgba[offset..offset + 4]
+            .try_into()
+            .unwrap();
+
         let mut live = LiveDocument::load(fixture(), 640, 480).unwrap();
+        let card = live
+            .document
+            .query_selector("#shell-card")
+            .unwrap()
+            .unwrap();
+        live.document.mutate().set_attribute(
+            card,
+            QualName {
+                prefix: None,
+                ns: blitz_dom::Namespace::from(""),
+                local: LocalName::from("style"),
+            },
+            "filter:invert(1)",
+        );
+        live.resolve();
         let request = LiveRenderRequest::new(640, 480, LIVE_SCALE_DENOMINATOR).unwrap();
         let prepared = live
             .prepare_gpu_pending_for(request, 51, 7)
@@ -6490,6 +6567,15 @@ mod tests {
         let frame = live.render_gpu_frame_on_cpu(replacement).unwrap();
         assert_eq!(frame.generation, 1);
         assert_eq!(frame.premultiplied_rgba.len(), 640 * 480 * 4);
+        assert_eq!(
+            &frame.premultiplied_rgba[offset..offset + 4],
+            &[
+                source[3] - source[0],
+                source[3] - source[1],
+                source[3] - source[2],
+                source[3],
+            ]
+        );
         assert_eq!(live.frame_generation, 1);
         assert!(
             live.prepare_gpu_pending_for(request, 51, 7)

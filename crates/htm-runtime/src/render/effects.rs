@@ -115,6 +115,7 @@ pub const FOREGROUND_EFFECT_COMPOSITION_ORDER: [ForegroundEffectCompositionStage
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ForegroundEffectBackendCoverage {
+    Native,
     Pending,
     CpuFrameFallbackRequired,
 }
@@ -127,11 +128,26 @@ pub struct ForegroundEffectCoverage {
 }
 
 impl ForegroundEffectCoverage {
-    pub const MODEL_ONLY: Self = Self {
-        model_ready: true,
-        cpu: ForegroundEffectBackendCoverage::Pending,
-        gpu: ForegroundEffectBackendCoverage::CpuFrameFallbackRequired,
-    };
+    pub fn for_list(list: &ForegroundEffectList) -> Self {
+        Self {
+            model_ready: true,
+            cpu: if list.is_visual_identity()
+                || list
+                    .functions
+                    .iter()
+                    .all(|effect| matches!(effect, ForegroundEffect::Color(_)))
+            {
+                ForegroundEffectBackendCoverage::Native
+            } else {
+                ForegroundEffectBackendCoverage::Pending
+            },
+            gpu: if list.is_visual_identity() {
+                ForegroundEffectBackendCoverage::Native
+            } else {
+                ForegroundEffectBackendCoverage::CpuFrameFallbackRequired
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1152,6 +1168,42 @@ mod tests {
         let active = list(vec![scalar(ColorEffectKind::Brightness, 1.1)]);
         assert!(!ForegroundEffectLayerMetadata::for_list(&identity).offscreen_layer_required);
         assert!(ForegroundEffectLayerMetadata::for_list(&active).offscreen_layer_required);
+    }
+
+    #[test]
+    fn coverage_distinguishes_cpu_color_execution_from_spatial_pending_and_gpu_fallback() {
+        let identity = list(vec![scalar(ColorEffectKind::Brightness, 1.0)]);
+        let color = list(vec![scalar(ColorEffectKind::Invert, 1.0)]);
+        let spatial = list(vec![
+            scalar(ColorEffectKind::Brightness, 1.1),
+            ForegroundEffect::Blur(BlurEffect {
+                sigma: CanonicalF32::new(2.0).unwrap(),
+            }),
+        ]);
+        assert_eq!(
+            ForegroundEffectCoverage::for_list(&identity),
+            ForegroundEffectCoverage {
+                model_ready: true,
+                cpu: ForegroundEffectBackendCoverage::Native,
+                gpu: ForegroundEffectBackendCoverage::Native,
+            }
+        );
+        assert_eq!(
+            ForegroundEffectCoverage::for_list(&color),
+            ForegroundEffectCoverage {
+                model_ready: true,
+                cpu: ForegroundEffectBackendCoverage::Native,
+                gpu: ForegroundEffectBackendCoverage::CpuFrameFallbackRequired,
+            }
+        );
+        assert_eq!(
+            ForegroundEffectCoverage::for_list(&spatial),
+            ForegroundEffectCoverage {
+                model_ready: true,
+                cpu: ForegroundEffectBackendCoverage::Pending,
+                gpu: ForegroundEffectBackendCoverage::CpuFrameFallbackRequired,
+            }
+        );
     }
 
     #[test]

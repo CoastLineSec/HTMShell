@@ -1,5 +1,13 @@
 # Type reference
 
+## `HTMShell.CSS`
+
+Bounded CSS rendering behavior.
+
+- [`filter`](HTMShell.CSS/Filter.md)
+- [Color filter functions](HTMShell.CSS/ColorFilterFunctions.md)
+
+
 ## `HTMShell`
 
 Manifest and surface types.

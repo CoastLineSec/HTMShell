@@ -162,6 +162,10 @@ fn public_documentation_links_and_example_paths_resolve() {
         "examples/audio-control-center/panel.html",
         "examples/audio-control-center/overlay.html",
         "examples/audio-control-center/style.css",
+        "examples/color-filters/index.html",
+        "examples/color-filters/style.css",
+        "examples/color-filters/assets/palette.svg",
+        "examples/color-filters/assets/alpha-grid.png",
     ] {
         assert!(
             root.join(path).is_file(),
@@ -198,6 +202,93 @@ fn public_documentation_style_is_safe_and_page_shape_is_stable() {
             file.display()
         );
     }
+}
+
+#[test]
+fn foreground_color_filter_docs_and_example_cover_the_complete_rendered_subset() {
+    let root = workspace_root();
+    let guide = fs::read_to_string(root.join("docs/guide/visual-effects.md")).unwrap();
+    let reference = read_joined(&markdown_files(&root.join("docs/types/HTMShell.CSS")));
+    let html = fs::read_to_string(root.join("examples/color-filters/index.html")).unwrap();
+    let css = fs::read_to_string(root.join("examples/color-filters/style.css")).unwrap();
+    let svg = fs::read_to_string(root.join("examples/color-filters/assets/palette.svg")).unwrap();
+    let public = format!("{guide}\n{reference}\n{html}\n{css}");
+
+    for function in [
+        "brightness()",
+        "contrast()",
+        "grayscale()",
+        "hue-rotate()",
+        "invert()",
+        "opacity()",
+        "saturate()",
+        "sepia()",
+    ] {
+        assert!(
+            public.contains(function),
+            "missing rendered filter: {function}"
+        );
+    }
+    for statement in [
+        "left to right",
+        "encoded sRGB",
+        "complete SourceGraphic",
+        "box shadows",
+        "complete declaration",
+        "1,024 UTF-8 bytes",
+        "at most 16 functions",
+        "not yet faithfully rendered",
+        "backdrop-filter` is not supported",
+        "distinct from the `opacity` property",
+    ] {
+        assert!(
+            public.contains(statement),
+            "missing filter boundary: {statement}"
+        );
+    }
+    for syntax in [
+        "brightness(1.35)",
+        "contrast(1.35)",
+        "grayscale(1)",
+        "hue-rotate(90deg)",
+        "invert(1)",
+        "opacity(55%)",
+        "saturate(1.8)",
+        "sepia(1)",
+    ] {
+        assert!(css.contains(syntax), "example omits {syntax}");
+    }
+    assert!(css.matches("brightness(1.1)").count() >= 2);
+    assert!(html.contains("nested color filters"));
+    assert!(html.contains("Filtered text"));
+    assert!(html.contains("alpha-grid.png"));
+    assert!(css.contains("box-shadow:"));
+    assert!(css.contains("overflow: hidden"));
+    assert!(css.contains("transform:"));
+    assert!(svg.contains("<svg"));
+    for forbidden in [
+        "filter: blur(",
+        "filter: drop-shadow(",
+        "backdrop-filter",
+        "<script",
+    ] {
+        assert!(!format!("{html}\n{css}").contains(forbidden));
+    }
+
+    htm_runtime::run_package_with_options(
+        root.join("examples/color-filters"),
+        htm_runtime::ExperimentOptions {
+            viewport: htm_runtime::ViewportSpec {
+                logical_width: 1024,
+                logical_height: 768,
+                ..htm_runtime::ViewportSpec::default()
+            },
+            render_png: true,
+            run_interaction: false,
+            output_directory: None,
+        },
+    )
+    .expect("color-filter example CPU render");
 }
 
 #[test]

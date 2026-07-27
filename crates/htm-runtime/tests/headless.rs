@@ -344,6 +344,24 @@ fn diagnostics_and_png_are_repeatable_in_one_environment() {
 }
 
 #[test]
+fn color_filter_reference_matches_the_tracked_cpu_golden() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/color-filters");
+    let options = ExperimentOptions {
+        render_png: true,
+        run_interaction: false,
+        output_directory: None,
+        ..ExperimentOptions::default()
+    };
+    let first = run_package_with_options(&root, options.clone()).expect("first filtered run");
+    let second = run_package_with_options(&root, options).expect("second filtered run");
+    assert_eq!(first.artifacts.len(), 1);
+    assert_eq!(first.artifacts[0].png, second.artifacts[0].png);
+    let expected =
+        std::fs::read(root.join("output/initial.png")).expect("tracked color-filter CPU golden");
+    assert_eq!(first.artifacts[0].png.as_deref(), Some(expected.as_slice()));
+}
+
+#[test]
 fn retained_renderer_matches_the_tracked_basic_shell_pixels() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/basic-shell");
     let run = run_package_with_options(

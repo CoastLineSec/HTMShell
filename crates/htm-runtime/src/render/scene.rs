@@ -567,12 +567,13 @@ pub(crate) fn build_retained_scene(
                         .map(|bounds| intersect_rect(&bounds, &effective_clip))
                         .unwrap_or_else(|_| visual.clone());
                     let future_layer = ForegroundEffectLayerMetadata::for_list(&list);
+                    let coverage = ForegroundEffectCoverage::for_list(&list);
                     effects.push(SceneEffect::ForegroundFilter {
                         list,
                         source_graphic_bounds: visual.clone(),
                         filtered_bounds,
                         nesting_depth: u8::try_from(filter_depth).unwrap_or(u8::MAX),
-                        coverage: ForegroundEffectCoverage::MODEL_ONLY,
+                        coverage,
                         future_layer,
                     });
                 }

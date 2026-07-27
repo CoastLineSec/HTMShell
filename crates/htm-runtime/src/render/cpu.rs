@@ -1,3 +1,7 @@
+use super::cpu_effects::{
+    CpuEffectPlan, CpuEffectScratch, CpuEffectStatistics, collect_effect_plans,
+    execute_color_effects,
+};
 use super::{
     BackendError, BackendErrorKind, DamageRegion, FramePlan, FrameReason, FrameReasonSet,
     PixelFormat, RenderResult, RenderSurfaceId, RenderTarget, Renderer, RetainedScene,
@@ -24,6 +28,9 @@ pub(crate) struct CpuPreparedScene {
 pub(super) struct CpuReferenceRenderer {
     prepared: BTreeMap<SceneRevision, CpuPreparedScene>,
     targets: BTreeMap<RenderSurfaceId, RenderTarget>,
+    effect_plans: BTreeMap<SceneRevision, Vec<CpuEffectPlan>>,
+    effect_scratch: CpuEffectScratch,
+    last_effect_statistics: CpuEffectStatistics,
 }
 
 impl Renderer for CpuReferenceRenderer {
@@ -68,6 +75,8 @@ impl Renderer for CpuReferenceRenderer {
                 true,
             ));
         }
+        self.effect_plans
+            .insert(plan.scene_revision, collect_effect_plans(&plan.scene));
         self.prepared.insert(prepared.revision, prepared);
         Ok(())
     }
@@ -97,8 +106,24 @@ impl Renderer for CpuReferenceRenderer {
             )
         })?;
         let scale = f64::from(plan.scale_numerator) / f64::from(plan.scale_denominator);
+        let plans = self.effect_plans.get(&plan.scene_revision).ok_or_else(|| {
+            BackendError::new(
+                BackendErrorKind::ResourcePreparation,
+                "CPU effect plans are unavailable for the requested scene revision",
+                true,
+            )
+        })?;
+        let (recording, statistics) = execute_color_effects(
+            &prepared.recording,
+            plans,
+            target.width,
+            target.height,
+            scale,
+            &mut self.effect_scratch,
+        )?;
+        self.last_effect_statistics = statistics;
         let pixels = render_to_buffer::<VelloCpuImageRenderer, _>(
-            |target| target.append_scene(prepared.recording.clone(), Affine::scale(scale)),
+            |target| target.append_scene(recording, Affine::IDENTITY),
             target.width,
             target.height,
         );
@@ -123,12 +148,17 @@ impl Renderer for CpuReferenceRenderer {
             let newest = self.prepared.keys().next_back().copied();
             self.prepared
                 .retain(|revision, _| Some(*revision) == newest);
+            self.effect_plans
+                .retain(|revision, _| Some(*revision) == newest);
         }
         Ok(())
     }
 
     fn reset(&mut self) -> Result<(), BackendError> {
         self.prepared.clear();
+        self.effect_plans.clear();
+        self.effect_scratch = CpuEffectScratch::default();
+        self.last_effect_statistics = CpuEffectStatistics::default();
         self.targets.clear();
         Ok(())
     }
@@ -139,6 +169,9 @@ impl Renderer for CpuReferenceRenderer {
 
     fn shutdown(&mut self) {
         self.prepared.clear();
+        self.effect_plans.clear();
+        self.effect_scratch = CpuEffectScratch::default();
+        self.last_effect_statistics = CpuEffectStatistics::default();
         self.targets.clear();
     }
 }
@@ -530,6 +563,49 @@ mod tests {
         )
     }
 
+    fn render_html(html: &str, width: u32, height: u32) -> CpuFrame {
+        let mut document = HtmlDocument::from_html(
+            html,
+            DocumentConfig {
+                viewport: Some(Viewport::new(width, height, 1.0, ColorScheme::Dark)),
+                html_parser_provider: Some(Arc::new(HtmlProvider)),
+                style_threading: StyleThreading::Sequential,
+                ..Default::default()
+            },
+        );
+        document.set_incremental_layout(true);
+        document.resolve(0.0);
+        let identities = IdentityRegistry::from_document(&document);
+        CpuRenderSession::default()
+            .render_document(
+                &mut document,
+                &identities,
+                ExperimentalDocumentIdentity { serial: 19 },
+                ViewportSpec {
+                    logical_width: width,
+                    logical_height: height,
+                    ..ViewportSpec::default()
+                },
+                RenderSurfaceId {
+                    instance: 21,
+                    generation: 1,
+                },
+                width,
+                height,
+                120,
+                120,
+                FrameReasonSet::new(),
+                true,
+            )
+            .unwrap()
+            .unwrap()
+    }
+
+    fn pixel(frame: &CpuFrame, width: usize, x: usize, y: usize) -> [u8; 4] {
+        let offset = (y * width + x) * 4;
+        frame.pixels[offset..offset + 4].try_into().unwrap()
+    }
+
     #[test]
     fn reference_pixels_match_the_prior_direct_cpu_path() {
         let mut document = document();
@@ -550,6 +626,424 @@ mod tests {
         assert_eq!(actual.pixels, expected);
         assert!(actual.full_raster);
         assert_eq!(actual.plan.damage, DamageRegion::Full);
+    }
+
+    #[test]
+    fn cpu_color_filter_renders_the_recorded_source_graphic() {
+        let mut document = HtmlDocument::from_html(
+            "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{width:20px;height:20px;background:rgb(64 128 192 / 50%);filter:brightness(2)}</style></head><body><div id=\"box\"></div></body></html>",
+            DocumentConfig {
+                viewport: Some(Viewport::new(40, 30, 1.0, ColorScheme::Dark)),
+                html_parser_provider: Some(Arc::new(HtmlProvider)),
+                style_threading: StyleThreading::Sequential,
+                ..Default::default()
+            },
+        );
+        document.set_incremental_layout(true);
+        document.resolve(0.0);
+        let identities = IdentityRegistry::from_document(&document);
+        let frame = CpuRenderSession::default()
+            .render_document(
+                &mut document,
+                &identities,
+                ExperimentalDocumentIdentity { serial: 9 },
+                ViewportSpec {
+                    logical_width: 40,
+                    logical_height: 30,
+                    ..ViewportSpec::default()
+                },
+                RenderSurfaceId {
+                    instance: 12,
+                    generation: 1,
+                },
+                40,
+                30,
+                120,
+                120,
+                FrameReasonSet::new(),
+                true,
+            )
+            .unwrap()
+            .unwrap();
+        let offset = (10 * 40 + 10) * 4;
+        assert_eq!(&frame.pixels[offset..offset + 4], &[64, 128, 128, 128]);
+    }
+
+    #[test]
+    fn ordered_repeated_nested_and_external_opacity_filters_are_distinct() {
+        let prefix = "<!doctype html><html><head><style>html,body{margin:0;background:transparent}";
+        let suffix =
+            "</style></head><body><div id=\"box\"><div id=\"child\"></div></div></body></html>";
+        let forward = render_html(
+            &format!(
+                "{prefix}#box{{width:20px;height:20px;background:#4080c0;filter:brightness(2) contrast(.5)}}{suffix}"
+            ),
+            30,
+            30,
+        );
+        let reverse = render_html(
+            &format!(
+                "{prefix}#box{{width:20px;height:20px;background:#4080c0;filter:contrast(.5) brightness(2)}}{suffix}"
+            ),
+            30,
+            30,
+        );
+        assert_eq!(pixel(&forward, 30, 10, 10), [128, 191, 191, 255]);
+        assert_eq!(pixel(&reverse, 30, 10, 10), [192, 255, 255, 255]);
+
+        let repeated = render_html(
+            &format!(
+                "{prefix}#box{{width:20px;height:20px;background:#204060;filter:brightness(2) brightness(2)}}{suffix}"
+            ),
+            30,
+            30,
+        );
+        assert_eq!(pixel(&repeated, 30, 10, 10), [128, 255, 255, 255]);
+
+        let nested = render_html(
+            &format!(
+                "{prefix}#box{{width:20px;height:20px;filter:invert(1)}}#child{{width:20px;height:20px;background:#800000;filter:brightness(.5)}}{suffix}"
+            ),
+            30,
+            30,
+        );
+        assert_eq!(pixel(&nested, 30, 10, 10), [191, 255, 255, 255]);
+
+        let opacity = render_html(
+            &format!(
+                "{prefix}#box{{width:20px;height:20px;background:#ff0000;filter:opacity(.5);opacity:.5}}{suffix}"
+            ),
+            30,
+            30,
+        );
+        assert_eq!(pixel(&opacity, 30, 10, 10), [64, 0, 0, 64]);
+    }
+
+    #[test]
+    fn source_graphic_includes_box_shadow_and_excludes_parent_and_sibling_pixels() {
+        let filtered = render_html(
+            "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#parent{width:30px;height:20px;background:#102030}#box{width:10px;height:10px;background:#ff0000;box-shadow:8px 0 0 rgb(0 0 0 / 50%);filter:invert(1)}#sibling{position:absolute;left:24px;top:0;width:6px;height:6px;background:#204060}</style></head><body><div id=\"parent\"><div id=\"box\"></div><div id=\"sibling\"></div></div></body></html>",
+            40,
+            30,
+        );
+        assert_eq!(pixel(&filtered, 40, 5, 5), [0, 255, 255, 255]);
+        assert_eq!(pixel(&filtered, 40, 15, 5), [136, 144, 152, 255]);
+        assert_eq!(pixel(&filtered, 40, 26, 3), [32, 64, 96, 255]);
+        assert_eq!(pixel(&filtered, 40, 20, 15), [16, 32, 48, 255]);
+    }
+
+    #[test]
+    fn external_clipping_and_transform_position_follow_color_filtering() {
+        let frame = render_html(
+            "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#clip{position:absolute;left:2px;top:2px;width:10px;height:10px;overflow:hidden;border-radius:2px}#box{width:12px;height:12px;background:#204060;filter:invert(1);transform:translate(4px,3px)}</style></head><body><div id=\"clip\"><div id=\"box\"></div></div></body></html>",
+            20,
+            20,
+        );
+        assert_eq!(pixel(&frame, 20, 7, 7), [223, 191, 159, 255]);
+        assert_eq!(pixel(&frame, 20, 3, 7), [0, 0, 0, 0]);
+        assert_eq!(pixel(&frame, 20, 13, 7), [0, 0, 0, 0]);
+        assert_eq!(pixel(&frame, 20, 7, 13), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn mixed_spatial_lists_are_not_partially_executed() {
+        let baseline = render_html(
+            "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{width:20px;height:20px;background:#204060}</style></head><body><div id=\"box\"></div></body></html>",
+            30,
+            30,
+        );
+        for filter in [
+            "brightness(2) blur(4px)",
+            "blur(4px) brightness(2)",
+            "contrast(2) drop-shadow(1px 1px 2px black)",
+            "drop-shadow(1px 1px 2px black) sepia(1)",
+        ] {
+            let filtered = render_html(
+                &format!(
+                    "<!doctype html><html><head><style>html,body{{margin:0;background:transparent}}#box{{width:20px;height:20px;background:#204060;filter:{filter}}}</style></head><body><div id=\"box\"></div></body></html>"
+                ),
+                30,
+                30,
+            );
+            assert_eq!(filtered.pixels, baseline.pixels);
+        }
+    }
+
+    #[test]
+    fn identity_filters_skip_effect_images_and_scratch_is_reused_then_reset() {
+        let html = "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{width:20px;height:20px;background:#204060;filter:brightness(1)}</style></head><body><div id=\"box\"></div></body></html>";
+        let mut document = HtmlDocument::from_html(
+            html,
+            DocumentConfig {
+                viewport: Some(Viewport::new(30, 30, 1.0, ColorScheme::Dark)),
+                html_parser_provider: Some(Arc::new(HtmlProvider)),
+                style_threading: StyleThreading::Sequential,
+                ..Default::default()
+            },
+        );
+        document.set_incremental_layout(true);
+        document.resolve(0.0);
+        let identities = IdentityRegistry::from_document(&document);
+        let mut session = CpuRenderSession::default();
+        let identity_started = Instant::now();
+        let frame = session
+            .render_document(
+                &mut document,
+                &identities,
+                ExperimentalDocumentIdentity { serial: 23 },
+                ViewportSpec {
+                    logical_width: 30,
+                    logical_height: 30,
+                    ..ViewportSpec::default()
+                },
+                RenderSurfaceId {
+                    instance: 24,
+                    generation: 1,
+                },
+                30,
+                30,
+                120,
+                120,
+                FrameReasonSet::new(),
+                true,
+            )
+            .unwrap()
+            .unwrap();
+        let identity_us = identity_started.elapsed().as_micros();
+        assert_eq!(pixel(&frame, 30, 10, 10), [32, 64, 96, 255]);
+        assert_eq!(
+            session.renderer.last_effect_statistics.identity_fast_paths,
+            1
+        );
+        assert_eq!(session.renderer.last_effect_statistics.layer_creations, 0);
+
+        let box_node = document.query_selector("#box").unwrap().unwrap();
+        document.mutate().set_attribute(
+            box_node,
+            blitz_dom::QualName {
+                prefix: None,
+                ns: blitz_dom::Namespace::from(""),
+                local: blitz_dom::LocalName::from("style"),
+            },
+            "background:#402010;filter:invert(1)",
+        );
+        document.resolve(0.0);
+        let allocation_started = Instant::now();
+        let changed = session
+            .render_document(
+                &mut document,
+                &identities,
+                ExperimentalDocumentIdentity { serial: 23 },
+                ViewportSpec {
+                    logical_width: 30,
+                    logical_height: 30,
+                    ..ViewportSpec::default()
+                },
+                RenderSurfaceId {
+                    instance: 24,
+                    generation: 1,
+                },
+                30,
+                30,
+                120,
+                120,
+                FrameReasonSet::new(),
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        let allocation_us = allocation_started.elapsed().as_micros();
+        assert_eq!(pixel(&changed, 30, 10, 10), [191, 223, 239, 255]);
+        assert_eq!(session.renderer.last_effect_statistics.layer_creations, 1);
+        assert_eq!(session.renderer.last_effect_statistics.layer_reuses, 0);
+
+        let reuse_started = Instant::now();
+        let repeated = session
+            .render_document(
+                &mut document,
+                &identities,
+                ExperimentalDocumentIdentity { serial: 23 },
+                ViewportSpec {
+                    logical_width: 30,
+                    logical_height: 30,
+                    ..ViewportSpec::default()
+                },
+                RenderSurfaceId {
+                    instance: 24,
+                    generation: 1,
+                },
+                30,
+                30,
+                120,
+                120,
+                FrameReasonSet::new(),
+                true,
+            )
+            .unwrap()
+            .unwrap();
+        let reuse_us = reuse_started.elapsed().as_micros();
+        assert_eq!(repeated.pixels, changed.pixels);
+        assert_eq!(session.renderer.last_effect_statistics.layer_reuses, 1);
+        eprintln!(
+            "cpu_color_filter_measurement identity_us={identity_us} allocation_us={allocation_us} reuse_us={reuse_us}"
+        );
+
+        session.reset_backend().unwrap();
+        let reset = session
+            .render_document(
+                &mut document,
+                &identities,
+                ExperimentalDocumentIdentity { serial: 23 },
+                ViewportSpec {
+                    logical_width: 30,
+                    logical_height: 30,
+                    ..ViewportSpec::default()
+                },
+                RenderSurfaceId {
+                    instance: 24,
+                    generation: 1,
+                },
+                30,
+                30,
+                120,
+                120,
+                FrameReasonSet::new(),
+                true,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(reset.pixels, changed.pixels);
+        assert_eq!(session.renderer.last_effect_statistics.layer_reuses, 0);
+    }
+
+    #[test]
+    fn document_replacement_clears_a_reused_effect_target() {
+        fn filtered_document(color: &str) -> HtmlDocument {
+            let mut document = HtmlDocument::from_html(
+                &format!(
+                    "<!doctype html><html><head><style>html,body{{margin:0;background:transparent}}#box{{width:20px;height:20px;background:{color};filter:invert(1)}}</style></head><body><div id=\"box\"></div></body></html>"
+                ),
+                DocumentConfig {
+                    viewport: Some(Viewport::new(30, 30, 1.0, ColorScheme::Dark)),
+                    html_parser_provider: Some(Arc::new(HtmlProvider)),
+                    style_threading: StyleThreading::Sequential,
+                    ..Default::default()
+                },
+            );
+            document.set_incremental_layout(true);
+            document.resolve(0.0);
+            document
+        }
+
+        let mut first_document = filtered_document("#ff0000");
+        let first_identities = IdentityRegistry::from_document(&first_document);
+        let mut session = CpuRenderSession::default();
+        let first = session
+            .render_document(
+                &mut first_document,
+                &first_identities,
+                ExperimentalDocumentIdentity { serial: 31 },
+                ViewportSpec {
+                    logical_width: 30,
+                    logical_height: 30,
+                    ..ViewportSpec::default()
+                },
+                RenderSurfaceId {
+                    instance: 26,
+                    generation: 1,
+                },
+                30,
+                30,
+                120,
+                120,
+                FrameReasonSet::new(),
+                true,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(pixel(&first, 30, 10, 10), [0, 255, 255, 255]);
+
+        let mut second_document = filtered_document("#00ff00");
+        let second_identities = IdentityRegistry::from_document(&second_document);
+        let second = session
+            .render_document(
+                &mut second_document,
+                &second_identities,
+                ExperimentalDocumentIdentity { serial: 32 },
+                ViewportSpec {
+                    logical_width: 30,
+                    logical_height: 30,
+                    ..ViewportSpec::default()
+                },
+                RenderSurfaceId {
+                    instance: 26,
+                    generation: 1,
+                },
+                30,
+                30,
+                120,
+                120,
+                FrameReasonSet::new(),
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(pixel(&second, 30, 10, 10), [255, 0, 255, 255]);
+        assert!(second.plan.delta.full_scene_replacement);
+        assert_eq!(session.renderer.last_effect_statistics.layer_reuses, 1);
+    }
+
+    #[test]
+    fn color_filters_preserve_pixels_at_supported_fractional_scales() {
+        let html = "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{width:20px;height:20px;background:#204060;filter:invert(1)}</style></head><body><div id=\"box\"></div></body></html>";
+        for (numerator, physical) in [(120_u32, 30_u32), (150, 38), (180, 45)] {
+            let mut document = HtmlDocument::from_html(
+                html,
+                DocumentConfig {
+                    viewport: Some(Viewport::new(30, 30, 1.0, ColorScheme::Dark)),
+                    html_parser_provider: Some(Arc::new(HtmlProvider)),
+                    style_threading: StyleThreading::Sequential,
+                    ..Default::default()
+                },
+            );
+            document.set_incremental_layout(true);
+            document.resolve(0.0);
+            let identities = IdentityRegistry::from_document(&document);
+            let frame = CpuRenderSession::default()
+                .render_document(
+                    &mut document,
+                    &identities,
+                    ExperimentalDocumentIdentity {
+                        serial: u64::from(numerator),
+                    },
+                    ViewportSpec {
+                        logical_width: 30,
+                        logical_height: 30,
+                        ..ViewportSpec::default()
+                    },
+                    RenderSurfaceId {
+                        instance: 25,
+                        generation: u64::from(numerator),
+                    },
+                    physical,
+                    physical,
+                    numerator,
+                    120,
+                    FrameReasonSet::new(),
+                    true,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                frame.pixels.len(),
+                physical as usize * physical as usize * 4
+            );
+            assert_eq!(
+                pixel(&frame, physical as usize, 10, 10),
+                [223, 191, 159, 255]
+            );
+            assert_eq!(frame.plan.damage, DamageRegion::Full);
+        }
     }
 
     #[test]

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" role="img" aria-label="Colored geometric palette">
+  <rect width="96" height="96" rx="22" fill="#ee6b5f"/>
+  <circle cx="34" cy="34" r="22" fill="#62d2a2"/>
+  <path d="M52 14 86 48 52 82 18 48Z" fill="#699bf7" fill-opacity=".82"/>
+  <circle cx="64" cy="62" r="13" fill="#ffd166" fill-opacity=".78"/>
+</svg>

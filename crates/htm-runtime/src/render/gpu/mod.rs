@@ -1317,12 +1317,13 @@ mod tests {
         )
         .unwrap();
         let future_layer = ForegroundEffectLayerMetadata::for_list(&list);
+        let coverage = ForegroundEffectCoverage::for_list(&list);
         SceneEffect::ForegroundFilter {
             list,
             source_graphic_bounds: bounds.clone(),
             filtered_bounds: bounds,
             nesting_depth: 1,
-            coverage: ForegroundEffectCoverage::MODEL_ONLY,
+            coverage,
             future_layer,
         }
     }
@@ -1353,6 +1354,28 @@ mod tests {
             None,
             &kurbo::Rect::new(4.0, 4.0, 52.0, 38.0),
         );
+        recording
+    }
+
+    fn filtered_solid_recording() -> anyrender::Scene {
+        let mut recording = anyrender::Scene::new();
+        let clip = kurbo::Rect::new(0.0, 0.0, 64.0, 48.0);
+        recording.push_layer(
+            BlendMode::default(),
+            1.0,
+            Affine::IDENTITY,
+            &clip,
+            Some(Arc::new(anyrender::Filter::empty())),
+            None,
+        );
+        recording.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            Color::from_rgba8(0x20, 0x70, 0xc0, 0xff),
+            None,
+            &kurbo::Rect::new(4.0, 4.0, 52.0, 38.0),
+        );
+        recording.pop_layer();
         recording
     }
 
@@ -2070,7 +2093,7 @@ mod tests {
         let mut facade = OffscreenRenderer::new(false);
         let prepared = CpuPreparedScene {
             revision: fallback_plan.scene_revision,
-            recording: solid_recording(),
+            recording: filtered_solid_recording(),
         };
         let (pixels, path) = facade
             .render(

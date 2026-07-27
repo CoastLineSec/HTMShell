@@ -20,6 +20,8 @@ shared-memory presentation consume the same retained scene and frame-plan
 contract. Exact CPU fixtures remain the source of truth for deterministic
 pixels.
 
+Color-only foreground filters isolate the complete element SourceGraphic in a bounded CPU image. The reference compositor applies normalized brightness, contrast, grayscale, hue rotation, invert, opacity, saturation, and sepia stages from left to right in encoded sRGB, clamps after every stage, and emits premultiplied RGBA8 once after the list. Spatial foreground filters and backdrop filters remain outside this execution path.
+
 The optional `gpu-renderer` build feature provides an experimental Vello
 backend. It supports offscreen rendering and deterministic readback for tests,
 and it can present directly to an existing Wayland layer-shell surface. The
@@ -29,8 +31,7 @@ rasterization, GPU readback, nor shared-memory presentation.
 
 Vello renders solid and rounded geometry, text, SVG, opacity, clips, affine
 transforms, background layers, and box shadows. Raster images are decoded by
-the existing bounded resource path and composed by the GPU. Foreground and
-backdrop filters request a complete CPU fallback so content is never silently
+the existing bounded resource path and composed by the GPU. Nonidentity foreground filters and backdrop filters request a complete CPU fallback so content is never silently
 omitted.
 
 ## Damage and presentation

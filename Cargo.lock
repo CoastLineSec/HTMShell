@@ -1046,6 +1046,7 @@ dependencies = [
  "blitz-traits",
  "cssparser",
  "kurbo",
+ "peniko",
  "png 0.18.1",
  "selectors",
  "serde",

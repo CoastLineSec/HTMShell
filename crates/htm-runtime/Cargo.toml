@@ -18,6 +18,7 @@ blitz-paint.workspace = true
 blitz-traits.workspace = true
 cssparser.workspace = true
 kurbo.workspace = true
+peniko.workspace = true
 png.workspace = true
 selectors.workspace = true
 serde.workspace = true

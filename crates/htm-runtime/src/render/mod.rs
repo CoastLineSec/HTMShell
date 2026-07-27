@@ -1,5 +1,6 @@
 mod contract;
 mod cpu;
+mod cpu_effects;
 mod damage;
 mod effects;
 mod frame;
