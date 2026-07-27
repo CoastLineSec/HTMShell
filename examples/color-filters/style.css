@@ -18,23 +18,23 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding: 10px;
 }
 
 .reference {
   width: min(1320px, 100%);
-  padding: 24px;
+  padding: 14px;
   border: 1px solid #536381;
   border-radius: 24px;
   background: #121928;
 }
 
-header { margin-bottom: 18px; }
+header { margin-bottom: 10px; }
 h1 { margin: 4px 0; font-size: 28px; }
 header p { margin: 0; color: #b9c4da; }
 .eyebrow { color: #8fd7ff; font-size: 11px; letter-spacing: 1.5px; }
 .section-heading {
-  margin: 14px 0 10px;
+  margin: 8px 0 6px;
   color: #b9c4da;
   font-size: 13px;
   letter-spacing: 1px;
@@ -42,8 +42,8 @@ header p { margin: 0; color: #b9c4da; }
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(8, minmax(120px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(10, minmax(104px, 1fr));
+  gap: 8px 12px;
 }
 
 .sample {
@@ -54,7 +54,7 @@ header p { margin: 0; color: #b9c4da; }
 .art {
   display: flex;
   width: 100%;
-  height: 92px;
+  height: 70px;
   align-items: center;
   justify-content: center;
   overflow: hidden;
@@ -66,8 +66,8 @@ header p { margin: 0; color: #b9c4da; }
 .art img { width: 78px; height: 78px; }
 
 figcaption {
-  min-height: 32px;
-  padding: 7px 3px 0;
+  min-height: 26px;
+  padding: 4px 3px 0;
   color: #edf2ff;
   font-size: 10px;
   line-height: 1.25;
@@ -139,3 +139,127 @@ figcaption {
 
 .blur-nested .outer { filter: blur(2px); }
 .blur-nested .art { filter: blur(1px); }
+
+.shadow-grid .art {
+  height: 70px;
+  overflow: visible;
+}
+
+.shadow-grid .art img {
+  width: 60px;
+  height: 60px;
+}
+
+.shadow-grid .subject {
+  display: flex;
+  width: 60px;
+  height: 60px;
+  align-items: center;
+  justify-content: center;
+}
+
+.shape {
+  display: block;
+  width: 54px;
+  height: 42px;
+  border: 2px solid #fff1ad;
+  border-radius: 15px;
+  background: #ff7b62;
+}
+
+.shadow-text .words {
+  filter: drop-shadow(5px 4px 2px rgb(0 0 0 / 80%));
+}
+
+.shadow-svg .subject {
+  filter: drop-shadow(6px 5px 2px #111827);
+}
+
+.shadow-raster .subject {
+  filter: drop-shadow(5px 5px 2px #020617);
+}
+
+.shadow-rounded .shape {
+  filter: drop-shadow(6px 5px 2px #151827);
+}
+
+.shadow-semitransparent .shape {
+  opacity: 0.55;
+  filter: drop-shadow(6px 5px 2px #0b1020);
+}
+
+.shadow-current {
+  color: #78d7ff;
+}
+
+.shadow-current .words {
+  color: #78d7ff;
+  filter: drop-shadow(5px 5px currentColor);
+}
+
+.shadow-translucent .subject {
+  filter: drop-shadow(6px 5px 3px rgb(255 84 146 / 45%));
+}
+
+.shadow-hard .shape {
+  filter: drop-shadow(7px 6px 0 #071020);
+}
+
+.shadow-soft .shape {
+  filter: drop-shadow(6px 6px 6px #071020);
+}
+
+.shadow-negative .shape {
+  filter: drop-shadow(-7px -5px 2px #071020);
+}
+
+.shadow-after-blur .subject {
+  filter: blur(2px) drop-shadow(7px 0 2px #ff557f);
+}
+
+.blur-after-shadow .subject {
+  filter: drop-shadow(7px 0 2px #ff557f) blur(2px);
+}
+
+.color-before-shadow .subject {
+  filter: grayscale(1) drop-shadow(5px 5px 2px #42d7ff);
+}
+
+.color-after-shadow .subject {
+  filter: drop-shadow(5px 5px 2px #42d7ff) grayscale(1);
+}
+
+.box-shadow-reference .shape {
+  box-shadow: 7px 6px 4px rgb(0 0 0 / 80%);
+  border-radius: 21px 6px 21px 6px;
+}
+
+.drop-shadow-reference .shape {
+  border-radius: 21px 6px 21px 6px;
+  filter: drop-shadow(7px 6px 4px rgb(0 0 0 / 80%));
+}
+
+.shadow-nested .outer {
+  display: block;
+  filter: drop-shadow(6px 5px 2px #080c18);
+}
+
+.shadow-nested .shape {
+  width: 46px;
+  height: 36px;
+  filter: drop-shadow(-4px 3px 1px #5ae0ff);
+}
+
+.shadow-clipped .art {
+  overflow: hidden;
+  border-radius: 18px;
+}
+
+.shadow-clipped .shape {
+  filter: drop-shadow(16px 0 4px #050913);
+}
+
+.shadow-transformed .shape {
+  filter: drop-shadow(7px 5px 2px #050913);
+  transform: rotate(-7deg) scale(1.05);
+}

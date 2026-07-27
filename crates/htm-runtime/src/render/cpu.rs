@@ -763,25 +763,59 @@ mod tests {
     }
 
     #[test]
-    fn drop_shadow_lists_are_not_partially_executed() {
-        let baseline = render_html(
-            "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{width:20px;height:20px;background:#204060}</style></head><body><div id=\"box\"></div></body></html>",
+    fn drop_shadow_uses_source_alpha_and_composites_below_the_source() {
+        let frame = render_html(
+            "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{position:absolute;left:8px;top:8px;width:6px;height:6px;background:#ff0000;border-radius:3px;filter:drop-shadow(5px 0 0 rgb(0 0 255 / 50%))}</style></head><body><div id=\"box\"></div></body></html>",
             30,
-            30,
+            24,
         );
-        for filter in [
-            "blur(4px) drop-shadow(1px 1px 2px black)",
-            "drop-shadow(1px 1px 2px black) blur(4px)",
-            "brightness(2) blur(4px) drop-shadow(1px 1px black)",
+        assert_eq!(pixel(&frame, 30, 11, 11), [255, 0, 0, 255]);
+        assert_eq!(pixel(&frame, 30, 16, 11), [0, 0, 128, 128]);
+        assert_eq!(pixel(&frame, 30, 19, 8), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn drop_shadow_retains_off_target_source_samples_that_move_into_view() {
+        let frame = render_html(
+            "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{position:absolute;left:-2px;top:6px;width:6px;height:6px;background:#ff0000;filter:drop-shadow(4px 0 0 black)}</style></head><body><div id=\"box\"></div></body></html>",
+            20,
+            18,
+        );
+        assert_eq!(pixel(&frame, 20, 5, 8), [0, 0, 0, 255]);
+        assert_eq!(pixel(&frame, 20, 9, 8), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn drop_shadow_resolves_current_color_and_preserves_order_with_color_and_blur() {
+        let prefix = "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{position:absolute;left:10px;top:10px;width:8px;height:8px;background:#804020;color:#00ff00;filter:";
+        let suffix = "}</style></head><body><div id=\"box\"></div></body></html>";
+        let current_color = render_html(
+            &format!("{prefix}drop-shadow(6px 0 0 currentColor){suffix}"),
+            36,
+            28,
+        );
+        assert_eq!(pixel(&current_color, 36, 21, 14), [0, 255, 0, 255]);
+
+        for (left_filter, right_filter) in [
+            (
+                "opacity(.5) drop-shadow(6px 0 1px black)",
+                "drop-shadow(6px 0 1px black) opacity(.5)",
+            ),
+            (
+                "blur(1px) drop-shadow(6px 0 1px red)",
+                "drop-shadow(6px 0 1px red) blur(1px)",
+            ),
+            (
+                "brightness(2) drop-shadow(6px 0 1px rgb(32 64 96))",
+                "drop-shadow(6px 0 1px rgb(32 64 96)) brightness(2)",
+            ),
         ] {
-            let filtered = render_html(
-                &format!(
-                    "<!doctype html><html><head><style>html,body{{margin:0;background:transparent}}#box{{width:20px;height:20px;background:#204060;filter:{filter}}}</style></head><body><div id=\"box\"></div></body></html>"
-                ),
-                30,
-                30,
+            let left = render_html(&format!("{prefix}{left_filter}{suffix}"), 36, 28);
+            let right = render_html(&format!("{prefix}{right_filter}{suffix}"), 36, 28);
+            assert_ne!(
+                left.pixels, right.pixels,
+                "{left_filter} must differ from {right_filter}"
             );
-            assert_eq!(filtered.pixels, baseline.pixels);
         }
     }
 
@@ -901,6 +935,121 @@ mod tests {
                 .blur_scratch_replacements
                 >= 2
         );
+    }
+
+    #[test]
+    fn nested_drop_shadows_execute_inside_out_with_independent_layers() {
+        let html = "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#parent{position:absolute;left:8px;top:8px;width:24px;height:20px;filter:drop-shadow(4px 0 1px red)}#child{margin:5px;width:10px;height:10px;background:#80c040;filter:drop-shadow(-3px 0 1px blue)}</style></head><body><div id=\"parent\"><div id=\"child\"></div></div></body></html>";
+        let mut document = HtmlDocument::from_html(
+            html,
+            DocumentConfig {
+                viewport: Some(Viewport::new(44, 36, 1.0, ColorScheme::Dark)),
+                html_parser_provider: Some(Arc::new(HtmlProvider)),
+                style_threading: StyleThreading::Sequential,
+                ..Default::default()
+            },
+        );
+        document.set_incremental_layout(true);
+        document.resolve(0.0);
+        let identities = IdentityRegistry::from_document(&document);
+        let mut session = CpuRenderSession::default();
+        let render = |session: &mut CpuRenderSession, document: &mut HtmlDocument| {
+            session
+                .render_document(
+                    document,
+                    &identities,
+                    ExperimentalDocumentIdentity { serial: 47 },
+                    ViewportSpec {
+                        logical_width: 44,
+                        logical_height: 36,
+                        ..ViewportSpec::default()
+                    },
+                    RenderSurfaceId {
+                        instance: 48,
+                        generation: 1,
+                    },
+                    44,
+                    36,
+                    120,
+                    120,
+                    FrameReasonSet::new(),
+                    true,
+                )
+                .unwrap()
+                .unwrap()
+        };
+        let first = render(&mut session, &mut document);
+        assert_eq!(
+            session.renderer.last_effect_statistics.drop_shadow_stages,
+            2
+        );
+        assert_eq!(
+            session.renderer.last_effect_statistics.shadow_blur_stages,
+            2
+        );
+        assert!(session.renderer.last_effect_statistics.shadow_mask_pixels > 0);
+        assert!(session.renderer.last_effect_statistics.shadow_scratch_bytes > 0);
+        assert!(first.pixels.chunks_exact(4).any(|pixel| pixel[0] > 0));
+        assert!(first.pixels.chunks_exact(4).any(|pixel| pixel[2] > 0));
+
+        let second = render(&mut session, &mut document);
+        assert_eq!(first.pixels, second.pixels);
+        assert!(
+            session
+                .renderer
+                .last_effect_statistics
+                .shadow_mask_replacements
+                >= 2
+        );
+    }
+
+    #[test]
+    fn drop_shadow_precedes_external_clip_opacity_and_transform() {
+        let clipped = render_html(
+            "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#clip{position:absolute;left:5px;top:5px;width:12px;height:12px;overflow:hidden;border-radius:2px}#box{margin:2px;width:6px;height:6px;background:#ff0000;filter:drop-shadow(8px 0 0 blue)}</style></head><body><div id=\"clip\"><div id=\"box\"></div></div></body></html>",
+            28,
+            24,
+        );
+        assert_eq!(pixel(&clipped, 28, 4, 10), [0, 0, 0, 0]);
+        assert!(pixel(&clipped, 28, 15, 10)[2] > 0);
+        assert_eq!(pixel(&clipped, 28, 18, 10), [0, 0, 0, 0]);
+
+        let transformed = render_html(
+            "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{position:absolute;left:2px;top:8px;width:6px;height:6px;background:#4080c0;filter:drop-shadow(7px 0 0 red);opacity:.5;transform:translateX(10px)}</style></head><body><div id=\"box\"></div></body></html>",
+            34,
+            24,
+        );
+        assert_eq!(pixel(&transformed, 34, 9, 11), [0, 0, 0, 0]);
+        let source = pixel(&transformed, 34, 15, 11);
+        assert!(source[3] >= 126 && source[3] <= 128);
+        let shadow = pixel(&transformed, 34, 22, 11);
+        assert!(shadow[0] >= 126 && shadow[0] <= 128);
+        assert_eq!(shadow[1], 0);
+        assert_eq!(shadow[2], 0);
+    }
+
+    #[test]
+    fn drop_shadow_is_deterministic_at_supported_fractional_scales() {
+        let html = "<!doctype html><html><head><style>html,body{margin:0;background:transparent}#box{position:absolute;left:8px;top:8px;width:8px;height:8px;background:rgb(255 96 32 / 75%);filter:drop-shadow(3.5px -1.5px 1.25px rgb(32 128 255 / 60%))}</style></head><body><div id=\"box\"></div></body></html>";
+        for (numerator, physical) in [(120_u32, 32_u32), (150, 40), (180, 48)] {
+            let first = render_html_scaled(html, 32, 32, physical, physical, numerator, 120);
+            let second = render_html_scaled(html, 32, 32, physical, physical, numerator, 120);
+            assert_eq!(first.pixels, second.pixels);
+            assert!(
+                first
+                    .pixels
+                    .chunks_exact(4)
+                    .any(|pixel| pixel[2] > pixel[0])
+            );
+            assert!(
+                first
+                    .pixels
+                    .chunks_exact(4)
+                    .all(|pixel| pixel[0] <= pixel[3]
+                        && pixel[1] <= pixel[3]
+                        && pixel[2] <= pixel[3])
+            );
+        }
     }
 
     #[test]

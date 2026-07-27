@@ -218,6 +218,7 @@ fn foreground_filter_docs_and_example_cover_the_complete_cpu_subset() {
         "blur()",
         "brightness()",
         "contrast()",
+        "drop-shadow()",
         "grayscale()",
         "hue-rotate()",
         "invert()",
@@ -238,8 +239,8 @@ fn foreground_filter_docs_and_example_cover_the_complete_cpu_subset() {
         "complete declaration",
         "1,024 UTF-8 bytes",
         "at most 16 functions",
-        "not yet faithfully rendered",
-        "backdrop-filter` is not supported",
+        "All ten",
+        "`backdrop-filter` are not supported",
         "distinct from the `opacity` property",
         "ceil(3 * sigma)",
         "transparent black",
@@ -263,20 +264,33 @@ fn foreground_filter_docs_and_example_cover_the_complete_cpu_subset() {
         "blur(1px)",
         "blur(3px)",
         "blur(8px)",
+        "drop-shadow(5px 4px 2px rgb(0 0 0 / 80%))",
+        "drop-shadow(5px 5px currentColor)",
+        "drop-shadow(7px 6px 0 #071020)",
+        "drop-shadow(-7px -5px 2px #071020)",
     ] {
         assert!(css.contains(syntax), "example omits {syntax}");
     }
     assert!(css.matches("brightness(1.1)").count() >= 2);
     assert!(html.contains("nested color filters"));
     assert!(html.contains("nested blur"));
+    assert!(html.contains("nested element shadows"));
     assert!(html.contains("Filtered text"));
     assert!(html.contains("Blurred text"));
+    assert!(html.contains("text silhouette"));
+    assert!(html.contains("SVG silhouette"));
+    assert!(html.contains("transparent raster holes"));
+    assert!(html.contains("box-shadow geometry"));
+    assert!(html.contains("drop-shadow silhouette"));
     assert!(html.contains("alpha-grid.png"));
     assert!(css.contains("box-shadow:"));
+    assert!(css.contains("drop-shadow("));
+    assert!(css.contains("blur(2px) drop-shadow("));
+    assert!(css.contains("drop-shadow(7px 0 2px #ff557f) blur(2px)"));
     assert!(css.contains("overflow: hidden"));
     assert!(css.contains("transform:"));
     assert!(svg.contains("<svg"));
-    for forbidden in ["filter: drop-shadow(", "backdrop-filter", "<script"] {
+    for forbidden in ["backdrop-filter", "<script"] {
         assert!(!format!("{html}\n{css}").contains(forbidden));
     }
 

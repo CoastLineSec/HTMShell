@@ -6548,6 +6548,50 @@ mod tests {
     }
 
     #[test]
+    fn live_cpu_drop_shadow_uses_the_reference_compositor_and_returns_to_idle() {
+        let mut live = LiveDocument::load(fixture(), 640, 480).unwrap();
+        let bounds = selector_bounds(&live, "#primary-action");
+        let before = live.render().unwrap();
+        let x = (bounds.x + bounds.width + 4.0).floor() as usize;
+        let y = (bounds.y + bounds.height / 2.0).floor() as usize;
+        let offset = (y * 640 + x) * 4;
+        let prior: [u8; 4] = before.premultiplied_rgba[offset..offset + 4]
+            .try_into()
+            .unwrap();
+        let button = live
+            .document
+            .query_selector("#primary-action")
+            .unwrap()
+            .unwrap();
+        live.document.mutate().set_attribute(
+            button,
+            QualName {
+                prefix: None,
+                ns: blitz_dom::Namespace::from(""),
+                local: LocalName::from("style"),
+            },
+            "filter:drop-shadow(8px 0 0 rgb(255 0 0 / 50%))",
+        );
+        live.resolve();
+        let filtered = live.render().unwrap();
+        let shadow: [u8; 4] = filtered.premultiplied_rgba[offset..offset + 4]
+            .try_into()
+            .unwrap();
+        assert_ne!(shadow, prior);
+        assert!(shadow[0] > prior[0]);
+        assert!(shadow[0] <= shadow[3]);
+        assert!(
+            live.render_pending_for(
+                LiveRenderRequest::new(640, 480, LIVE_SCALE_DENOMINATOR).unwrap(),
+                live.document_identity.serial,
+                1,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
     fn rendered_frame_is_premultiplied_rgba_and_has_input_region() {
         let mut live = LiveDocument::load(fixture(), 640, 480).unwrap();
         let frame = live.render().unwrap();
@@ -6678,6 +6722,48 @@ mod tests {
         assert_eq!(actual.generation, 1);
         assert!(
             live.prepare_gpu_pending_for(request, 61, 13)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    #[test]
+    fn live_gpu_drop_shadow_fallback_matches_the_complete_cpu_reference_frame() {
+        fn set_shadow(live: &mut LiveDocument) {
+            let card = live
+                .document
+                .query_selector("#shell-card")
+                .unwrap()
+                .unwrap();
+            live.document.mutate().set_attribute(
+                card,
+                QualName {
+                    prefix: None,
+                    ns: blitz_dom::Namespace::from(""),
+                    local: LocalName::from("style"),
+                },
+                "color:#20c080;filter:brightness(1.2) drop-shadow(8px 0 2px currentColor) blur(.5px)",
+            );
+            live.resolve();
+        }
+
+        let mut reference = LiveDocument::load(fixture(), 640, 480).unwrap();
+        set_shadow(&mut reference);
+        let expected = reference.render().unwrap();
+
+        let mut live = LiveDocument::load(fixture(), 640, 480).unwrap();
+        set_shadow(&mut live);
+        let request = LiveRenderRequest::new(640, 480, LIVE_SCALE_DENOMINATOR).unwrap();
+        let prepared = live
+            .prepare_gpu_pending_for(request, 71, 17)
+            .unwrap()
+            .expect("drop-shadow fallback plan");
+        let actual = live.render_gpu_frame_on_cpu(prepared).unwrap();
+        assert_eq!(actual.premultiplied_rgba, expected.premultiplied_rgba);
+        assert_eq!(actual.generation, 1);
+        assert!(
+            live.prepare_gpu_pending_for(request, 71, 17)
                 .unwrap()
                 .is_none()
         );

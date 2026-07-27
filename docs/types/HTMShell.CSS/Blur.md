@@ -36,6 +36,6 @@ The SourceGraphic includes the element background, border, content, descendants,
 
 Each effect image is limited to 4,096 physical pixels per dimension and 64 MiB. All live effect images and spatial scratch for one surface share a 256 MiB budget. Allocation failure reports a render error; it never substitutes an unblurred subtree.
 
-The optional experimental Vello path does not execute blur natively. A supported nonidentity color or blur list uses complete CPU-frame fallback. `drop-shadow()` remains pending, and a list containing it is not partially executed. `backdrop-filter`, filter animation, and transitions are unsupported.
+The optional experimental Vello path does not execute blur or any other foreground filter natively. A supported nonidentity foreground filter list uses complete CPU-frame fallback. `backdrop-filter`, filter animation, and transitions are unsupported.
 
 Blur can reduce readability and obscure visual focus indicators. Keep essential labels and focus feedback clear.

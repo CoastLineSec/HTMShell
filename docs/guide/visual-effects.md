@@ -5,6 +5,7 @@ HTMShell supports a bounded subset of the standard CSS `filter` property. The CP
 - `blur()`
 - `brightness()`
 - `contrast()`
+- `drop-shadow()`
 - `grayscale()`
 - `hue-rotate()`
 - `invert()`
@@ -38,13 +39,17 @@ Color operations run on straight RGBA values in encoded sRGB. Consecutive color 
 
 Blur processes premultiplied encoded-sRGB RGBA directly. It convolves every channel with the same spatial weights and samples transparent black beyond the SourceGraphic. Its finite support is `ceil(3 * sigma)` logical pixels on each side. Sigma values below 2 physical pixels use a direct separable Gaussian kernel. Values at or above 2 physical pixels use a deterministic three-box Gaussian approximation. The output always preserves `RGB <= alpha`, including fully transparent pixels.
 
+`drop-shadow()` derives a scalar mask from the alpha of the current ordered stage. It optionally blurs that mask with the same bounded blur implementation, offsets and colors it, then composites the current source above the shadow. The syntax accepts X and Y lengths, an optional blur sigma, and an optional color. The blur defaults to zero, and the color defaults to computed `currentColor`. One occurrence is permitted per list. Blur is limited to 64 logical pixels, and each offset is limited to plus or minus 256 logical pixels. Spread and inset forms are invalid.
+
+Drop shadow follows rendered alpha rather than box geometry. Transparent image holes, text glyphs, SVG silhouettes, descendants, completed child effects, and existing box shadows therefore shape its mask. This differs from `box-shadow`, which follows box geometry. Samples outside the current stage are transparent. Color alpha multiplies the mask, the colored shadow is premultiplied exactly once, and source-over composition keeps the shadow beneath the source.
+
 The element's external clip, element opacity, and transform apply after its filter list. Consequently, blur may extend outside the SourceGraphic before the external clip is applied. `filter: opacity(50%)` is distinct from the `opacity` property and both apply when both are present.
 
-CPU headless and CPU Wayland presentation use the same reference compositor. The optional experimental Vello path does not execute filters on the GPU yet; a supported nonidentity color or blur list selects one complete CPU-rendered frame instead.
+CPU headless and CPU Wayland presentation use the same reference compositor. The optional experimental Vello path does not execute filters on the GPU yet; a supported nonidentity foreground filter list selects one complete CPU-rendered frame instead.
 
 ## Current boundary
 
-`drop-shadow()` is parsed and retained but is not yet faithfully rendered. A list containing `drop-shadow()` remains pending as a complete ordered list; HTMShell does not apply its blur or color prefix. `backdrop-filter` is not supported.
+All ten functions in this bounded foreground profile render through the CPU reference compositor. URL filters, multiple drop shadows in one list, spread, inset shadows, and `backdrop-filter` are not supported.
 
 Foreground filters are static. Animation and transitions are not implemented.
 
@@ -52,4 +57,4 @@ Filter layers are bounded to 4,096 physical pixels per dimension and 64 MiB per 
 
 Filters can reduce contrast, obscure focus indicators, or make text difficult to read. Keep labels readable outside decorative filtered regions and preserve sufficient contrast.
 
-See the [filter reference](../types/HTMShell.CSS/Filter.md), [color function reference](../types/HTMShell.CSS/ColorFilterFunctions.md), and [`blur()` reference](../types/HTMShell.CSS/Blur.md). The [filter example](../../examples/color-filters/index.html) demonstrates the rendered subset.
+See the [filter reference](../types/HTMShell.CSS/Filter.md), [color function reference](../types/HTMShell.CSS/ColorFilterFunctions.md), [`blur()` reference](../types/HTMShell.CSS/Blur.md), and [`drop-shadow()` reference](../types/HTMShell.CSS/DropShadow.md). The [filter example](../../examples/color-filters/index.html) demonstrates the rendered subset.

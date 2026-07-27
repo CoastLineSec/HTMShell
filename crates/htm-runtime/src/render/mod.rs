@@ -2,6 +2,7 @@ mod contract;
 mod cpu;
 mod cpu_blur;
 mod cpu_effects;
+mod cpu_shadow;
 mod damage;
 mod effects;
 mod frame;

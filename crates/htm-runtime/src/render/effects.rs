@@ -129,24 +129,21 @@ pub struct ForegroundEffectCoverage {
 
 impl ForegroundEffectCoverage {
     pub fn for_list(list: &ForegroundEffectList) -> Self {
-        let contains_drop_shadow = list
-            .functions
-            .iter()
-            .any(|effect| matches!(effect, ForegroundEffect::DropShadow(_)));
         Self {
             model_ready: true,
-            cpu: if !contains_drop_shadow
-                && list.functions.iter().all(|effect| {
-                    matches!(
-                        effect,
-                        ForegroundEffect::Color(_) | ForegroundEffect::Blur(_)
-                    )
-                }) {
+            cpu: if list.functions.iter().all(|effect| {
+                matches!(
+                    effect,
+                    ForegroundEffect::Color(_)
+                        | ForegroundEffect::Blur(_)
+                        | ForegroundEffect::DropShadow(_)
+                )
+            }) {
                 ForegroundEffectBackendCoverage::Native
             } else {
                 ForegroundEffectBackendCoverage::Pending
             },
-            gpu: if !contains_drop_shadow && list.is_visual_identity() {
+            gpu: if list.is_visual_identity() {
                 ForegroundEffectBackendCoverage::Native
             } else {
                 ForegroundEffectBackendCoverage::CpuFrameFallbackRequired
@@ -1176,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_distinguishes_cpu_blur_execution_from_drop_shadow_pending_and_gpu_fallback() {
+    fn coverage_marks_all_bounded_foreground_effects_cpu_native_and_gpu_fallback() {
         let identity = list(vec![scalar(ColorEffectKind::Brightness, 1.0)]);
         let color = list(vec![scalar(ColorEffectKind::Invert, 1.0)]);
         let blur = list(vec![
@@ -1224,7 +1221,7 @@ mod tests {
             ForegroundEffectCoverage::for_list(&drop_shadow),
             ForegroundEffectCoverage {
                 model_ready: true,
-                cpu: ForegroundEffectBackendCoverage::Pending,
+                cpu: ForegroundEffectBackendCoverage::Native,
                 gpu: ForegroundEffectBackendCoverage::CpuFrameFallbackRequired,
             }
         );

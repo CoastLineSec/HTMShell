@@ -2,6 +2,7 @@ use super::{BackendError, BackendErrorKind, MAX_EFFECT_SURFACE_BYTES};
 
 const DIRECT_GAUSSIAN_THRESHOLD: f64 = 2.0;
 const CHANNELS_PER_PIXEL: usize = 4;
+const MASK_CHANNELS: usize = 1;
 const BOX_FIXED_SCALE: f64 = 257.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,14 +223,57 @@ struct ThreeBoxScratch<'a> {
 }
 
 pub(super) fn apply_cpu_blur(
-    mut pixels: Vec<u8>,
+    pixels: Vec<u8>,
     width: u32,
     height: u32,
     sigma: f64,
     scratch: &mut CpuBlurScratch,
     committed_surface_bytes: usize,
 ) -> Result<CpuBlurResult, BackendError> {
-    let byte_len = checked_pixel_len(width, height)?;
+    apply_cpu_blur_channels(
+        pixels,
+        width,
+        height,
+        sigma,
+        CHANNELS_PER_PIXEL,
+        true,
+        scratch,
+        committed_surface_bytes,
+    )
+}
+
+pub(super) fn apply_cpu_blur_mask(
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    sigma: f64,
+    scratch: &mut CpuBlurScratch,
+    committed_surface_bytes: usize,
+) -> Result<CpuBlurResult, BackendError> {
+    apply_cpu_blur_channels(
+        pixels,
+        width,
+        height,
+        sigma,
+        MASK_CHANNELS,
+        false,
+        scratch,
+        committed_surface_bytes,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_cpu_blur_channels(
+    mut pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    sigma: f64,
+    channels: usize,
+    premultiplied_rgba: bool,
+    scratch: &mut CpuBlurScratch,
+    committed_surface_bytes: usize,
+) -> Result<CpuBlurResult, BackendError> {
+    let byte_len = checked_sample_len(width, height, channels)?;
     if pixels.len() != byte_len {
         return Err(blur_error(
             "CPU blur input does not match its declared dimensions",
@@ -255,9 +299,25 @@ pub(super) fn apply_cpu_blur(
     if sigma < DIRECT_GAUSSIAN_THRESHOLD {
         algorithm = CpuBlurAlgorithm::DirectGaussian;
         let kernel = gaussian_kernel(sigma)?;
-        convolve_gaussian_horizontal(&pixels, &mut work, width, height, &kernel);
+        convolve_gaussian_horizontal(
+            &pixels,
+            &mut work,
+            width,
+            height,
+            channels,
+            premultiplied_rgba,
+            &kernel,
+        );
         std::mem::swap(&mut pixels, &mut work);
-        convolve_gaussian_vertical(&pixels, &mut work, width, height, &kernel);
+        convolve_gaussian_vertical(
+            &pixels,
+            &mut work,
+            width,
+            height,
+            channels,
+            premultiplied_rgba,
+            &kernel,
+        );
         std::mem::swap(&mut pixels, &mut work);
         pass_count = 2;
         scratch_reused = pixel_scratch_reused;
@@ -271,6 +331,8 @@ pub(super) fn apply_cpu_blur(
             &mut work,
             width,
             height,
+            channels,
+            premultiplied_rgba,
             passes,
             ThreeBoxScratch {
                 plane: &mut scratch.plane,
@@ -356,7 +418,7 @@ pub(super) fn three_box_blur_passes(sigma: f64) -> Result<[BoxBlurPass; 3], Back
     }
 }
 
-fn checked_pixel_len(width: u32, height: u32) -> Result<usize, BackendError> {
+fn checked_sample_len(width: u32, height: u32, channels: usize) -> Result<usize, BackendError> {
     usize::try_from(width)
         .ok()
         .and_then(|width| {
@@ -364,7 +426,7 @@ fn checked_pixel_len(width: u32, height: u32) -> Result<usize, BackendError> {
                 .ok()
                 .and_then(|height| width.checked_mul(height))
         })
-        .and_then(|pixels| pixels.checked_mul(CHANNELS_PER_PIXEL))
+        .and_then(|pixels| pixels.checked_mul(channels))
         .filter(|length| *length > 0)
         .ok_or_else(|| blur_error("CPU blur dimensions overflowed"))
 }
@@ -374,25 +436,31 @@ fn convolve_gaussian_horizontal(
     target: &mut [u8],
     width: u32,
     height: u32,
+    channels: usize,
+    premultiplied_rgba: bool,
     kernel: &[f64],
 ) {
     let radius = (kernel.len() / 2) as i64;
     let width = i64::from(width);
     for y in 0..i64::from(height) {
         for x in 0..width {
-            let mut channels = [0.0; CHANNELS_PER_PIXEL];
+            let mut weighted = [0.0; CHANNELS_PER_PIXEL];
             for (kernel_index, weight) in kernel.iter().enumerate() {
                 let sample_x = x + kernel_index as i64 - radius;
                 if sample_x < 0 || sample_x >= width {
                     continue;
                 }
-                let offset = ((y * width + sample_x) * CHANNELS_PER_PIXEL as i64) as usize;
-                for channel in 0..CHANNELS_PER_PIXEL {
-                    channels[channel] += f64::from(source[offset + channel]) * weight;
+                let offset = ((y * width + sample_x) * channels as i64) as usize;
+                for channel in 0..channels {
+                    weighted[channel] += f64::from(source[offset + channel]) * weight;
                 }
             }
-            let offset = ((y * width + x) * CHANNELS_PER_PIXEL as i64) as usize;
-            store_weighted_pixel(&mut target[offset..offset + CHANNELS_PER_PIXEL], channels);
+            let offset = ((y * width + x) * channels as i64) as usize;
+            store_weighted_channels(
+                &mut target[offset..offset + channels],
+                &weighted[..channels],
+                premultiplied_rgba,
+            );
         }
     }
 }
@@ -402,6 +470,8 @@ fn convolve_gaussian_vertical(
     target: &mut [u8],
     width: u32,
     height: u32,
+    channels: usize,
+    premultiplied_rgba: bool,
     kernel: &[f64],
 ) {
     let radius = (kernel.len() / 2) as i64;
@@ -409,28 +479,35 @@ fn convolve_gaussian_vertical(
     let height = i64::from(height);
     for y in 0..height {
         for x in 0..width {
-            let mut channels = [0.0; CHANNELS_PER_PIXEL];
+            let mut weighted = [0.0; CHANNELS_PER_PIXEL];
             for (kernel_index, weight) in kernel.iter().enumerate() {
                 let sample_y = y + kernel_index as i64 - radius;
                 if sample_y < 0 || sample_y >= height {
                     continue;
                 }
-                let offset = ((sample_y * width + x) * CHANNELS_PER_PIXEL as i64) as usize;
-                for channel in 0..CHANNELS_PER_PIXEL {
-                    channels[channel] += f64::from(source[offset + channel]) * weight;
+                let offset = ((sample_y * width + x) * channels as i64) as usize;
+                for channel in 0..channels {
+                    weighted[channel] += f64::from(source[offset + channel]) * weight;
                 }
             }
-            let offset = ((y * width + x) * CHANNELS_PER_PIXEL as i64) as usize;
-            store_weighted_pixel(&mut target[offset..offset + CHANNELS_PER_PIXEL], channels);
+            let offset = ((y * width + x) * channels as i64) as usize;
+            store_weighted_channels(
+                &mut target[offset..offset + channels],
+                &weighted[..channels],
+                premultiplied_rgba,
+            );
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn convolve_three_boxes(
     source: &[u8],
     target: &mut [u8],
     width: u32,
     height: u32,
+    channels: usize,
+    premultiplied_rgba: bool,
     passes: [BoxBlurPass; 3],
     scratch: ThreeBoxScratch<'_>,
 ) {
@@ -441,10 +518,10 @@ fn convolve_three_boxes(
         line_a,
         line_b,
     } = scratch;
-    for channel in 0..CHANNELS_PER_PIXEL {
+    for channel in 0..channels {
         for y in 0..height {
             for x in 0..width {
-                line_a[x] = f64::from(source[(y * width + x) * CHANNELS_PER_PIXEL + channel]);
+                line_a[x] = f64::from(source[(y * width + x) * channels + channel]);
             }
             convolve_box_line(&line_a[..width], &mut line_b[..width], passes[0]);
             convolve_box_line(&line_b[..width], &mut line_a[..width], passes[1]);
@@ -461,19 +538,13 @@ fn convolve_three_boxes(
             convolve_box_line(&line_b[..height], &mut line_a[..height], passes[1]);
             convolve_box_line(&line_a[..height], &mut line_b[..height], passes[2]);
             for (y, value) in line_b[..height].iter().enumerate() {
-                target[(y * width + x) * CHANNELS_PER_PIXEL + channel] = quantize_f64(*value);
+                target[(y * width + x) * channels + channel] = quantize_f64(*value);
             }
         }
     }
 
-    for pixel in target.chunks_exact_mut(CHANNELS_PER_PIXEL) {
-        let alpha = pixel[3];
-        for channel in &mut pixel[..3] {
-            *channel = (*channel).min(alpha);
-        }
-        if alpha == 0 {
-            pixel[..3].fill(0);
-        }
+    if premultiplied_rgba {
+        normalize_premultiplied_rgba(target);
     }
 }
 
@@ -499,14 +570,24 @@ fn convolve_box_line(source: &[f64], target: &mut [f64], pass: BoxBlurPass) {
     }
 }
 
-fn store_weighted_pixel(target: &mut [u8], channels: [f64; CHANNELS_PER_PIXEL]) {
-    let alpha = quantize_f64(channels[3]);
-    target[3] = alpha;
-    for channel in 0..3 {
-        target[channel] = quantize_f64(channels[channel]).min(alpha);
+fn store_weighted_channels(target: &mut [u8], weighted: &[f64], premultiplied_rgba: bool) {
+    for (target, weighted) in target.iter_mut().zip(weighted) {
+        *target = quantize_f64(*weighted);
     }
-    if alpha == 0 {
-        target[..3].fill(0);
+    if premultiplied_rgba {
+        normalize_premultiplied_rgba(target);
+    }
+}
+
+fn normalize_premultiplied_rgba(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(CHANNELS_PER_PIXEL) {
+        let alpha = pixel[3];
+        for channel in &mut pixel[..3] {
+            *channel = (*channel).min(alpha);
+        }
+        if alpha == 0 {
+            pixel[..3].fill(0);
+        }
     }
 }
 
@@ -542,7 +623,7 @@ mod tests {
     use std::time::Instant;
 
     fn impulse(width: u32, height: u32, x: u32, y: u32, color: [u8; 4]) -> Vec<u8> {
-        let mut pixels = vec![0; checked_pixel_len(width, height).unwrap()];
+        let mut pixels = vec![0; checked_sample_len(width, height, CHANNELS_PER_PIXEL).unwrap()];
         let offset = ((y * width + x) * 4) as usize;
         pixels[offset..offset + 4].copy_from_slice(&color);
         pixels
@@ -555,7 +636,7 @@ mod tests {
             height,
             sigma,
             &mut CpuBlurScratch::default(),
-            checked_pixel_len(width, height).unwrap(),
+            checked_sample_len(width, height, CHANNELS_PER_PIXEL).unwrap(),
         )
         .unwrap()
     }
@@ -683,9 +764,53 @@ mod tests {
     }
 
     #[test]
+    fn scalar_mask_blur_matches_the_rgba_alpha_channel() {
+        let width = 17;
+        let height = 13;
+        let sample_count = checked_sample_len(width, height, MASK_CHANNELS).unwrap();
+        for sigma in [0.0, 0.5, 1.999, 2.0, 4.0, 16.0, 64.0] {
+            let mut mask = vec![0; sample_count];
+            for (index, alpha) in mask.iter_mut().enumerate() {
+                *alpha = ((index * 37 + 11) % 256) as u8;
+            }
+            let rgba: Vec<_> = mask
+                .iter()
+                .flat_map(|alpha| [*alpha / 2, *alpha / 3, *alpha / 4, *alpha])
+                .collect();
+            let rgba_len = rgba.len();
+            let rgba = apply_cpu_blur(
+                rgba,
+                width,
+                height,
+                sigma,
+                &mut CpuBlurScratch::default(),
+                rgba_len,
+            )
+            .unwrap();
+            let mask = apply_cpu_blur_mask(
+                mask,
+                width,
+                height,
+                sigma,
+                &mut CpuBlurScratch::default(),
+                sample_count,
+            )
+            .unwrap();
+            assert_eq!(
+                rgba.pixels
+                    .chunks_exact(CHANNELS_PER_PIXEL)
+                    .map(|pixel| pixel[3])
+                    .collect::<Vec<_>>(),
+                mask.pixels,
+                "sigma={sigma}"
+            );
+        }
+    }
+
+    #[test]
     fn scratch_is_reused_cleared_and_replaced_for_new_dimensions() {
         let mut scratch = CpuBlurScratch::default();
-        let byte_len = checked_pixel_len(9, 9).unwrap();
+        let byte_len = checked_sample_len(9, 9, CHANNELS_PER_PIXEL).unwrap();
         let first = apply_cpu_blur(
             impulse(9, 9, 4, 4, [255; 4]),
             9,
@@ -700,7 +825,7 @@ mod tests {
         assert!(second.scratch_reused);
         assert!(second.pixels.iter().all(|value| *value == 0));
 
-        let smaller_len = checked_pixel_len(2, 2).unwrap();
+        let smaller_len = checked_sample_len(2, 2, CHANNELS_PER_PIXEL).unwrap();
         let replaced =
             apply_cpu_blur(vec![0; smaller_len], 2, 2, 1.0, &mut scratch, smaller_len).unwrap();
         assert!(!replaced.scratch_reused);
@@ -728,7 +853,7 @@ mod tests {
     fn one_thousand_sigma_changes_reuse_bounded_scratch_without_alpha_leakage() {
         let width = 17;
         let height = 17;
-        let byte_len = checked_pixel_len(width, height).unwrap();
+        let byte_len = checked_sample_len(width, height, CHANNELS_PER_PIXEL).unwrap();
         let mut scratch = CpuBlurScratch::default();
         let sigmas = [0.5, 1.0, 1.999, 2.0, 4.0, 8.0, 16.0, 64.0];
 
@@ -777,7 +902,7 @@ mod tests {
         const ITERATIONS: usize = 100;
         let width = 96;
         let height = 96;
-        let byte_len = checked_pixel_len(width, height).unwrap();
+        let byte_len = checked_sample_len(width, height, CHANNELS_PER_PIXEL).unwrap();
 
         for sigma in [0.0, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 64.0] {
             let mut scratch = CpuBlurScratch::default();

@@ -1,4 +1,5 @@
 use super::cpu_blur::{CpuBlurAlgorithm, CpuBlurScratch, apply_cpu_blur};
+use super::cpu_shadow::{CpuDropShadowResult, CpuShadowScratch, apply_cpu_drop_shadow};
 use super::{
     BackendError, BackendErrorKind, ForegroundEffect, ForegroundEffectList, MAX_EFFECT_IMAGE_BYTES,
     MAX_EFFECT_LAYER_DIMENSION, MAX_EFFECT_SURFACE_BYTES, RetainedScene, SceneEffect,
@@ -40,6 +41,14 @@ pub(super) struct CpuEffectStatistics {
     pub blur_scratch_reuses: u64,
     pub blur_scratch_replacements: u64,
     pub blur_scratch_bytes: usize,
+    pub drop_shadow_stages: u64,
+    pub shadow_identity_fast_paths: u64,
+    pub shadow_mask_pixels: u64,
+    pub shadow_blur_stages: u64,
+    pub shadow_composite_pixels: u64,
+    pub shadow_mask_reuses: u64,
+    pub shadow_mask_replacements: u64,
+    pub shadow_scratch_bytes: usize,
     pub allocated_image_bytes: usize,
 }
 
@@ -47,6 +56,7 @@ pub(super) struct CpuEffectStatistics {
 pub(super) struct CpuEffectScratch {
     renderer: Option<(u32, u32, VelloCpuImageRenderer)>,
     blur: CpuBlurScratch,
+    shadow: CpuShadowScratch,
 }
 
 #[derive(Clone, Copy)]
@@ -84,18 +94,14 @@ pub(super) fn collect_effect_plans(scene: &RetainedScene) -> Vec<CpuEffectPlan> 
                     filtered_bounds,
                     ..
                 } => {
-                    let has_drop_shadow = list
-                        .functions
-                        .iter()
-                        .any(|effect| matches!(effect, ForegroundEffect::DropShadow(_)));
-                    let execution = if has_drop_shadow {
-                        CpuEffectExecution::Deferred
-                    } else if list.is_visual_identity() {
+                    let execution = if list.is_visual_identity() {
                         CpuEffectExecution::Identity
                     } else if list.functions.iter().all(|effect| {
                         matches!(
                             effect,
-                            ForegroundEffect::Color(_) | ForegroundEffect::Blur(_)
+                            ForegroundEffect::Color(_)
+                                | ForegroundEffect::Blur(_)
+                                | ForegroundEffect::DropShadow(_)
                         )
                     }) {
                         CpuEffectExecution::Ready(list.clone())
@@ -167,8 +173,11 @@ pub(super) fn execute_cpu_effects(
     let mut output = Scene::with_tolerance(recording.tolerance);
     flatten_nodes(&nodes, &mut output.commands);
     statistics.blur_scratch_bytes = scratch.blur.allocated_bytes();
-    statistics.allocated_image_bytes =
-        checked_surface_bytes(allocated_bytes, statistics.blur_scratch_bytes)?;
+    statistics.shadow_scratch_bytes = scratch.shadow.allocated_bytes();
+    statistics.allocated_image_bytes = checked_surface_bytes(
+        checked_surface_bytes(allocated_bytes, statistics.blur_scratch_bytes)?,
+        statistics.shadow_scratch_bytes,
+    )?;
     Ok((output, statistics))
 }
 
@@ -375,14 +384,37 @@ fn transform_nodes(
                 let height = bounds.height;
                 let image_bytes = checked_image_bytes(width, height)?;
                 let next_total = checked_surface_bytes(*allocated_bytes, image_bytes)?;
-                let has_active_blur = list.functions.iter().any(|effect| {
+                let has_active_rgba_blur = list.functions.iter().any(|effect| {
                     matches!(effect, ForegroundEffect::Blur(blur) if blur.sigma.get() > 0.0)
                 });
-                if has_active_blur {
-                    checked_surface_bytes(next_total, image_bytes)?;
-                } else if checked_surface_bytes(next_total, scratch.blur.allocated_bytes()).is_err()
-                {
+                let has_active_shadow = list.functions.iter().any(|effect| {
+                    matches!(effect, ForegroundEffect::DropShadow(shadow) if shadow.color.alpha.get() > 0.0)
+                });
+                let has_active_shadow_blur = list.functions.iter().any(|effect| {
+                    matches!(
+                        effect,
+                        ForegroundEffect::DropShadow(shadow)
+                            if shadow.color.alpha.get() > 0.0 && shadow.sigma.get() > 0.0
+                    )
+                });
+                let mask_bytes = image_bytes / 4;
+                let blur_work_bytes = if has_active_rgba_blur {
+                    image_bytes
+                } else if has_active_shadow_blur {
+                    mask_bytes
+                } else {
+                    0
+                };
+                let shadow_work_bytes = if has_active_shadow { mask_bytes } else { 0 };
+                checked_surface_bytes(
+                    checked_surface_bytes(next_total, blur_work_bytes)?,
+                    shadow_work_bytes,
+                )?;
+                if checked_surface_bytes(next_total, scratch.blur.allocated_bytes()).is_err() {
                     scratch.blur = CpuBlurScratch::default();
+                }
+                if checked_surface_bytes(next_total, scratch.shadow.allocated_bytes()).is_err() {
+                    scratch.shadow = CpuShadowScratch::default();
                 }
 
                 let mut recorded_source = Scene::new();
@@ -392,14 +424,7 @@ fn transform_nodes(
                 let mut pixels =
                     scratch.render(source, bounds.x0, bounds.y0, width, height, statistics)?;
                 pixels = apply_ordered_effects(
-                    pixels,
-                    &list,
-                    width,
-                    height,
-                    scale,
-                    &mut scratch.blur,
-                    next_total,
-                    statistics,
+                    pixels, &list, width, height, scale, scratch, next_total, statistics,
                 )?;
                 statistics.filtered_pixels = statistics
                     .filtered_pixels
@@ -486,7 +511,7 @@ fn apply_ordered_effects(
     width: u32,
     height: u32,
     scale: f64,
-    blur_scratch: &mut CpuBlurScratch,
+    scratch: &mut CpuEffectScratch,
     committed_surface_bytes: usize,
     statistics: &mut CpuEffectStatistics,
 ) -> Result<Vec<u8>, BackendError> {
@@ -511,8 +536,11 @@ fn apply_ordered_effects(
                     width,
                     height,
                     physical_sigma,
-                    blur_scratch,
-                    committed_surface_bytes,
+                    &mut scratch.blur,
+                    checked_surface_bytes(
+                        committed_surface_bytes,
+                        scratch.shadow.allocated_bytes(),
+                    )?,
                 )?;
                 pixels = result.pixels;
                 statistics.blur_stages = statistics.blur_stages.saturating_add(1);
@@ -540,16 +568,69 @@ fn apply_ordered_effects(
                         statistics.blur_scratch_replacements.saturating_add(1);
                 }
             }
-            ForegroundEffect::DropShadow(_) => {
-                return Err(effect_error(
-                    BackendErrorKind::UnsupportedCapability,
-                    "drop shadow cannot enter the CPU blur compositor",
-                    false,
-                ));
+            ForegroundEffect::DropShadow(shadow) => {
+                index += 1;
+                let result = apply_cpu_drop_shadow(
+                    pixels,
+                    width,
+                    height,
+                    *shadow,
+                    scale,
+                    &mut scratch.blur,
+                    &mut scratch.shadow,
+                    committed_surface_bytes,
+                )?;
+                record_shadow_statistics(&result, width, height, statistics);
+                pixels = result.pixels;
             }
         }
     }
     Ok(pixels)
+}
+
+fn record_shadow_statistics(
+    result: &CpuDropShadowResult,
+    width: u32,
+    height: u32,
+    statistics: &mut CpuEffectStatistics,
+) {
+    statistics.drop_shadow_stages = statistics.drop_shadow_stages.saturating_add(1);
+    if result.identity_fast_path {
+        statistics.shadow_identity_fast_paths =
+            statistics.shadow_identity_fast_paths.saturating_add(1);
+        return;
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    statistics.shadow_mask_pixels = statistics.shadow_mask_pixels.saturating_add(pixels);
+    statistics.shadow_composite_pixels = statistics.shadow_composite_pixels.saturating_add(pixels);
+    if result.blur_algorithm.is_some() {
+        statistics.shadow_blur_stages = statistics.shadow_blur_stages.saturating_add(1);
+        statistics.blur_passes = statistics
+            .blur_passes
+            .saturating_add(u64::from(result.blur_pass_count));
+        statistics.blur_pixels = statistics.blur_pixels.saturating_add(pixels);
+        match result.blur_algorithm {
+            Some(CpuBlurAlgorithm::DirectGaussian) => {
+                statistics.gaussian_blur_stages = statistics.gaussian_blur_stages.saturating_add(1);
+            }
+            Some(CpuBlurAlgorithm::ThreeBox) => {
+                statistics.three_box_blur_stages =
+                    statistics.three_box_blur_stages.saturating_add(1);
+            }
+            None => {}
+        }
+        if result.blur_scratch_reused {
+            statistics.blur_scratch_reuses = statistics.blur_scratch_reuses.saturating_add(1);
+        } else {
+            statistics.blur_scratch_replacements =
+                statistics.blur_scratch_replacements.saturating_add(1);
+        }
+    }
+    if result.mask_scratch_reused {
+        statistics.shadow_mask_reuses = statistics.shadow_mask_reuses.saturating_add(1);
+    } else {
+        statistics.shadow_mask_replacements = statistics.shadow_mask_replacements.saturating_add(1);
+    }
 }
 
 fn apply_ordered_color_matrices(
@@ -685,7 +766,10 @@ fn physical_bounds(
     if visible.width() <= 0.0 || visible.height() <= 0.0 {
         return Ok(None);
     }
-    let mapped = to_filter_space.transform_rect_bbox(visible);
+    // The final target clips the filtered result. The effect layer itself must retain
+    // the complete SourceGraphic because blur and offsets can move off-target source
+    // samples back into the visible result.
+    let mapped = to_filter_space.transform_rect_bbox(presented);
     let x0 = mapped.x0.floor();
     let y0 = mapped.y0.floor();
     let x1 = mapped.x1.ceil();
