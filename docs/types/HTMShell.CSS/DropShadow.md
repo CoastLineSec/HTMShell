@@ -45,6 +45,6 @@ Transparent shadow color and a fully transparent SourceGraphic are visual identi
 
 Effect images are limited to 4,096 physical pixels per dimension and 64 MiB each. All effect images and scratch for one surface share a 256 MiB budget. Filter nesting is limited to eight.
 
-The CPU headless and live renderers share this implementation. The optional experimental Vello path has no native foreground-effect execution and uses a complete CPU-rendered fallback frame for nonidentity filter lists. `backdrop-filter`, filter animation, and transitions are unsupported.
+The CPU headless and live renderers share this implementation. The optional experimental Vello path does not execute drop shadow natively. Any list containing drop shadow uses one complete CPU-rendered fallback frame, including lists that also contain GPU-native color functions. `backdrop-filter`, filter animation, and transitions are unsupported.
 
 Drop shadows can reduce contrast or obscure focus indicators. Keep essential text and focus feedback readable.

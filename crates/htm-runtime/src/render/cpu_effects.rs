@@ -13,14 +13,14 @@ use peniko::{Blob, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
 
 #[derive(Clone)]
 pub(super) struct CpuEffectPlan {
-    execution: CpuEffectExecution,
-    source_bounds: Option<LogicalRect>,
-    filtered_bounds: Option<LogicalRect>,
-    element_transform: Option<Affine>,
+    pub(super) execution: CpuEffectExecution,
+    pub(super) source_bounds: Option<LogicalRect>,
+    pub(super) filtered_bounds: Option<LogicalRect>,
+    pub(super) element_transform: Option<Affine>,
 }
 
 #[derive(Clone)]
-enum CpuEffectExecution {
+pub(super) enum CpuEffectExecution {
     Ready(ForegroundEffectList),
     Identity,
     Deferred,
@@ -60,17 +60,17 @@ pub(super) struct CpuEffectScratch {
 }
 
 #[derive(Clone, Copy)]
-struct PhysicalEffectBounds {
-    x0: f64,
-    y0: f64,
-    x1: f64,
-    y1: f64,
-    width: u32,
-    height: u32,
+pub(super) struct PhysicalEffectBounds {
+    pub(super) x0: f64,
+    pub(super) y0: f64,
+    pub(super) x1: f64,
+    pub(super) y1: f64,
+    pub(super) width: u32,
+    pub(super) height: u32,
 }
 
 #[derive(Clone)]
-enum RecordedNode {
+pub(super) enum RecordedNode {
     Leaf(RenderCommand),
     Group {
         push: RenderCommand,
@@ -181,7 +181,9 @@ pub(super) fn execute_cpu_effects(
     Ok((output, statistics))
 }
 
-fn parse_commands(commands: &[RenderCommand]) -> Result<Vec<RecordedNode>, BackendError> {
+pub(super) fn parse_commands(
+    commands: &[RenderCommand],
+) -> Result<Vec<RecordedNode>, BackendError> {
     fn parse(
         commands: &[RenderCommand],
         cursor: &mut usize,
@@ -227,7 +229,7 @@ fn parse_commands(commands: &[RenderCommand]) -> Result<Vec<RecordedNode>, Backe
     parse(commands, &mut cursor, false)
 }
 
-fn flatten_nodes(nodes: &[RecordedNode], commands: &mut Vec<RenderCommand>) {
+pub(super) fn flatten_nodes(nodes: &[RecordedNode], commands: &mut Vec<RenderCommand>) {
     for node in nodes {
         match node {
             RecordedNode::Leaf(command) => commands.push(command.clone()),
@@ -240,7 +242,7 @@ fn flatten_nodes(nodes: &[RecordedNode], commands: &mut Vec<RenderCommand>) {
     }
 }
 
-fn include_outset_box_shadows(nodes: &mut Vec<RecordedNode>) {
+pub(super) fn include_outset_box_shadows(nodes: &mut Vec<RecordedNode>) {
     for node in nodes.iter_mut() {
         if let RecordedNode::Group { children, .. } = node {
             include_outset_box_shadows(children);
@@ -374,7 +376,7 @@ fn transform_nodes(
                     })?,
                     target_width,
                     target_height,
-                    scale,
+                    Affine::scale(scale),
                     to_filter_space,
                 )?;
                 let Some(bounds) = bounds else {
@@ -693,7 +695,7 @@ fn quantize(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-fn filter_space_transforms(
+pub(super) fn filter_space_transforms(
     command: &RenderCommand,
     element_transform: Option<Affine>,
 ) -> Result<(Affine, Affine), BackendError> {
@@ -730,11 +732,11 @@ fn filter_space_transforms(
     Ok((to_filter_space, from_filter_space))
 }
 
-fn physical_bounds(
+pub(super) fn physical_bounds(
     bounds: &LogicalRect,
     target_width: u32,
     target_height: u32,
-    scale: f64,
+    root_transform: Affine,
     to_filter_space: Affine,
 ) -> Result<Option<PhysicalEffectBounds>, BackendError> {
     let values = [
@@ -742,21 +744,26 @@ fn physical_bounds(
         f64::from(bounds.y),
         f64::from(bounds.width),
         f64::from(bounds.height),
-        scale,
-    ];
-    if values.into_iter().any(|value| !value.is_finite()) || scale <= 0.0 {
+    ]
+    .into_iter()
+    .chain(root_transform.as_coeffs());
+    if values.into_iter().any(|value| !value.is_finite())
+        || root_transform.determinant().abs() <= f64::EPSILON
+    {
         return Err(effect_error(
             BackendErrorKind::InvalidPlan,
-            "CPU effect bounds or scale are nonfinite",
+            "CPU effect bounds or root transform are invalid",
             false,
         ));
     }
-    let presented = Rect::new(
-        f64::from(bounds.x) * scale,
-        f64::from(bounds.y) * scale,
-        (f64::from(bounds.x) + f64::from(bounds.width)) * scale,
-        (f64::from(bounds.y) + f64::from(bounds.height)) * scale,
-    );
+    let x0 = f64::from(bounds.x);
+    let y0 = f64::from(bounds.y);
+    let presented = root_transform.transform_rect_bbox(Rect::new(
+        x0,
+        y0,
+        x0 + f64::from(bounds.width),
+        y0 + f64::from(bounds.height),
+    ));
     let visible = presented.intersect(Rect::new(
         0.0,
         0.0,
@@ -864,7 +871,7 @@ fn checked_surface_bytes(current: usize, additional: usize) -> Result<usize, Bac
     Ok(total)
 }
 
-fn remove_identity_filter(push: &mut RenderCommand, width: u32, height: u32) {
+pub(super) fn remove_identity_filter(push: &mut RenderCommand, width: u32, height: u32) {
     let RenderCommand::PushLayer(layer) = push else {
         return;
     };
@@ -877,7 +884,7 @@ fn remove_identity_filter(push: &mut RenderCommand, width: u32, height: u32) {
     }
 }
 
-fn command_has_foreground_filter(command: &RenderCommand) -> bool {
+pub(super) fn command_has_foreground_filter(command: &RenderCommand) -> bool {
     matches!(
         command,
         RenderCommand::PushLayer(LayerCommand {

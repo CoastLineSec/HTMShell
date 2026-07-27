@@ -143,7 +143,12 @@ impl ForegroundEffectCoverage {
             } else {
                 ForegroundEffectBackendCoverage::Pending
             },
-            gpu: if list.is_visual_identity() {
+            gpu: if list.is_visual_identity()
+                || list
+                    .functions
+                    .iter()
+                    .all(|effect| matches!(effect, ForegroundEffect::Color(_)))
+            {
                 ForegroundEffectBackendCoverage::Native
             } else {
                 ForegroundEffectBackendCoverage::CpuFrameFallbackRequired
@@ -1206,7 +1211,7 @@ mod tests {
             ForegroundEffectCoverage {
                 model_ready: true,
                 cpu: ForegroundEffectBackendCoverage::Native,
-                gpu: ForegroundEffectBackendCoverage::CpuFrameFallbackRequired,
+                gpu: ForegroundEffectBackendCoverage::Native,
             }
         );
         assert_eq!(

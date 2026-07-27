@@ -1,6 +1,6 @@
 # Color filter functions
 
-These eight standard CSS functions are rendered by the CPU reference compositor.
+These eight standard CSS functions are rendered by the CPU reference compositor and by the optional experimental Vello backend.
 
 | Function | Accepted value | Identity | Normalization and alpha |
 | --- | --- | --- | --- |
@@ -37,6 +37,8 @@ For functions that accept percentages, `100%` equals `1`. Negative and nonfinite
 
 `filter: opacity(50%)` changes one stage in the ordered list. The separate `opacity: 0.5` property applies after the whole list, so using both multiplies their alpha effects.
 
-Identity-valued lists remain represented but skip CPU effect-image allocation. Reordering or repeating functions remains semantically significant.
+Identity-valued lists remain represented but skip CPU or GPU effect-image allocation. Reordering or repeating functions remains semantically significant.
 
-`blur()` and `drop-shadow()` are documented separately and may be ordered with these color functions. `backdrop-filter`, URL filters, arbitrary matrices, and author shaders are unsupported.
+Vello uses a fixed bounded shader with at most 16 packed semantic operations. The isolated source and filtered output use straight-alpha encoded-sRGB `Rgba8Unorm`; final presentation performs the existing single premultiplication. Successful native frames use no CPU frame rasterization, GPU readback, or shared-memory presentation.
+
+`blur()` and `drop-shadow()` are documented separately and may be ordered with these color functions. A list containing either spatial function uses complete CPU-frame fallback in Vello mode; a color prefix or suffix is never split across backends. `backdrop-filter`, URL filters, arbitrary matrices, and author shaders are unsupported.

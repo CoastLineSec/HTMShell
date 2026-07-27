@@ -1,3 +1,4 @@
+mod color_effects;
 mod live;
 mod painter;
 mod partial;
@@ -8,15 +9,16 @@ pub use live::{
 };
 
 use super::cpu::{CpuPreparedScene, CpuReferenceRenderer};
+use super::cpu_effects::{CpuEffectPlan, collect_effect_plans};
 use super::{
-    BackendError, BackendErrorKind, DamageRegion, FramePlan, PixelFormat, RenderResult,
-    RenderSurfaceId, RenderTarget, Renderer, ResourceLifecycle, SceneEffect, SceneNodeKind,
-    SceneResourceId, SceneResourceVersion, SceneRevision, logical_damage_to_physical,
+    BackendError, BackendErrorKind, DamageRegion, ForegroundEffect, FramePlan, PixelFormat,
+    RenderResult, RenderSurfaceId, RenderTarget, Renderer, ResourceLifecycle, SceneEffect,
+    SceneNodeKind, SceneResourceId, SceneResourceVersion, SceneRevision,
+    logical_damage_to_physical,
 };
 use crate::ExperimentalDocumentIdentity;
 use anyrender::PaintScene;
 use kurbo::Affine;
-use painter::VelloScenePainter;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::num::NonZeroUsize;
@@ -78,6 +80,19 @@ pub(crate) struct GpuStatistics {
     pub resets: u64,
     pub last_readback_micros: u64,
     pub total_readback_micros: u64,
+    pub gpu_color_filter_layer_creations: u64,
+    pub gpu_color_filter_layer_reuses: u64,
+    pub gpu_color_filter_passes: u64,
+    pub gpu_color_filter_identity_suppressions: u64,
+    pub gpu_color_filter_partial_frames: u64,
+    pub gpu_color_filter_full_frames: u64,
+    pub gpu_color_filter_operation_uploads: u64,
+    pub gpu_color_filter_cache_hits: u64,
+    pub gpu_color_filter_fallback_requests: u64,
+    pub gpu_color_filter_allocation_failures: u64,
+    pub gpu_color_filter_pipeline_failures: u64,
+    pub gpu_color_filter_device_resets: u64,
+    pub gpu_color_filter_pixels: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -229,6 +244,7 @@ pub(crate) struct GpuPreparedScene {
     revision: SceneRevision,
     recording: anyrender::Scene,
     resources: Vec<(SceneResourceId, SceneResourceVersion)>,
+    effect_plans: Vec<CpuEffectPlan>,
 }
 
 impl GpuPreparedScene {
@@ -236,12 +252,14 @@ impl GpuPreparedScene {
         document: ExperimentalDocumentIdentity,
         prepared: CpuPreparedScene,
         resources: Vec<(SceneResourceId, SceneResourceVersion)>,
+        effect_plans: Vec<CpuEffectPlan>,
     ) -> Self {
         Self {
             document,
             revision: prepared.revision,
             recording: prepared.recording,
             resources,
+            effect_plans,
         }
     }
 }
@@ -262,6 +280,7 @@ pub(crate) struct VelloOffscreenRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     renderer: vello::Renderer,
+    color_effect_pipeline: Option<color_effects::ColorEffectPipeline>,
     info: BackendInfo,
     device_generation: DeviceGeneration,
     next_target_generation: u64,
@@ -291,8 +310,10 @@ impl VelloOffscreenRenderer {
         adapters.retain(|adapter| {
             let info = adapter.get_info();
             let format = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8Unorm);
-            let required_usage =
-                wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC;
+            let required_usage = wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC;
             format.allowed_usages.contains(required_usage)
                 && (!force_software_adapter || info.device_type == wgpu::DeviceType::Cpu)
                 && compatible_surface.is_none_or(|surface| {
@@ -374,6 +395,7 @@ impl VelloOffscreenRenderer {
                 true,
             )
         })?;
+        let statistics = GpuStatistics::default();
         let pipeline_creation_micros = pipeline_creation_started.elapsed().as_micros();
         let adapter_info = adapter.get_info();
         let info = BackendInfo {
@@ -393,13 +415,14 @@ impl VelloOffscreenRenderer {
             device,
             queue,
             renderer,
+            color_effect_pipeline: None,
             info,
             device_generation: DeviceGeneration(1),
             next_target_generation: 0,
             targets: BTreeMap::new(),
             prepared: BTreeMap::new(),
             cache: GpuResourceCache::default(),
-            statistics: GpuStatistics::default(),
+            statistics,
             shutdown: false,
         })
     }
@@ -630,6 +653,10 @@ impl Renderer for VelloOffscreenRenderer {
         let coverage = Self::coverage(plan)?;
         if coverage == GpuCoverage::CpuFrameFallback {
             self.statistics.fallback_requests = self.statistics.fallback_requests.saturating_add(1);
+            self.statistics.gpu_color_filter_fallback_requests = self
+                .statistics
+                .gpu_color_filter_fallback_requests
+                .saturating_add(1);
             return Err(BackendError::new(
                 BackendErrorKind::FallbackRequired,
                 "retained scene contains an effect assigned to CPU frame fallback",
@@ -678,25 +705,31 @@ impl Renderer for VelloOffscreenRenderer {
                 )
             })?
             .clone();
-        let offscreen = self.targets.get_mut(&plan.surface).ok_or_else(|| {
-            BackendError::new(
-                BackendErrorKind::StaleGeneration,
-                "GPU frame plan targets a missing surface generation",
-                true,
-            )
-        })?;
-        if offscreen.descriptor != target
-            || target.width != plan.physical_width
-            || target.height != plan.physical_height
-            || target.pixel_format != plan.pixel_format
         {
-            return Err(BackendError::new(
-                BackendErrorKind::InvalidPlan,
-                "GPU target does not match the immutable frame plan",
-                false,
-            ));
+            let offscreen = self.targets.get(&plan.surface).ok_or_else(|| {
+                BackendError::new(
+                    BackendErrorKind::StaleGeneration,
+                    "GPU frame plan targets a missing surface generation",
+                    true,
+                )
+            })?;
+            if offscreen.descriptor != target
+                || target.width != plan.physical_width
+                || target.height != plan.physical_height
+                || target.pixel_format != plan.pixel_format
+            {
+                return Err(BackendError::new(
+                    BackendErrorKind::InvalidPlan,
+                    "GPU target does not match the immutable frame plan",
+                    false,
+                ));
+            }
         }
         if matches!(plan.damage, DamageRegion::Empty) {
+            let offscreen = self
+                .targets
+                .get(&plan.surface)
+                .expect("validated offscreen target remains present");
             if !offscreen.initialized {
                 return Err(BackendError::new(
                     BackendErrorKind::InvalidPlan,
@@ -705,39 +738,36 @@ impl Renderer for VelloOffscreenRenderer {
                 ));
             }
         } else {
-            let mut scene = vello::Scene::new();
-            let mut painter = VelloScenePainter::new(&mut scene);
             let scale = f64::from(plan.scale_numerator) / f64::from(plan.scale_denominator);
-            painter.append_scene(prepared.recording, Affine::scale(scale));
-            if painter.unsupported() {
-                self.statistics.fallback_requests =
-                    self.statistics.fallback_requests.saturating_add(1);
-                return Err(BackendError::new(
-                    BackendErrorKind::FallbackRequired,
-                    "AnyRender recording contains a backend-specific brush or filter",
-                    true,
-                ));
+            let target_view = self
+                .targets
+                .get(&plan.surface)
+                .expect("validated offscreen target remains present")
+                .view
+                .clone();
+            let color_passes_before = self.statistics.gpu_color_filter_passes;
+            color_effects::render_prepared_scene(
+                &self.device,
+                &self.queue,
+                &mut self.renderer,
+                &mut self.color_effect_pipeline,
+                &prepared,
+                Affine::scale(scale),
+                &target_view,
+                target.width,
+                target.height,
+                &mut self.statistics,
+            )?;
+            if self.statistics.gpu_color_filter_passes > color_passes_before {
+                self.statistics.gpu_color_filter_full_frames = self
+                    .statistics
+                    .gpu_color_filter_full_frames
+                    .saturating_add(1);
             }
-            self.renderer
-                .render_to_texture(
-                    &self.device,
-                    &self.queue,
-                    &scene,
-                    &offscreen.view,
-                    &vello::RenderParams {
-                        base_color: vello::peniko::Color::TRANSPARENT,
-                        width: target.width,
-                        height: target.height,
-                        antialiasing_method: vello::AaConfig::Area,
-                    },
-                )
-                .map_err(|error| {
-                    BackendError::new(
-                        BackendErrorKind::Render,
-                        format!("Vello offscreen rendering failed: {error}"),
-                        true,
-                    )
-                })?;
+            let offscreen = self
+                .targets
+                .get_mut(&plan.surface)
+                .expect("validated offscreen target remains present");
             let mut encoder = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -766,6 +796,10 @@ impl Renderer for VelloOffscreenRenderer {
                 self.statistics.full_target_renders.saturating_add(1);
         }
         let readback_started = Instant::now();
+        let offscreen = self
+            .targets
+            .get(&plan.surface)
+            .expect("validated offscreen target remains present");
         let pixels = Self::read_target(&self.device, offscreen)?;
         let readback_micros =
             u64::try_from(readback_started.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -841,6 +875,7 @@ impl Renderer for VelloOffscreenRenderer {
                 true,
             )
         })?;
+        self.color_effect_pipeline = None;
         self.device_generation.0 = self.device_generation.0.checked_add(1).ok_or_else(|| {
             BackendError::new(
                 BackendErrorKind::BackendReset,
@@ -848,6 +883,10 @@ impl Renderer for VelloOffscreenRenderer {
                 false,
             )
         })?;
+        self.statistics.gpu_color_filter_device_resets = self
+            .statistics
+            .gpu_color_filter_device_resets
+            .saturating_add(1);
         self.statistics.resets = self.statistics.resets.saturating_add(1);
         Ok(())
     }
@@ -931,8 +970,13 @@ impl OffscreenRenderer {
         self.ensure_target(plan.surface, target)?;
         self.cpu.prepare(plan, prepared.clone())?;
         if let Some(gpu) = &mut self.gpu {
-            let gpu_prepared =
-                GpuPreparedScene::from_cpu(plan.document, prepared, plan.scene.live_resources());
+            let effect_plans = collect_effect_plans(&plan.scene);
+            let gpu_prepared = GpuPreparedScene::from_cpu(
+                plan.document,
+                prepared,
+                plan.scene.live_resources(),
+                effect_plans,
+            );
             let rendered = gpu
                 .prepare(plan, gpu_prepared)
                 .and_then(|()| gpu.render(plan, target))
@@ -1047,7 +1091,13 @@ fn effect_coverage(effect: &SceneEffect) -> GpuCoverage {
         | SceneEffect::BackgroundLayers { .. }
         | SceneEffect::BoxShadows { .. } => GpuCoverage::Native,
         SceneEffect::RejectedForegroundFilter { .. } => GpuCoverage::Native,
-        SceneEffect::ForegroundFilter { list, .. } if list.is_visual_identity() => {
+        SceneEffect::ForegroundFilter { list, .. }
+            if list.is_visual_identity()
+                || list
+                    .functions
+                    .iter()
+                    .all(|effect| matches!(effect, ForegroundEffect::Color(_))) =>
+        {
             GpuCoverage::Native
         }
         SceneEffect::ForegroundFilter { .. } | SceneEffect::BackdropFilter { .. } => {
@@ -1376,6 +1426,7 @@ mod tests {
             revision: plan.scene_revision,
             recording,
             resources: plan.scene.live_resources(),
+            effect_plans: collect_effect_plans(&plan.scene),
         }
     }
 
@@ -1501,6 +1552,7 @@ mod tests {
                     revision: plan.scene_revision,
                     recording,
                     resources: plan.scene.live_resources(),
+                    effect_plans: collect_effect_plans(&plan.scene),
                 },
             )
             .unwrap();
@@ -1514,34 +1566,62 @@ mod tests {
         max_channel_error: u8,
         maximum_differing_percent: f64,
     ) {
+        let (observed_error, percentage) = pixel_difference_metrics(expected, actual);
+        let mut pixels_exceeding_tolerance = 0usize;
+        for (expected, actual) in expected.chunks_exact(4).zip(actual.chunks_exact(4)) {
+            pixels_exceeding_tolerance += usize::from(
+                expected
+                    .iter()
+                    .zip(actual)
+                    .any(|(left, right)| left.abs_diff(*right) > max_channel_error),
+            );
+        }
+        let exceeding_percentage = pixels_exceeding_tolerance as f64 * 100.0
+            / (actual.len() / COPY_BYTES_PER_PIXEL as usize) as f64;
+        assert!(
+            exceeding_percentage <= maximum_differing_percent,
+            "{exceeding_percentage:.3}% of pixels exceed the {max_channel_error}-channel tolerance; limit is {maximum_differing_percent:.3}% (observed maximum {observed_error}, all differing pixels {percentage:.3}%)"
+        );
+    }
+
+    fn pixel_difference_metrics(expected: &[u8], actual: &[u8]) -> (u8, f64) {
         assert_eq!(actual.len(), expected.len());
         let mut differing_pixels = 0usize;
+        let mut maximum_error = 0u8;
         for (expected, actual) in expected.chunks_exact(4).zip(actual.chunks_exact(4)) {
-            let different = expected
-                .iter()
-                .zip(actual)
-                .any(|(left, right)| left.abs_diff(*right) > max_channel_error);
+            let different = expected != actual;
             differing_pixels += usize::from(different);
+            maximum_error = maximum_error.max(
+                expected
+                    .iter()
+                    .zip(actual)
+                    .map(|(left, right)| left.abs_diff(*right))
+                    .max()
+                    .unwrap_or(0),
+            );
             assert!(actual[0] <= actual[3]);
             assert!(actual[1] <= actual[3]);
             assert!(actual[2] <= actual[3]);
         }
         let percentage =
             differing_pixels as f64 * 100.0 / (actual.len() / COPY_BYTES_PER_PIXEL as usize) as f64;
-        assert!(
-            percentage <= maximum_differing_percent,
-            "{percentage:.3}% of pixels exceeded the {max_channel_error}-channel tolerance"
-        );
+        (maximum_error, percentage)
     }
 
-    fn text_svg_document_proof() -> (FramePlan, CpuPreparedScene) {
+    fn text_svg_document_proof(filter: Option<&str>, serial: u64) -> (FramePlan, CpuPreparedScene) {
         let viewport = ViewportSpec {
             logical_width: 128,
             logical_height: 72,
             ..ViewportSpec::default()
         };
+        let filter = filter
+            .map(|filter| format!("filter:{filter};"))
+            .unwrap_or_default();
+        let html = format!(
+            "<!doctype html><html><head><style>body{{margin:0;background:#182030;color:white;font:16px sans-serif;{filter}}}p{{margin:4px;box-shadow:3px 2px 1px rgb(0 0 0 / 50%)}}svg{{width:32px;height:32px}}</style></head><body><p>GPU text</p><svg viewBox=\"0 0 32 32\"><circle cx=\"16\" cy=\"16\" r=\"12\" fill=\"#40c080\"/></svg></body></html>"
+        );
         let mut document = HtmlDocument::from_html(
-            "<!doctype html><html><head><style>body{margin:0;background:#182030;color:white;font:16px sans-serif}p{margin:4px}svg{width:32px;height:32px}</style></head><body><p>GPU text</p><svg viewBox=\"0 0 32 32\"><circle cx=\"16\" cy=\"16\" r=\"12\" fill=\"#40c080\"/></svg></body></html>",
+            &html,
             DocumentConfig {
                 viewport: Some(Viewport::new(128, 72, 1.0, ColorScheme::Dark)),
                 html_parser_provider: Some(Arc::new(HtmlProvider)),
@@ -1554,7 +1634,7 @@ mod tests {
         let identities = crate::identity::IdentityRegistry::from_document(&document);
         let svg_slot = document.query_selector("svg").unwrap().unwrap();
         let svg_identity = identities.identity_for_slot(&document, svg_slot).unwrap();
-        let document_identity = ExperimentalDocumentIdentity { serial: 77 };
+        let document_identity = ExperimentalDocumentIdentity { serial };
         let revision = SceneRevision(1);
         let mut scene = super::super::build_retained_scene(
             &document,
@@ -1629,8 +1709,111 @@ mod tests {
         (plan, prepared)
     }
 
+    pub(super) fn color_filter_document_proof(
+        filter: &str,
+        child_filter: Option<&str>,
+        serial: u64,
+        scale_numerator: u32,
+    ) -> (FramePlan, CpuPreparedScene) {
+        let logical_width = 48;
+        let logical_height = 40;
+        let physical_width =
+            (u64::from(logical_width) * u64::from(scale_numerator)).div_ceil(120) as u32;
+        let physical_height =
+            (u64::from(logical_height) * u64::from(scale_numerator)).div_ceil(120) as u32;
+        let viewport = ViewportSpec {
+            logical_width,
+            logical_height,
+            ..ViewportSpec::default()
+        };
+        let child_filter = child_filter
+            .map(|filter| format!("filter:{filter};"))
+            .unwrap_or_default();
+        let html = format!(
+            "<!doctype html><html><head><style>html,body{{margin:0;background:transparent}}#box{{position:absolute;left:8px;top:8px;width:24px;height:20px;background:rgb(64 128 192 / 75%);border:2px solid #e08040;filter:{filter}}}#child{{width:8px;height:8px;background:#40c080;{child_filter}}}</style></head><body><div id=\"box\"><div id=\"child\"></div></div></body></html>"
+        );
+        let mut document = HtmlDocument::from_html(
+            &html,
+            DocumentConfig {
+                viewport: Some(Viewport::new(
+                    logical_width,
+                    logical_height,
+                    1.0,
+                    ColorScheme::Dark,
+                )),
+                html_parser_provider: Some(Arc::new(HtmlProvider)),
+                style_threading: StyleThreading::Sequential,
+                ..DocumentConfig::default()
+            },
+        );
+        document.set_incremental_layout(true);
+        document.resolve(0.0);
+        let identities = crate::identity::IdentityRegistry::from_document(&document);
+        let document_identity = ExperimentalDocumentIdentity { serial };
+        let revision = SceneRevision(1);
+        let scene = super::super::build_retained_scene(
+            &document,
+            &identities,
+            document_identity,
+            revision,
+            viewport,
+        )
+        .expect("retained filter scene");
+        assert!(scene.nodes.iter().any(|node| {
+            node.effects
+                .iter()
+                .any(|effect| matches!(effect, SceneEffect::ForegroundFilter { .. }))
+        }));
+        let plan = FramePlan {
+            surface: RenderSurfaceId {
+                instance: serial,
+                generation: 1,
+            },
+            document: document_identity,
+            scene_revision: revision,
+            prior_scene_revision: None,
+            logical_width,
+            logical_height,
+            physical_width,
+            physical_height,
+            scale_numerator,
+            scale_denominator: 120,
+            pixel_format: PixelFormat::PremultipliedRgba8,
+            clear: true,
+            scene: Arc::new(scene),
+            delta: SceneDelta {
+                from_revision: None,
+                to_revision: revision,
+                changes: vec![],
+                resource_changes: vec![],
+                full_scene_replacement: true,
+                unchanged_nodes: 0,
+            },
+            damage: DamageRegion::Full,
+            reasons: FrameReasonSet::from([FrameReason::InitialPresentation]),
+            full_repaint: true,
+            presentation_eligible: true,
+        };
+        let prepared = super::super::cpu::prepare_scene(&mut document, revision, viewport)
+            .expect("record color-filter scene");
+        (plan, prepared)
+    }
+
+    fn cpu_reference_pixels(plan: &FramePlan, prepared: CpuPreparedScene) -> Vec<u8> {
+        let target = RenderTarget {
+            width: plan.physical_width,
+            height: plan.physical_height,
+            pixel_format: PixelFormat::PremultipliedRgba8,
+        };
+        let mut renderer = CpuReferenceRenderer::default();
+        renderer.create_target(plan.surface, target).unwrap();
+        renderer.prepare(plan, prepared).unwrap();
+        let result = renderer.render(plan, target).unwrap();
+        renderer.readback(result).unwrap()
+    }
+
     #[test]
-    fn coverage_profile_is_explicit_and_filters_fall_back() {
+    fn coverage_profile_runs_color_filters_and_falls_back_for_spatial_filters() {
         let surface = RenderSurfaceId {
             instance: 1,
             generation: 1,
@@ -1645,7 +1828,7 @@ mod tests {
                 Some(modeled_foreground_filter(1.1))
             ))
             .unwrap(),
-            GpuCoverage::CpuFrameFallback
+            GpuCoverage::Native
         );
         assert_eq!(
             VelloOffscreenRenderer::coverage(&proof_plan(surface, Some(modeled_blur_filter(2.0))))
@@ -1691,8 +1874,11 @@ mod tests {
         ] {
             assert_eq!(effect_coverage(&effect), GpuCoverage::Native);
         }
+        assert_eq!(
+            effect_coverage(&modeled_foreground_filter(1.1)),
+            GpuCoverage::Native
+        );
         for effect in [
-            modeled_foreground_filter(1.1),
             modeled_blur_filter(2.0),
             SceneEffect::BackdropFilter {
                 signature: 4,
@@ -1996,6 +2182,7 @@ mod tests {
                     revision: plan_a.scene_revision,
                     recording: exact_recording,
                     resources: plan_a.scene.live_resources(),
+                    effect_plans: collect_effect_plans(&plan_a.scene),
                 },
             )
             .unwrap();
@@ -2039,6 +2226,7 @@ mod tests {
                     revision: plan_b.scene_revision,
                     recording: rounded,
                     resources: plan_b.scene.live_resources(),
+                    effect_plans: collect_effect_plans(&plan_b.scene),
                 },
             )
             .unwrap();
@@ -2124,7 +2312,7 @@ mod tests {
         let pixels = gpu_pixels(&mut renderer, &transform_plan, transformed);
         assert_tolerant_pixels(&expected, &pixels, 4, 2.0);
 
-        let (text_svg_plan, text_svg_prepared) = text_svg_document_proof();
+        let (text_svg_plan, text_svg_prepared) = text_svg_document_proof(None, 77);
         let expected = cpu_pixels(text_svg_prepared.recording.clone(), &text_svg_plan);
         let pixels = gpu_pixels(&mut renderer, &text_svg_plan, text_svg_prepared.recording);
         assert_tolerant_pixels(&expected, &pixels, 8, 8.0);
@@ -2139,6 +2327,7 @@ mod tests {
             revision: fallback_plan.scene_revision,
             recording: filtered_solid_recording(),
         };
+        let expected = cpu_reference_pixels(&fallback_plan, prepared.clone());
         let (pixels, path) = facade
             .render(
                 &fallback_plan,
@@ -2150,8 +2339,11 @@ mod tests {
                 prepared,
             )
             .unwrap();
-        assert_eq!(path, RenderPath::CpuFallback);
-        assert_eq!(pixels.len(), 64 * 48 * 4);
+        assert_eq!(path, RenderPath::Gpu);
+        assert_tolerant_pixels(&expected, &pixels, 2, 1.0);
+        let statistics = facade.gpu.as_ref().unwrap().statistics();
+        assert_eq!(statistics.gpu_color_filter_passes, 1);
+        assert_eq!(statistics.gpu_color_filter_operation_uploads, 1);
 
         let blur_surface = RenderSurfaceId {
             instance: 15,
@@ -2216,6 +2408,7 @@ mod tests {
                     revision: plan_a.scene_revision,
                     recording: solid_recording(),
                     resources: plan_a.scene.live_resources(),
+                    effect_plans: collect_effect_plans(&plan_a.scene),
                 },
             )
             .unwrap();
@@ -2269,5 +2462,211 @@ mod tests {
             renderer.statistics(),
             renderer.cache_usage(),
         );
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn hardware_native_color_filters_match_cpu_reference() {
+        let filters = [
+            ("brightness(0)", true),
+            ("brightness(1)", false),
+            ("brightness(8)", true),
+            ("contrast(0)", true),
+            ("contrast(1)", false),
+            ("contrast(8)", true),
+            ("grayscale(0)", false),
+            ("grayscale(.5)", true),
+            ("grayscale(1)", true),
+            ("hue-rotate(0deg)", false),
+            ("hue-rotate(90deg)", true),
+            ("hue-rotate(-90deg)", true),
+            ("invert(0)", false),
+            ("invert(.5)", true),
+            ("invert(1)", true),
+            ("opacity(0)", true),
+            ("opacity(.5)", true),
+            ("opacity(1)", false),
+            ("saturate(0)", true),
+            ("saturate(1)", false),
+            ("saturate(8)", true),
+            ("sepia(0)", false),
+            ("sepia(.5)", true),
+            ("sepia(1)", true),
+            ("brightness(2) contrast(2)", true),
+            ("contrast(2) brightness(2)", true),
+            ("grayscale(1) hue-rotate(90deg)", true),
+            ("hue-rotate(90deg) grayscale(1)", true),
+            ("invert(1) opacity(.5)", true),
+            ("opacity(.5) invert(1)", true),
+            ("brightness(8) brightness(.5)", true),
+            ("brightness(.5) brightness(8)", true),
+            ("sepia(1) saturate(8) contrast(2)", true),
+            ("contrast(2) saturate(8) sepia(1)", true),
+        ];
+        let expected_passes =
+            u64::try_from(filters.iter().filter(|(_, executes)| *executes).count()).unwrap();
+        let mut renderer =
+            VelloOffscreenRenderer::new(false).expect("compatible offscreen GPU adapter");
+        for (index, (filter, _executes)) in filters.into_iter().enumerate() {
+            let serial = 10_000 + index as u64;
+            let (plan, prepared) = color_filter_document_proof(filter, None, serial, 120);
+            let cpu_started = Instant::now();
+            let expected = cpu_reference_pixels(&plan, prepared.clone());
+            let cpu_micros = cpu_started.elapsed().as_micros();
+            let gpu_started = Instant::now();
+            let actual = gpu_pixels(&mut renderer, &plan, prepared.recording);
+            let gpu_micros = gpu_started.elapsed().as_micros();
+            assert_tolerant_pixels(&expected, &actual, 2, 2.0);
+            let (maximum_error, differing_percent) = pixel_difference_metrics(&expected, &actual);
+            eprintln!(
+                "native_color_filter filter={filter} cpu_us={cpu_micros} gpu_offscreen_readback_us={gpu_micros} max_error={maximum_error} differing_percent={differing_percent:.3}"
+            );
+            renderer.release_target(plan.surface);
+        }
+        let statistics = renderer.statistics();
+        assert_eq!(statistics.gpu_color_filter_passes, expected_passes);
+        assert_eq!(statistics.gpu_color_filter_layer_creations, expected_passes);
+        assert_eq!(
+            statistics.gpu_color_filter_operation_uploads,
+            statistics.gpu_color_filter_passes
+        );
+        assert_eq!(
+            statistics.gpu_color_filter_cache_hits,
+            expected_passes.saturating_sub(1)
+        );
+        assert_eq!(
+            statistics.gpu_color_filter_identity_suppressions,
+            u64::try_from(filters.len()).unwrap() - expected_passes
+        );
+        assert_eq!(statistics.fallback_requests, 0);
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn hardware_native_color_filter_includes_text_svg_and_box_shadow() {
+        let (plan, prepared) = text_svg_document_proof(Some("sepia(.5) saturate(2)"), 60_001);
+        let expected = cpu_reference_pixels(&plan, prepared.clone());
+        let mut renderer =
+            VelloOffscreenRenderer::new(false).expect("compatible offscreen GPU adapter");
+        let actual = gpu_pixels(&mut renderer, &plan, prepared.recording);
+        assert_tolerant_pixels(&expected, &actual, 4, 3.0);
+        assert_eq!(renderer.statistics().gpu_color_filter_passes, 1);
+        assert_eq!(renderer.statistics().fallback_requests, 0);
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn hardware_native_color_filter_reuse_stress_is_bounded() {
+        const FRAMES: u64 = 500;
+        let mut renderer =
+            VelloOffscreenRenderer::new(false).expect("compatible offscreen GPU adapter");
+        for index in 0..FRAMES {
+            let factor = 1.1 + (index % 8) as f32 * 0.1;
+            let filter = format!("brightness({factor:.1}) contrast(1.2)");
+            let (plan, prepared) = color_filter_document_proof(&filter, None, 70_000 + index, 120);
+            let expected =
+                (index % 100 == 0).then(|| cpu_reference_pixels(&plan, prepared.clone()));
+            let actual = gpu_pixels(&mut renderer, &plan, prepared.recording);
+            if let Some(expected) = expected {
+                assert_tolerant_pixels(&expected, &actual, 2, 2.0);
+            }
+            renderer.release_target(plan.surface);
+        }
+        let statistics = renderer.statistics();
+        assert_eq!(statistics.gpu_color_filter_passes, FRAMES);
+        assert_eq!(statistics.gpu_color_filter_layer_creations, FRAMES);
+        assert_eq!(statistics.gpu_color_filter_operation_uploads, FRAMES);
+        assert_eq!(
+            statistics.gpu_color_filter_cache_hits,
+            FRAMES.saturating_sub(1)
+        );
+        assert_eq!(statistics.fallback_requests, 0);
+        assert!(renderer.targets.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn hardware_native_color_filters_preserve_fractional_scale() {
+        let mut renderer =
+            VelloOffscreenRenderer::new(false).expect("compatible offscreen GPU adapter");
+        for numerator in [120, 150, 180] {
+            let serial = 20_000 + u64::from(numerator);
+            let (plan, prepared) =
+                color_filter_document_proof("invert(.5) saturate(2)", None, serial, numerator);
+            let expected = cpu_reference_pixels(&plan, prepared.clone());
+            let actual = gpu_pixels(&mut renderer, &plan, prepared.recording);
+            assert_tolerant_pixels(&expected, &actual, 4, 3.0);
+            renderer.release_target(plan.surface);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn hardware_nested_native_color_filters_execute_inside_out() {
+        let mut renderer =
+            VelloOffscreenRenderer::new(false).expect("compatible offscreen GPU adapter");
+        let (plan, prepared) =
+            color_filter_document_proof("invert(1)", Some("brightness(.5)"), 30_001, 120);
+        let expected = cpu_reference_pixels(&plan, prepared.clone());
+        let actual = gpu_pixels(&mut renderer, &plan, prepared.recording);
+        assert_tolerant_pixels(&expected, &actual, 2, 2.0);
+        let statistics = renderer.statistics();
+        assert_eq!(statistics.gpu_color_filter_passes, 2);
+        assert_eq!(statistics.gpu_color_filter_layer_creations, 2);
+        assert_eq!(statistics.fallback_requests, 0);
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn hardware_identity_color_list_suppresses_layer_pipeline_and_upload() {
+        let (plan, prepared) = color_filter_document_proof(
+            "brightness(1) contrast(1) grayscale(0) hue-rotate(0deg) invert(0) opacity(1) saturate(1) sepia(0)",
+            None,
+            40_002,
+            120,
+        );
+        let expected = cpu_reference_pixels(&plan, prepared.clone());
+        let mut renderer =
+            VelloOffscreenRenderer::new(false).expect("compatible offscreen GPU adapter");
+        let actual = gpu_pixels(&mut renderer, &plan, prepared.recording);
+        assert_tolerant_pixels(&expected, &actual, 2, 1.0);
+        let statistics = renderer.statistics();
+        assert_eq!(statistics.gpu_color_filter_identity_suppressions, 1);
+        assert_eq!(statistics.gpu_color_filter_layer_creations, 0);
+        assert_eq!(statistics.gpu_color_filter_passes, 0);
+        assert_eq!(statistics.gpu_color_filter_operation_uploads, 0);
+        assert!(renderer.color_effect_pipeline.is_none());
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn hardware_spatial_lists_use_complete_cpu_fallback_without_gpu_prefixes() {
+        for (index, filter) in [
+            "brightness(2) blur(1px)",
+            "blur(1px) brightness(2)",
+            "contrast(2) drop-shadow(4px 4px 1px black)",
+            "drop-shadow(4px 4px 1px black) sepia(1)",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let serial = 50_000 + index as u64;
+            let (plan, prepared) = color_filter_document_proof(filter, None, serial, 120);
+            let expected = cpu_reference_pixels(&plan, prepared.clone());
+            let target = RenderTarget {
+                width: plan.physical_width,
+                height: plan.physical_height,
+                pixel_format: PixelFormat::PremultipliedRgba8,
+            };
+            let mut renderer = OffscreenRenderer::new(false);
+            assert!(renderer.backend_info().is_some());
+            let (actual, path) = renderer.render(&plan, target, prepared).unwrap();
+            assert_eq!(path, RenderPath::CpuFallback);
+            assert_eq!(actual, expected);
+            let statistics = renderer.gpu.as_ref().unwrap().statistics();
+            assert_eq!(statistics.gpu_color_filter_passes, 0);
+            assert_eq!(statistics.gpu_color_filter_operation_uploads, 0);
+            assert_eq!(statistics.gpu_color_filter_fallback_requests, 1);
+        }
     }
 }

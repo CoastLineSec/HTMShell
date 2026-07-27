@@ -4,7 +4,7 @@ use super::partial::{
 };
 use super::{
     BackendError, BackendErrorKind, DeviceGeneration, GpuCoverage, GpuPreparedScene, RenderTarget,
-    VelloOffscreenRenderer, VelloScenePainter, validate_plan, validate_target,
+    VelloOffscreenRenderer, collect_effect_plans, validate_plan, validate_target,
 };
 use crate::LiveGpuPreparedFrame;
 use crate::render::{
@@ -321,6 +321,19 @@ pub struct LiveGpuStatistics {
     pub surface_occluded: u64,
     pub device_losses: u64,
     pub target_recreations: u64,
+    pub gpu_color_filter_layer_creations: u64,
+    pub gpu_color_filter_layer_reuses: u64,
+    pub gpu_color_filter_passes: u64,
+    pub gpu_color_filter_identity_suppressions: u64,
+    pub gpu_color_filter_partial_frames: u64,
+    pub gpu_color_filter_full_frames: u64,
+    pub gpu_color_filter_operation_uploads: u64,
+    pub gpu_color_filter_cache_hits: u64,
+    pub gpu_color_filter_fallback_requests: u64,
+    pub gpu_color_filter_allocation_failures: u64,
+    pub gpu_color_filter_pipeline_failures: u64,
+    pub gpu_color_filter_device_resets: u64,
+    pub gpu_color_filter_pixels: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -827,6 +840,17 @@ impl LiveGpuPresenter {
             ));
         }
         if VelloOffscreenRenderer::coverage(plan)? == GpuCoverage::CpuFrameFallback {
+            self.backend.statistics.fallback_requests =
+                self.backend.statistics.fallback_requests.saturating_add(1);
+            self.backend.statistics.gpu_color_filter_fallback_requests = self
+                .backend
+                .statistics
+                .gpu_color_filter_fallback_requests
+                .saturating_add(1);
+            self.statistics.gpu_color_filter_fallback_requests = self
+                .statistics
+                .gpu_color_filter_fallback_requests
+                .saturating_add(1);
             let eligibility = LiveGpuFrameMode::CpuFallback;
             debug_assert_eq!(eligibility, LiveGpuFrameMode::CpuFallback);
             return Err(LiveGpuError::new(
@@ -839,6 +863,7 @@ impl LiveGpuPresenter {
             plan.document,
             frame.prepared().prepared.clone(),
             plan.scene.live_resources(),
+            collect_effect_plans(&plan.scene),
         );
         use crate::render::Renderer;
         self.backend.prepare(plan, gpu_prepared)?;
@@ -1095,6 +1120,12 @@ impl LiveGpuPresenter {
                     .statistics
                     .scratch_replacements
                     .saturating_add(u64::try_from(update.scratch_created).unwrap_or(u64::MAX));
+                if update.color_filter_passes > 0 {
+                    self.statistics.gpu_color_filter_partial_frames = self
+                        .statistics
+                        .gpu_color_filter_partial_frames
+                        .saturating_add(1);
+                }
             }
             LiveGpuFrameMode::FullGpu => {
                 self.statistics.full_target_renders =
@@ -1103,6 +1134,12 @@ impl LiveGpuPresenter {
                     .statistics
                     .full_target_pixels_rendered
                     .saturating_add(update.rasterized_pixels);
+                if update.color_filter_passes > 0 {
+                    self.statistics.gpu_color_filter_full_frames = self
+                        .statistics
+                        .gpu_color_filter_full_frames
+                        .saturating_add(1);
+                }
                 if matches!(
                     decision,
                     DamageRenderDecision::FullGpu {
@@ -1125,6 +1162,27 @@ impl LiveGpuPresenter {
             .statistics
             .backing_pixels_updated
             .saturating_add(update.backing_pixels);
+        let backend_statistics = self.backend.statistics();
+        self.statistics.gpu_color_filter_layer_creations =
+            backend_statistics.gpu_color_filter_layer_creations;
+        self.statistics.gpu_color_filter_layer_reuses =
+            backend_statistics.gpu_color_filter_layer_reuses;
+        self.statistics.gpu_color_filter_passes = backend_statistics.gpu_color_filter_passes;
+        self.statistics.gpu_color_filter_identity_suppressions =
+            backend_statistics.gpu_color_filter_identity_suppressions;
+        self.statistics.gpu_color_filter_operation_uploads =
+            backend_statistics.gpu_color_filter_operation_uploads;
+        self.statistics.gpu_color_filter_cache_hits =
+            backend_statistics.gpu_color_filter_cache_hits;
+        self.statistics.gpu_color_filter_fallback_requests =
+            backend_statistics.gpu_color_filter_fallback_requests;
+        self.statistics.gpu_color_filter_allocation_failures =
+            backend_statistics.gpu_color_filter_allocation_failures;
+        self.statistics.gpu_color_filter_pipeline_failures =
+            backend_statistics.gpu_color_filter_pipeline_failures;
+        self.statistics.gpu_color_filter_device_resets =
+            backend_statistics.gpu_color_filter_device_resets;
+        self.statistics.gpu_color_filter_pixels = backend_statistics.gpu_color_filter_pixels;
         Ok(PendingLiveGpuFrame {
             surface: plan.surface,
             scene_revision: plan.scene_revision,
@@ -1220,6 +1278,16 @@ impl LiveGpuPresenter {
         self.backend.cache.clear();
         self.backend.device_generation =
             DeviceGeneration(self.backend.device_generation.0.saturating_add(1));
+        self.backend.color_effect_pipeline = None;
+        self.backend.statistics.gpu_color_filter_device_resets = self
+            .backend
+            .statistics
+            .gpu_color_filter_device_resets
+            .saturating_add(1);
+        self.statistics.gpu_color_filter_device_resets = self
+            .statistics
+            .gpu_color_filter_device_resets
+            .saturating_add(1);
         self.statistics.device_losses = self.statistics.device_losses.saturating_add(1);
     }
 
@@ -1295,6 +1363,7 @@ struct BackingUpdate {
     guard_pixels: u64,
     scratch_created: usize,
     scratch_reused: usize,
+    color_filter_passes: u64,
 }
 
 fn update_persistent_backing(
@@ -1324,15 +1393,27 @@ fn update_persistent_backing(
             false,
         )),
         DamageRenderDecision::FullGpu { .. } => {
-            let scene = build_scene(prepared, plan, 0, 0)?;
-            render_vello_target(
+            let before = backend.statistics.gpu_color_filter_passes;
+            render_prepared_target(
                 backend,
-                &scene,
+                prepared,
+                plan,
+                0,
+                0,
                 &backing.transaction.view,
                 width,
                 height,
-                "full persistent backing",
             )?;
+            let color_filter_passes = backend
+                .statistics
+                .gpu_color_filter_passes
+                .saturating_sub(before);
+            if color_filter_passes > 0 {
+                backend.statistics.gpu_color_filter_full_frames = backend
+                    .statistics
+                    .gpu_color_filter_full_frames
+                    .saturating_add(1);
+            }
             std::mem::swap(&mut backing.current, &mut backing.transaction);
             Ok(BackingUpdate {
                 selected_tiles: 0,
@@ -1342,6 +1423,7 @@ fn update_persistent_backing(
                 guard_pixels: 0,
                 scratch_created: 0,
                 scratch_reused: 0,
+                color_filter_passes,
             })
         }
         DamageRenderDecision::Partial {
@@ -1353,16 +1435,17 @@ fn update_persistent_backing(
                 backing.scratch.push(create_scratch_target(&backend.device));
             }
             let mut guard_pixels = 0u64;
+            let before = backend.statistics.gpu_color_filter_passes;
             for (index, tile) in tiles.iter().enumerate() {
-                let scene =
-                    build_scene(prepared, plan, tile.scratch_origin_x, tile.scratch_origin_y)?;
-                render_vello_target(
+                render_prepared_target(
                     backend,
-                    &scene,
+                    prepared,
+                    plan,
+                    tile.scratch_origin_x,
+                    tile.scratch_origin_y,
                     &backing.scratch[index].view,
                     scratch_extent,
                     scratch_extent,
-                    "damage tile",
                 )?;
             }
             let mut encoder =
@@ -1404,6 +1487,16 @@ fn update_persistent_backing(
                 );
             }
             backend.queue.submit([encoder.finish()]);
+            let color_filter_passes = backend
+                .statistics
+                .gpu_color_filter_passes
+                .saturating_sub(before);
+            if color_filter_passes > 0 {
+                backend.statistics.gpu_color_filter_partial_frames = backend
+                    .statistics
+                    .gpu_color_filter_partial_frames
+                    .saturating_add(1);
+            }
             Ok(BackingUpdate {
                 selected_tiles: tiles.len(),
                 rasterized_pixels: u64::try_from(tiles.len())
@@ -1414,64 +1507,40 @@ fn update_persistent_backing(
                 guard_pixels,
                 scratch_created: tiles.len().saturating_sub(existing_scratch),
                 scratch_reused: tiles.len().min(existing_scratch),
+                color_filter_passes,
             })
         }
     }
 }
 
-fn build_scene(
+#[allow(clippy::too_many_arguments)]
+fn render_prepared_target(
+    backend: &mut VelloOffscreenRenderer,
     prepared: &GpuPreparedScene,
     plan: &crate::render::FramePlan,
     physical_origin_x: u32,
     physical_origin_y: u32,
-) -> Result<vello::Scene, LiveGpuError> {
-    let mut scene = vello::Scene::new();
-    let mut painter = VelloScenePainter::new(&mut scene);
+    view: &wgpu::TextureView,
+    width: u32,
+    height: u32,
+) -> Result<(), LiveGpuError> {
     let scale = f64::from(plan.scale_numerator) / f64::from(plan.scale_denominator);
     let transform =
         Affine::translate((-f64::from(physical_origin_x), -f64::from(physical_origin_y)))
             * Affine::scale(scale);
-    use anyrender::PaintScene;
-    painter.append_scene(prepared.recording.clone(), transform);
-    if painter.unsupported() {
-        return Err(LiveGpuError::new(
-            LiveGpuErrorKind::ResourcePreparation,
-            "live scene requires complete CPU fallback",
-            true,
-        ));
-    }
-    Ok(scene)
-}
-
-fn render_vello_target(
-    backend: &mut VelloOffscreenRenderer,
-    scene: &vello::Scene,
-    view: &wgpu::TextureView,
-    width: u32,
-    height: u32,
-    description: &str,
-) -> Result<(), LiveGpuError> {
-    backend
-        .renderer
-        .render_to_texture(
-            &backend.device,
-            &backend.queue,
-            scene,
-            view,
-            &vello::RenderParams {
-                base_color: vello::peniko::Color::TRANSPARENT,
-                width,
-                height,
-                antialiasing_method: vello::AaConfig::Area,
-            },
-        )
-        .map_err(|error| {
-            LiveGpuError::new(
-                LiveGpuErrorKind::Render,
-                format!("live Vello {description} rendering failed: {error}"),
-                true,
-            )
-        })
+    super::color_effects::render_prepared_scene(
+        &backend.device,
+        &backend.queue,
+        &mut backend.renderer,
+        &mut backend.color_effect_pipeline,
+        prepared,
+        transform,
+        view,
+        width,
+        height,
+        &mut backend.statistics,
+    )
+    .map_err(LiveGpuError::from)
 }
 
 fn create_backing_image(
@@ -1858,19 +1927,28 @@ mod tests {
         backend: &VelloOffscreenRenderer,
         layout: &wgpu::BindGroupLayout,
     ) -> PersistentBacking {
+        persistent_backing_for_size(backend, layout, 768, 768)
+    }
+
+    fn persistent_backing_for_size(
+        backend: &VelloOffscreenRenderer,
+        layout: &wgpu::BindGroupLayout,
+        width: u32,
+        height: u32,
+    ) -> PersistentBacking {
         PersistentBacking {
             current: create_backing_image(
                 &backend.device,
                 layout,
-                768,
-                768,
+                width,
+                height,
                 "HTMShell partial proof current",
             ),
             transaction: create_backing_image(
                 &backend.device,
                 layout,
-                768,
-                768,
+                width,
+                height,
                 "HTMShell partial proof transaction",
             ),
             scratch: Vec::new(),
@@ -2000,6 +2078,7 @@ mod tests {
             revision: initial_plan.scene_revision,
             recording: proof_recording(40.0, true),
             resources: Vec::new(),
+            effect_plans: Vec::new(),
         };
         let initial_decision = select_damage_work(&initial_plan, false, true);
         update_persistent_backing(
@@ -2035,6 +2114,7 @@ mod tests {
             revision: updated_plan.scene_revision,
             recording: proof_recording(40.0, false),
             resources: Vec::new(),
+            effect_plans: Vec::new(),
         };
         let decision = select_damage_work(&updated_plan, true, false);
         assert!(matches!(decision, DamageRenderDecision::Partial { .. }));
@@ -2114,6 +2194,7 @@ mod tests {
             revision: moved_plan.scene_revision,
             recording: proof_recording(400.0, false),
             resources: Vec::new(),
+            effect_plans: Vec::new(),
         };
         let moved_decision = select_damage_work(&moved_plan, true, false);
         assert!(matches!(
@@ -2174,6 +2255,7 @@ mod tests {
             revision: stale_plan.scene_revision,
             recording: proof_recording(410.0, false),
             resources: Vec::new(),
+            effect_plans: Vec::new(),
         };
         let stale_decision = select_damage_work(&stale_plan, true, false);
         let before_stale = read_texture(
@@ -2201,6 +2283,123 @@ mod tests {
             768,
         );
         assert_eq!(after_stale, before_stale);
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn native_color_filter_partial_backing_matches_fresh_full_render() {
+        let mut backend =
+            VelloOffscreenRenderer::new(false).expect("compatible offscreen GPU adapter");
+        let layout = proof_layout(&backend.device);
+        let width = 256;
+        let height = 192;
+        let (mut initial_plan, initial_cpu) =
+            super::super::tests::color_filter_document_proof("brightness(1.25)", None, 40_001, 120);
+        initial_plan.logical_width = width;
+        initial_plan.logical_height = height;
+        initial_plan.physical_width = width;
+        initial_plan.physical_height = height;
+        Arc::make_mut(&mut initial_plan.scene)
+            .viewport
+            .logical_width = width;
+        Arc::make_mut(&mut initial_plan.scene)
+            .viewport
+            .logical_height = height;
+        let initial_prepared = GpuPreparedScene::from_cpu(
+            initial_plan.document,
+            initial_cpu,
+            initial_plan.scene.live_resources(),
+            collect_effect_plans(&initial_plan.scene),
+        );
+        let mut partial = persistent_backing_for_size(&backend, &layout, width, height);
+        let initial_decision = select_damage_work(&initial_plan, false, true);
+        update_persistent_backing(
+            &mut backend,
+            &mut partial,
+            &initial_prepared,
+            &initial_plan,
+            &initial_decision,
+        )
+        .unwrap();
+        partial.initialized = true;
+        partial.revision = Some(SceneRevision(1));
+        partial.force_full_repaint = false;
+
+        let (mut updated_plan, mut updated_cpu) =
+            super::super::tests::color_filter_document_proof("brightness(2)", None, 40_001, 120);
+        updated_plan.scene_revision = SceneRevision(2);
+        updated_plan.prior_scene_revision = Some(SceneRevision(1));
+        updated_plan.logical_width = width;
+        updated_plan.logical_height = height;
+        updated_plan.physical_width = width;
+        updated_plan.physical_height = height;
+        updated_plan.damage = DamageRegion::Rects(vec![crate::model::LogicalRect {
+            x: 8.0,
+            y: 8.0,
+            width: 28.0,
+            height: 24.0,
+        }]);
+        updated_plan.full_repaint = false;
+        updated_plan.delta.from_revision = Some(SceneRevision(1));
+        updated_plan.delta.to_revision = SceneRevision(2);
+        updated_plan.delta.full_scene_replacement = false;
+        let scene = Arc::make_mut(&mut updated_plan.scene);
+        scene.revision = SceneRevision(2);
+        scene.viewport.logical_width = width;
+        scene.viewport.logical_height = height;
+        updated_cpu.revision = SceneRevision(2);
+        let updated_prepared = GpuPreparedScene::from_cpu(
+            updated_plan.document,
+            updated_cpu,
+            updated_plan.scene.live_resources(),
+            collect_effect_plans(&updated_plan.scene),
+        );
+        let decision = select_damage_work(&updated_plan, true, false);
+        assert!(matches!(decision, DamageRenderDecision::Partial { .. }));
+        let update = update_persistent_backing(
+            &mut backend,
+            &mut partial,
+            &updated_prepared,
+            &updated_plan,
+            &decision,
+        )
+        .unwrap();
+        assert!(update.color_filter_passes > 0);
+        assert!(update.backing_pixels < u64::from(width) * u64::from(height));
+
+        let actual = read_texture(
+            &backend.device,
+            &backend.queue,
+            &partial.current.texture,
+            width,
+            height,
+        );
+        let mut fresh = persistent_backing_for_size(&backend, &layout, width, height);
+        let full = DamageRenderDecision::FullGpu {
+            damage: vec![crate::render::PhysicalDamageRect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            }],
+            reason: super::super::partial::FullRenderReason::Initial,
+        };
+        update_persistent_backing(
+            &mut backend,
+            &mut fresh,
+            &updated_prepared,
+            &updated_plan,
+            &full,
+        )
+        .unwrap();
+        let expected = read_texture(
+            &backend.device,
+            &backend.queue,
+            &fresh.current.texture,
+            width,
+            height,
+        );
+        assert_eq!(actual, expected);
     }
 
     #[test]

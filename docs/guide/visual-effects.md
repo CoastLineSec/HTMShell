@@ -45,11 +45,13 @@ Drop shadow follows rendered alpha rather than box geometry. Transparent image h
 
 The element's external clip, element opacity, and transform apply after its filter list. Consequently, blur may extend outside the SourceGraphic before the external clip is applied. `filter: opacity(50%)` is distinct from the `opacity` property and both apply when both are present.
 
-CPU headless and CPU Wayland presentation use the same reference compositor. The optional experimental Vello path does not execute filters on the GPU yet; a supported nonidentity foreground filter list selects one complete CPU-rendered frame instead.
+CPU headless and CPU Wayland presentation use the same reference compositor. The optional experimental Vello path executes lists containing only the eight color functions with a bounded native GPU effect layer. It uses the same encoded-sRGB matrices, function order, repeated stages, straight-alpha semantics, and per-stage clamping as the CPU reference.
+
+Vello color-only frames do not use CPU frame rasterization, GPU readback, or shared-memory presentation. Identity-only lists skip the GPU effect layer. Lists containing `blur()` or `drop-shadow()` remain indivisible and select one complete CPU-rendered frame; Vello does not execute a color prefix or suffix around a spatial stage. The GPU effect layer uses canonical `Rgba8Unorm`, permits at most 16 operations, and follows the same 4,096 pixel dimension, 64 MiB image, 256 MiB per-surface, and nesting limits.
 
 ## Current boundary
 
-All ten functions in this bounded foreground profile render through the CPU reference compositor. URL filters, multiple drop shadows in one list, spread, inset shadows, and `backdrop-filter` are not supported.
+All ten functions in this bounded foreground profile render through the CPU reference compositor. The eight nonspatial color functions also have experimental native Vello execution. Blur and drop shadow use complete CPU-frame fallback in Vello mode. Vello remains optional and experimental. URL filters, multiple drop shadows in one list, spread, inset shadows, and `backdrop-filter` are not supported.
 
 Foreground filters are static. Animation and transitions are not implemented.
 

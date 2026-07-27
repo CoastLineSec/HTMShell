@@ -22,7 +22,9 @@ The input includes the element background, border, content, descendants, text, i
 
 Color runs process straight RGBA in encoded sRGB and clamp after every function. Blur processes canonical premultiplied RGBA with transparent-black edge samples. Drop shadow uses the current stage alpha, applies the shared blur, offset, and encoded-sRGB color, then composites the source above the shadow. The compositor returns to canonical premultiplied RGBA at every color or spatial boundary. External clipping, element opacity, and the element transform follow filtering.
 
-The CPU renderer is authoritative. The experimental Vello presenter uses complete CPU-frame fallback for every supported nonidentity foreground filter list.
+The CPU renderer is authoritative. The experimental Vello backend executes color-only lists natively in one bounded GPU pass over an isolated SourceGraphic. It preserves function order, repeated functions, encoded-sRGB straight-alpha processing, and a clamp after every stage. Identity-only lists skip the effect pass.
+
+A list containing `blur()` or `drop-shadow()` remains indivisible and uses complete CPU-frame fallback in Vello mode. No color prefix or suffix is split onto the GPU. Backdrop filtering remains unsupported.
 
 Invalid or excessive syntax invalidates the complete declaration. An accepted executable filter that exceeds a runtime layer allocation limit reports a bounded render failure rather than becoming visually unfiltered.
 

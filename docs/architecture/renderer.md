@@ -31,8 +31,18 @@ rasterization, GPU readback, nor shared-memory presentation.
 
 Vello renders solid and rounded geometry, text, SVG, opacity, clips, affine
 transforms, background layers, and box shadows. Raster images are decoded by
-the existing bounded resource path and composed by the GPU. Nonidentity foreground filters and backdrop filters request a complete CPU fallback so content is never silently
-omitted.
+the existing bounded resource path and composed by the GPU. Color-only
+foreground filter lists isolate the complete SourceGraphic into a bounded
+straight-alpha `Rgba8Unorm` texture. One fixed shader consumes up to 16 packed
+semantic operations in order and clamps after every stage. Nested filters
+resolve inside-out, and the filtered texture returns to Vello without CPU
+rasterization or readback. Identity-only lists skip the layer and shader.
+
+Lists containing blur or drop shadow remain indivisible and request complete
+CPU fallback; color prefixes and suffixes are not split across backends.
+Backdrop filters also request complete CPU fallback so content is never
+silently omitted. GPU effect textures, operation buffers, and the one
+device-generation-scoped pipeline obey the renderer's bounded effect limits.
 
 ## Damage and presentation
 
@@ -60,7 +70,8 @@ and frame callbacks remain distinct responsibilities.
 The Vello backend cache is keyed by device generation, neutral resource
 identity, resource version, and prepared representation. Entry, byte, and
 single-resource limits bound the cache. Device reset discards backend handles,
-while neutral scenes and resources remain authoritative.
+including the color-effect pipeline and layers, while neutral scenes and
+resources remain authoritative.
 
 Exactly one presenter owns a Wayland surface generation. GPU absence,
 unsupported effects, allocation or preparation failure, surface failure, and

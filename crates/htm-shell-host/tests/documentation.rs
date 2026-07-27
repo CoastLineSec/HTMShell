@@ -205,7 +205,7 @@ fn public_documentation_style_is_safe_and_page_shape_is_stable() {
 }
 
 #[test]
-fn foreground_filter_docs_and_example_cover_the_complete_cpu_subset() {
+fn foreground_filter_docs_and_example_cover_cpu_and_native_vello_boundaries() {
     let root = workspace_root();
     let guide = fs::read_to_string(root.join("docs/guide/visual-effects.md")).unwrap();
     let reference = read_joined(&markdown_files(&root.join("docs/types/HTMShell.CSS")));
@@ -246,10 +246,28 @@ fn foreground_filter_docs_and_example_cover_the_complete_cpu_subset() {
         "transparent black",
         "premultiplied",
         "64 logical pixels",
+        "eight nonspatial color functions",
+        "experimental native Vello execution",
+        "complete CPU-frame fallback",
+        "does not execute blur natively",
+        "does not execute drop shadow natively",
+        "Vello remains optional and experimental",
     ] {
         assert!(
             public.contains(statement),
             "missing filter boundary: {statement}"
+        );
+    }
+    for forbidden in [
+        "native Vello blur",
+        "native Vello drop shadow",
+        "native GPU backdrop",
+        "renderer selector",
+        "HTMSHELL_RENDERER",
+    ] {
+        assert!(
+            !public.contains(forbidden),
+            "public filter documentation overstates or exposes {forbidden}"
         );
     }
     for syntax in [
