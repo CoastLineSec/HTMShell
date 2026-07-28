@@ -50,19 +50,41 @@ fn run_inner(package: &Path) -> Result<IncrementalExperimentRun, RuntimeError> {
     let entry = package_snapshot.headless_entry().ok_or_else(|| {
         RuntimeError::InvalidPackage("headless package snapshot has no index.html entry".into())
     })?;
-    let html = entry.html();
     let viewport = ViewportSpec::default();
     let audit = Arc::new(ResourceAudit::default());
 
     let parse_started = Instant::now();
-    let mut document_parse_count = 0u32;
-    let mut document = make_document(
-        html,
-        viewport,
-        &root,
+    let document_parse_count = 1u32;
+    let width = ((viewport.logical_width as f32) * viewport.scale_factor).round() as u32;
+    let height = ((viewport.logical_height as f32) * viewport.scale_factor).round() as u32;
+    let provider = Arc::new(LocalOnlyResourceProvider::new(
+        root.clone(),
         Arc::clone(&audit),
-        &mut document_parse_count,
-    );
+    ));
+    let prepared = entry.prepared_document().ok_or_else(|| {
+        RuntimeError::InvalidPackage("headless package snapshot has no prepared index.html".into())
+    })?;
+    let instantiated = package_snapshot.instantiate_document(
+        prepared,
+        1,
+        DocumentConfig {
+            viewport: Some(Viewport::new(
+                width,
+                height,
+                viewport.scale_factor,
+                ColorScheme::Dark,
+            )),
+            base_url: Some(LocalOnlyResourceProvider::virtual_document_url().to_owned()),
+            net_provider: Some(provider),
+            html_parser_provider: Some(Arc::new(HtmlProvider)),
+            style_threading: StyleThreading::Sequential,
+            ..Default::default()
+        },
+    )?;
+    let mut document = instantiated.document;
+    let component_instances = instantiated.instances;
+    let component_descendants = instantiated.descendants;
+    document.set_incremental_layout(true);
     validate_document_limits(&document)?;
     let parse_ms = elapsed_ms(parse_started);
     let engine_document_id = document.id();
@@ -519,6 +541,8 @@ fn run_inner(package: &Path) -> Result<IncrementalExperimentRun, RuntimeError> {
         total_ms,
         package_root: root,
         package_snapshot,
+        component_instances,
+        component_descendants,
     })
 }
 

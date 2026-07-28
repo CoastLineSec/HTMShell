@@ -216,4 +216,6 @@ pub struct ExperimentRun {
     pub measurements: RunMeasurements,
     pub package_root: PathBuf,
     pub package_snapshot: Arc<crate::PackageSnapshot>,
+    pub component_instances: Vec<crate::ComponentInstanceRecord>,
+    pub component_descendants: Vec<crate::ComponentDescendantProvenance>,
 }

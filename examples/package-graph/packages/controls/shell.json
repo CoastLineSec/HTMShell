@@ -11,5 +11,11 @@
       "id": "dev.coastlinesec.htmshell.shared",
       "path": "shared"
     }
+  ],
+  "components": [
+    {
+      "name": "status-card",
+      "source": "components/status-card.html"
+    }
   ]
 }

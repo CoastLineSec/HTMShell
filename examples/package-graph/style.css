@@ -42,6 +42,26 @@ body {
   background: rgba(31, 41, 65, 0.96);
 }
 
+.graph-status-card {
+  display: grid;
+  gap: 8px;
+  max-width: 420px;
+  padding: 18px;
+  border: 1px solid rgba(177, 197, 255, 0.32);
+  border-radius: 14px;
+  background: rgba(42, 54, 82, 0.72);
+}
+
+.graph-status-card h2,
+.graph-status-card p {
+  margin: 0;
+}
+
+.package-badge {
+  color: #b8c9ff;
+  font-size: 0.85rem;
+}
+
 button {
   margin: 6px;
   padding: 8px 12px;

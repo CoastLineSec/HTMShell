@@ -5,5 +5,11 @@
     "kind": "library",
     "version": "1.0.0"
   },
-  "dependencies": []
+  "dependencies": [],
+  "components": [
+    {
+      "name": "badge-label",
+      "source": "components/badge-label.html"
+    }
+  ]
 }

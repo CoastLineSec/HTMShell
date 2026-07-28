@@ -8,6 +8,12 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::component::{
+    ComponentCatalog, ComponentExport, ComponentName, ComponentValidationTotals,
+    MAX_COMPONENT_EXPORTS_PER_PACKAGE, MAX_COMPONENT_SOURCE_BYTES, PreparedDocument,
+    build_component_catalog, parse_component_source, prepare_root_document,
+};
+
 pub const PACKAGE_MANIFEST_FILE: &str = "shell.json";
 pub const MAX_PACKAGE_ID_BYTES: usize = 255;
 pub const MAX_PACKAGE_ALIAS_BYTES: usize = 64;
@@ -68,6 +74,35 @@ pub enum PackageErrorKind {
     RootTopologyFailure,
     SnapshotGenerationOverflow,
     EntryDocument,
+    InvalidComponentExport,
+    DuplicateComponentExport,
+    InvalidComponentName,
+    ReservedComponentName,
+    ComponentSourceMissing,
+    ComponentSourceInvalidType,
+    ComponentSourceSymlink,
+    ComponentSourceTooLarge,
+    ComponentSourceParse,
+    ComponentTemplateMissing,
+    ComponentTemplateDuplicate,
+    ComponentTemplateUnexported,
+    ComponentSourceRenderedContent,
+    InvalidComponentReference,
+    ComponentAliasUnknown,
+    ComponentExportUnknown,
+    ComponentDependencyCycle,
+    ComponentSourceNodeLimit,
+    ComponentGraphExportLimit,
+    ComponentNestingLimit,
+    ComponentInstanceLimit,
+    ComponentReferencedDefinitionLimit,
+    ComponentExpandedNodeLimit,
+    ComponentInvocationAttributes,
+    ComponentInvocationChildren,
+    ComponentFeatureNotSupported,
+    ComponentResourceNotSupported,
+    ComponentStateActionNotSupported,
+    ComponentRepeatNotSupported,
     PermissionDenied,
     SpecialFile,
     Io,
@@ -82,7 +117,7 @@ pub struct PackageLoadError {
 }
 
 impl PackageLoadError {
-    fn new(kind: PackageErrorKind, message: impl Into<String>) -> Self {
+    pub(crate) fn new(kind: PackageErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: bounded_message(message.into()),
@@ -91,12 +126,12 @@ impl PackageLoadError {
         }
     }
 
-    fn at(mut self, logical_path: impl Into<String>) -> Self {
+    pub(crate) fn at(mut self, logical_path: impl Into<String>) -> Self {
         self.logical_path = Some(bounded_path(logical_path.into()));
         self
     }
 
-    fn in_package(mut self, package_id: impl Into<String>) -> Self {
+    pub(crate) fn in_package(mut self, package_id: impl Into<String>) -> Self {
         self.package_id = Some(bounded_path(package_id.into()));
         self
     }
@@ -311,6 +346,7 @@ pub struct SurfaceTemplate {
     document: PathBuf,
     canonical_document: PathBuf,
     html: Arc<str>,
+    prepared_document: Option<Arc<PreparedDocument>>,
     outputs: OutputScope,
     preset: SurfacePreset,
     namespace: String,
@@ -331,6 +367,10 @@ impl SurfaceTemplate {
 
     pub fn html(&self) -> &str {
         &self.html
+    }
+
+    pub fn prepared_document(&self) -> Option<&Arc<PreparedDocument>> {
+        self.prepared_document.as_ref()
     }
 
     pub fn outputs(&self) -> OutputScope {
@@ -418,6 +458,7 @@ pub struct ResolvedPackage {
     canonical_root: PathBuf,
     manifest_source: Option<PathBuf>,
     dependencies: Vec<ResolvedPackageDependency>,
+    components: Vec<ComponentExport>,
 }
 
 impl ResolvedPackage {
@@ -456,6 +497,10 @@ impl ResolvedPackage {
     pub fn dependencies(&self) -> &[ResolvedPackageDependency] {
         &self.dependencies
     }
+
+    pub fn components(&self) -> &[ComponentExport] {
+        &self.components
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -463,6 +508,7 @@ pub struct PackageEntryDocument {
     logical_path: PathBuf,
     canonical_path: PathBuf,
     html: Arc<str>,
+    prepared_document: Option<Arc<PreparedDocument>>,
 }
 
 impl PackageEntryDocument {
@@ -477,6 +523,10 @@ impl PackageEntryDocument {
     pub fn html(&self) -> &str {
         &self.html
     }
+
+    pub fn prepared_document(&self) -> Option<&Arc<PreparedDocument>> {
+        self.prepared_document.as_ref()
+    }
 }
 
 #[derive(Debug)]
@@ -487,6 +537,7 @@ pub struct PackageSnapshot {
     root_index: usize,
     root_manifest: Option<ShellManifest>,
     headless_entry: Option<PackageEntryDocument>,
+    components: Arc<ComponentCatalog>,
     bytes_read: u64,
     measurements: ManifestMeasurements,
 }
@@ -514,6 +565,22 @@ impl PackageSnapshot {
 
     pub fn headless_entry(&self) -> Option<&PackageEntryDocument> {
         self.headless_entry.as_ref()
+    }
+
+    pub fn components(&self) -> &ComponentCatalog {
+        &self.components
+    }
+
+    pub fn component_definition_id(
+        &self,
+        key: &crate::ComponentDefinitionKey,
+    ) -> Option<crate::ComponentDefinitionId> {
+        self.components
+            .definition(key)
+            .map(|_| crate::ComponentDefinitionId {
+                generation: self.generation,
+                key: key.clone(),
+            })
     }
 
     pub fn bytes_read(&self) -> u64 {
@@ -549,6 +616,15 @@ impl PackageSnapshot {
             json
         })
     }
+
+    pub(crate) fn instantiate_document(
+        &self,
+        prepared: &PreparedDocument,
+        document_serial: u64,
+        config: blitz_dom::DocumentConfig,
+    ) -> Result<crate::component::InstantiatedDocument, PackageLoadError> {
+        prepared.instantiate(&self.components, self.generation, document_serial, config)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -574,6 +650,7 @@ pub struct PackageSnapshotCandidate {
     root_index: usize,
     root_manifest: Option<ShellManifest>,
     headless_entry: Option<PackageEntryDocument>,
+    components: ComponentCatalog,
     bytes_read: u64,
     measurements: ManifestMeasurements,
 }
@@ -654,6 +731,7 @@ impl PackageSnapshotLoader {
             root_index: candidate.root_index,
             root_manifest: candidate.root_manifest,
             headless_entry: candidate.headless_entry,
+            components: Arc::new(candidate.components),
             bytes_read: candidate.bytes_read,
             measurements: candidate.measurements,
         });
@@ -758,6 +836,9 @@ struct PackageGraphDiagnostic<'a> {
     root_package_id: &'a str,
     package_count: usize,
     dependency_first_packages: Vec<PackageDiagnostic<'a>>,
+    component_definition_count: usize,
+    dependency_first_components: Vec<ComponentDefinitionDiagnostic>,
+    prepared_root_documents: Vec<PreparedDocumentDiagnostic<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -769,6 +850,7 @@ struct PackageDiagnostic<'a> {
     source_schema: PackageSchemaSource,
     compatibility_normalized: bool,
     dependencies: Vec<DependencyDiagnostic<'a>>,
+    component_exports: Vec<ComponentExportDiagnostic<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -777,8 +859,73 @@ struct DependencyDiagnostic<'a> {
     target: &'a str,
 }
 
+#[derive(Debug, Serialize)]
+struct ComponentExportDiagnostic<'a> {
+    name: &'a str,
+    source: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentDefinitionDiagnostic {
+    identity: String,
+    source: String,
+    source_nodes: usize,
+    resolved_references: Vec<ComponentReferenceDiagnostic>,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentReferenceDiagnostic {
+    reference: String,
+    target: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PreparedDocumentDiagnostic<'a> {
+    logical_path: &'a str,
+    component_instances: usize,
+    referenced_definitions: usize,
+    expanded_nodes: usize,
+    maximum_nesting_depth: usize,
+    instance_paths: &'a [String],
+}
+
 impl<'a> PackageGraphDiagnostic<'a> {
     fn from_snapshot(snapshot: &'a PackageSnapshot) -> Self {
+        let mut prepared_root_documents = Vec::new();
+        if let Some(manifest) = snapshot.root_manifest() {
+            prepared_root_documents.extend(manifest.surfaces.iter().filter_map(|surface| {
+                surface.prepared_document().map(|prepared| {
+                    let stats = prepared.stats();
+                    PreparedDocumentDiagnostic {
+                        logical_path: prepared.logical_path(),
+                        component_instances: stats.component_instances,
+                        referenced_definitions: stats.referenced_definitions,
+                        expanded_nodes: stats.expanded_nodes,
+                        maximum_nesting_depth: stats.maximum_nesting_depth,
+                        instance_paths: prepared.logical_instance_paths(),
+                    }
+                })
+            }));
+        }
+        if let Some(prepared) = snapshot
+            .headless_entry()
+            .and_then(PackageEntryDocument::prepared_document)
+        {
+            let stats = prepared.stats();
+            if !prepared_root_documents
+                .iter()
+                .any(|entry| entry.logical_path == prepared.logical_path())
+            {
+                prepared_root_documents.push(PreparedDocumentDiagnostic {
+                    logical_path: prepared.logical_path(),
+                    component_instances: stats.component_instances,
+                    referenced_definitions: stats.referenced_definitions,
+                    expanded_nodes: stats.expanded_nodes,
+                    maximum_nesting_depth: stats.maximum_nesting_depth,
+                    instance_paths: prepared.logical_instance_paths(),
+                });
+            }
+        }
         Self {
             snapshot_generation: snapshot.generation.get(),
             root_package_id: snapshot.root_package().id.as_str(),
@@ -801,8 +948,40 @@ impl<'a> PackageGraphDiagnostic<'a> {
                             target: dependency.target.as_str(),
                         })
                         .collect(),
+                    component_exports: package
+                        .components
+                        .iter()
+                        .map(|export| ComponentExportDiagnostic {
+                            name: export.name().as_str(),
+                            source: export.source(),
+                        })
+                        .collect(),
                 })
                 .collect(),
+            component_definition_count: snapshot.components.definitions().len(),
+            dependency_first_components: snapshot
+                .components
+                .dependency_first_order()
+                .iter()
+                .filter_map(|key| {
+                    let definition = snapshot.components.definition(key)?;
+                    let identity = snapshot.component_definition_id(key)?;
+                    Some(ComponentDefinitionDiagnostic {
+                        identity: identity.deterministic_string(),
+                        source: definition.logical_source().to_owned(),
+                        source_nodes: definition.source_node_count(),
+                        resolved_references: definition
+                            .resolved_references()
+                            .iter()
+                            .map(|(reference, target)| ComponentReferenceDiagnostic {
+                                reference: reference.deterministic_string(),
+                                target: target.deterministic_string(),
+                            })
+                            .collect(),
+                    })
+                })
+                .collect(),
+            prepared_root_documents,
         }
     }
 }
@@ -916,6 +1095,8 @@ struct RawManifestV2 {
     package: RawPackageMetadata,
     #[serde(default)]
     dependencies: Vec<RawDependency>,
+    #[serde(default)]
+    components: Vec<RawComponentExport>,
     surfaces: Option<Vec<RawSurfaceTemplate>>,
 }
 
@@ -933,6 +1114,13 @@ struct RawDependency {
     alias: String,
     id: String,
     path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawComponentExport {
+    name: String,
+    source: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -982,6 +1170,7 @@ struct ParsedPackage {
     schema: PackageSchemaSource,
     compatibility_normalized: bool,
     dependencies: Vec<PackageDependency>,
+    components: Vec<ComponentExport>,
     topology: Option<ShellManifest>,
 }
 
@@ -1208,6 +1397,7 @@ impl<'a> GraphBuilder<'a> {
             canonical_root: package_root,
             manifest_source: Some(manifest_path),
             dependencies: resolved_dependencies,
+            components: parsed.components,
         });
         self.ordered.push(resolved);
         Ok(parsed.id)
@@ -1234,6 +1424,7 @@ impl<'a> GraphBuilder<'a> {
             schema: PackageSchemaSource::SchemaV1,
             compatibility_normalized: true,
             dependencies: Vec::new(),
+            components: Vec::new(),
             topology: Some(topology),
         })
     }
@@ -1268,6 +1459,7 @@ impl<'a> GraphBuilder<'a> {
             .map(PackageVersion::parse)
             .transpose()?;
         let dependencies = validate_dependencies(raw.dependencies, &id)?;
+        let components = validate_component_exports(raw.components, &id)?;
         let topology = match (kind, raw.surfaces) {
             (PackageKind::Shell, Some(surfaces)) => {
                 Some(self.validate_topology(raw.version, id.as_str(), surfaces, package_root)?)
@@ -1295,6 +1487,7 @@ impl<'a> GraphBuilder<'a> {
             schema: PackageSchemaSource::SchemaV2,
             compatibility_normalized: false,
             dependencies,
+            components,
             topology,
         })
     }
@@ -1402,6 +1595,7 @@ impl<'a> GraphBuilder<'a> {
                 document: relative,
                 canonical_document,
                 html: Arc::from(html),
+                prepared_document: None,
                 outputs,
                 preset,
                 namespace,
@@ -1423,9 +1617,172 @@ impl<'a> GraphBuilder<'a> {
         })
     }
 
+    fn load_component_catalog(&mut self) -> Result<ComponentCatalog, PackageLoadError> {
+        let packages = self.ordered.clone();
+        let export_count = packages
+            .iter()
+            .try_fold(0usize, |total, package| {
+                total.checked_add(package.components.len())
+            })
+            .ok_or_else(|| {
+                PackageLoadError::new(
+                    PackageErrorKind::ComponentGraphExportLimit,
+                    "component graph export count overflowed",
+                )
+            })?;
+        if export_count > crate::MAX_COMPONENT_EXPORTS_PER_GRAPH {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::ComponentGraphExportLimit,
+                format!(
+                    "component graph contains {export_count} exports; limit is {}",
+                    crate::MAX_COMPONENT_EXPORTS_PER_GRAPH
+                ),
+            ));
+        }
+
+        let mut unresolved = Vec::with_capacity(export_count);
+        let mut totals = ComponentValidationTotals {
+            export_count,
+            ..Default::default()
+        };
+        for package in &packages {
+            let mut source_order = Vec::new();
+            let mut expected_by_source: BTreeMap<String, BTreeSet<ComponentName>> = BTreeMap::new();
+            for export in package.components() {
+                if !expected_by_source.contains_key(export.source()) {
+                    source_order.push(export.source().to_owned());
+                }
+                expected_by_source
+                    .entry(export.source().to_owned())
+                    .or_default()
+                    .insert(export.name().clone());
+            }
+            let mut parsed_by_source = BTreeMap::new();
+            for source in source_order {
+                let expected = expected_by_source
+                    .get(&source)
+                    .expect("component source order is derived from source map");
+                let html = self.read_component_source(package, &source)?;
+                totals.source_document_count =
+                    totals.source_document_count.checked_add(1).ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::ComponentGraphExportLimit,
+                            "component source document count overflowed",
+                        )
+                    })?;
+                totals.source_read_count = totals.source_read_count.saturating_add(1);
+                totals.source_parse_count = totals.source_parse_count.saturating_add(1);
+                let parsed = parse_component_source(&html, package.id(), &source, expected)?;
+                parsed_by_source.insert(source, parsed);
+            }
+            for export in package.components() {
+                let definition = parsed_by_source
+                    .get_mut(export.source())
+                    .and_then(|source| source.remove(export.name()))
+                    .ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::ComponentTemplateMissing,
+                            format!(
+                                "component export `{}` has no matching parsed template",
+                                export.name()
+                            ),
+                        )
+                        .in_package(package.id().to_string())
+                        .at(export.source())
+                    })?;
+                totals.source_node_count = totals
+                    .source_node_count
+                    .checked_add(definition.source_node_count)
+                    .ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::ComponentSourceNodeLimit,
+                            "component source node total overflowed",
+                        )
+                    })?;
+                unresolved.push(definition);
+            }
+        }
+        build_component_catalog(&packages, unresolved, totals)
+    }
+
+    fn read_component_source(
+        &mut self,
+        package: &ResolvedPackage,
+        logical_source: &str,
+    ) -> Result<String, PackageLoadError> {
+        let mut requested = package.canonical_root().to_path_buf();
+        let components: Vec<_> = logical_source.split('/').collect();
+        for (index, component) in components.iter().enumerate() {
+            requested.push(component);
+            let metadata = self.file_system.metadata(&requested).map_err(|error| {
+                io_package_error(
+                    PackageErrorKind::ComponentSourceMissing,
+                    "inspect component source path",
+                    Path::new(logical_source),
+                    error,
+                )
+                .in_package(package.id().to_string())
+            })?;
+            if metadata.kind == PackageFileKind::Symlink {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentSourceSymlink,
+                    "component source path contains a symbolic link",
+                )
+                .in_package(package.id().to_string())
+                .at(logical_source));
+            }
+            let final_component = index + 1 == components.len();
+            let expected_kind = if final_component {
+                PackageFileKind::File
+            } else {
+                PackageFileKind::Directory
+            };
+            if metadata.kind != expected_kind {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentSourceInvalidType,
+                    if final_component {
+                        "component source is not a regular file"
+                    } else {
+                        "component source path component is not a directory"
+                    },
+                )
+                .in_package(package.id().to_string())
+                .at(logical_source));
+            }
+        }
+        let canonical = self.file_system.canonicalize(&requested).map_err(|error| {
+            io_package_error(
+                PackageErrorKind::ComponentSourceMissing,
+                "resolve component source",
+                Path::new(logical_source),
+                error,
+            )
+            .in_package(package.id().to_string())
+        })?;
+        if !canonical.starts_with(package.canonical_root())
+            || !canonical.starts_with(&self.composition_root)
+        {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::DependencyEscape,
+                "component source resolves outside its owning package",
+            )
+            .in_package(package.id().to_string())
+            .at(logical_source));
+        }
+        read_text_file(
+            self.file_system,
+            &canonical,
+            MAX_COMPONENT_SOURCE_BYTES,
+            &mut self.budget,
+            PackageErrorKind::ComponentSourceTooLarge,
+            logical_source,
+        )
+        .map_err(|error| error.in_package(package.id().to_string()))
+    }
+
     fn finish(
-        self,
-        headless_entry: Option<PackageEntryDocument>,
+        mut self,
+        mut headless_entry: Option<PackageEntryDocument>,
     ) -> Result<PackageSnapshotCandidate, PackageLoadError> {
         let root_index = self.ordered.len().checked_sub(1).ok_or_else(|| {
             PackageLoadError::new(
@@ -1433,12 +1790,33 @@ impl<'a> GraphBuilder<'a> {
                 "package graph contains no root",
             )
         })?;
+        let components = self.load_component_catalog()?;
+        let root_package = Arc::clone(&self.ordered[root_index]);
+        if let Some(manifest) = self.root_topology.as_mut() {
+            for surface in &mut manifest.surfaces {
+                surface.prepared_document = Some(Arc::new(prepare_root_document(
+                    surface.html(),
+                    &path_to_logical(surface.document()),
+                    &root_package,
+                    &components,
+                )?));
+            }
+        }
+        if let Some(entry) = headless_entry.as_mut() {
+            entry.prepared_document = Some(Arc::new(prepare_root_document(
+                entry.html(),
+                &path_to_logical(entry.logical_path()),
+                &root_package,
+                &components,
+            )?));
+        }
         Ok(PackageSnapshotCandidate {
             composition_root: self.composition_root,
             packages: self.ordered,
             root_index,
             root_manifest: self.root_topology,
             headless_entry,
+            components,
             bytes_read: self.budget.bytes,
             measurements: ManifestMeasurements {
                 parse_us: self.root_parse_us,
@@ -1580,13 +1958,24 @@ fn build_headless_candidate(
                 canonical_root: root.clone(),
                 manifest_source: None,
                 dependencies: Vec::new(),
+                components: Vec::new(),
             });
+            let components = ComponentCatalog::empty();
+            let prepared = Arc::new(prepare_root_document(
+                entry.html(),
+                "index.html",
+                &package,
+                &components,
+            )?);
+            let mut entry = entry;
+            entry.prepared_document = Some(prepared);
             Ok(PackageSnapshotCandidate {
                 composition_root: root,
                 packages: vec![package],
                 root_index: 0,
                 root_manifest: None,
                 headless_entry: Some(entry),
+                components,
                 bytes_read: budget.bytes,
                 measurements: ManifestMeasurements::default(),
             })
@@ -1634,6 +2023,7 @@ fn load_headless_entry(
         logical_path: logical,
         canonical_path: canonical,
         html: Arc::from(html),
+        prepared_document: None,
     })
 }
 
@@ -1678,6 +2068,71 @@ fn validate_dependencies(
         });
     }
     Ok(dependencies)
+}
+
+fn validate_component_exports(
+    raw: Vec<RawComponentExport>,
+    owner: &PackageId,
+) -> Result<Vec<ComponentExport>, PackageLoadError> {
+    if raw.len() > MAX_COMPONENT_EXPORTS_PER_PACKAGE {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::InvalidComponentExport,
+            format!(
+                "package `{owner}` has {} component exports; limit is {MAX_COMPONENT_EXPORTS_PER_PACKAGE}",
+                raw.len()
+            ),
+        ));
+    }
+    let mut names = BTreeSet::new();
+    let mut exports = Vec::with_capacity(raw.len());
+    for raw_export in raw {
+        let name = ComponentName::parse(&raw_export.name)
+            .map_err(|error| error.in_package(owner.to_string()))?;
+        let source = validate_component_source_path(&raw_export.source)
+            .map_err(|error| error.in_package(owner.to_string()))?;
+        if !names.insert(name.clone()) {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::DuplicateComponentExport,
+                format!("duplicate component export `{name}`"),
+            )
+            .in_package(owner.to_string()));
+        }
+        exports.push(ComponentExport::new(name, source));
+    }
+    Ok(exports)
+}
+
+fn validate_component_source_path(value: &str) -> Result<String, PackageLoadError> {
+    if value.is_empty()
+        || value.len() > MAX_PACKAGE_PATH_BYTES
+        || value.contains('\0')
+        || value.contains('\\')
+        || value.contains("://")
+        || value.starts_with("//")
+    {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::InvalidComponentExport,
+            format!("component source must contain 1..={MAX_PACKAGE_PATH_BYTES} local UTF-8 bytes"),
+        ));
+    }
+    let path = Path::new(value);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+        || value
+            .split('/')
+            .any(|component| component.is_empty() || component == ".")
+    {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::InvalidComponentExport,
+            "component source must be a normalized package-relative path",
+        ));
+    }
+    Ok(value.to_owned())
 }
 
 fn validate_package_id(value: &str) -> Result<(), PackageLoadError> {
@@ -2547,7 +3002,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v2_rejects_invalid_kinds_and_unimplemented_component_fields() {
+    fn schema_v2_rejects_invalid_kinds_and_component_entry_extensions() {
         let fixture = Fixture::new();
         fixture.write_package(
             ".",
@@ -2560,11 +3015,13 @@ mod tests {
             PackageErrorKind::InvalidPackageKind
         );
 
-        fixture.write_root(&v2_shell("org.example.shell", None, "[]").replacen(
-            "\"dependencies\"",
-            "\"components\":[],\"dependencies\"",
-            1,
-        ));
+        fixture.write_root(
+            &v2_shell("org.example.shell", None, "[]").replacen(
+                "\"dependencies\"",
+                "\"components\":[{\"name\":\"status-card\",\"source\":\"components/status-card.html\",\"inputs\":[]}],\"dependencies\"",
+                1,
+            ),
+        );
         assert_eq!(
             ValidatedManifest::load(fixture.manifest())
                 .unwrap_err()

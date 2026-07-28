@@ -1,8 +1,11 @@
 use htm_runtime::{
     CLOCK_FORMAT_CONVERSIONS, CLOCK_FORMAT_FLAGS, CLOCK_PUBLIC_ATTRIBUTES, ClockFormat,
     ContextualRepeatSource, ItemBindingKey, LiveDocument, LiveDocumentKind, LiveRenderRequest,
-    MAX_CANDIDATE_BYTES, MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT,
-    MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
+    MAX_CANDIDATE_BYTES, MAX_COMPONENT_EXPANDED_NODES, MAX_COMPONENT_EXPORTS_PER_GRAPH,
+    MAX_COMPONENT_EXPORTS_PER_PACKAGE, MAX_COMPONENT_INSTANCES_PER_DOCUMENT,
+    MAX_COMPONENT_NAME_BYTES, MAX_COMPONENT_NESTING_DEPTH, MAX_COMPONENT_REFERENCES_PER_DOCUMENT,
+    MAX_COMPONENT_SOURCE_BYTES, MAX_COMPONENT_SOURCE_NODES,
+    MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT, MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
     MAX_CONTEXTUAL_LINK_REPEATS_PER_GROUP_TEMPLATE, MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT,
     MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE, MAX_DEPENDENCY_DEPTH, MAX_DIRECT_DEPENDENCIES,
     MAX_PACKAGE_ALIAS_BYTES, MAX_PACKAGE_ID_BYTES, MAX_PACKAGE_MANIFEST_BYTES,
@@ -176,6 +179,8 @@ fn public_documentation_links_and_example_paths_resolve() {
         "examples/package-graph/style.css",
         "examples/package-graph/packages/controls/shell.json",
         "examples/package-graph/packages/controls/shared/shell.json",
+        "examples/package-graph/packages/controls/components/status-card.html",
+        "examples/package-graph/packages/controls/shared/components/badge-label.html",
     ] {
         assert!(
             root.join(path).is_file(),
@@ -208,7 +213,7 @@ fn local_package_documentation_matches_the_loader_contract() {
         "immutable generation",
         "last successfully published snapshot",
         "Headless and live",
-        "Component definitions",
+        "Static component",
         "hot reload",
     ] {
         assert!(
@@ -263,6 +268,129 @@ fn local_package_documentation_matches_the_loader_contract() {
             .unwrap()
             .contains(root.to_str().unwrap())
     );
+}
+
+#[test]
+fn component_documentation_matches_the_static_composition_contract() {
+    let root = workspace_root();
+    let package_guide = fs::read_to_string(root.join("docs/guide/packages.md")).unwrap();
+    let guide = fs::read_to_string(root.join("docs/guide/components.md")).unwrap();
+    let reference =
+        fs::read_to_string(root.join("docs/types/HTMShell.Component/README.md")).unwrap();
+    let manifest_reference =
+        fs::read_to_string(root.join("docs/types/HTMShell/ShellManifest.md")).unwrap();
+    let public = format!("{package_guide}\n{guide}\n{reference}\n{manifest_reference}");
+
+    for statement in [
+        "`components`",
+        "`name` and `source`",
+        "data-htm-component",
+        "`htm-use`",
+        "Bare references",
+        "direct dependency alias",
+        "transitive aliases",
+        "Nested",
+        "cycles",
+        "non-rendering component host",
+        "no layout box",
+        "inert",
+        "Only the root",
+        "component inputs",
+        "slots",
+        "component-local IDs",
+        "component-scoped CSS",
+        "state or action",
+        "repeat integration",
+        "external component",
+        "hot reload",
+        "Headless and live",
+        "Multi-output",
+    ] {
+        assert!(
+            public.contains(statement),
+            "missing static component contract: {statement}"
+        );
+    }
+
+    for (value, label) in [
+        (MAX_COMPONENT_NAME_BYTES as u64, "Component name"),
+        (
+            MAX_COMPONENT_EXPORTS_PER_PACKAGE as u64,
+            "Component exports per package",
+        ),
+        (
+            MAX_COMPONENT_EXPORTS_PER_GRAPH as u64,
+            "Component exports per graph",
+        ),
+        (
+            MAX_COMPONENT_SOURCE_NODES as u64,
+            "Source nodes per definition",
+        ),
+        (
+            MAX_COMPONENT_INSTANCES_PER_DOCUMENT as u64,
+            "Component instances per prepared document",
+        ),
+        (
+            MAX_COMPONENT_REFERENCES_PER_DOCUMENT as u64,
+            "Referenced definitions per prepared document",
+        ),
+        (
+            MAX_COMPONENT_NESTING_DEPTH as u64,
+            "Component nesting depth",
+        ),
+        (
+            MAX_COMPONENT_EXPANDED_NODES as u64,
+            "Expanded nodes per prepared document",
+        ),
+    ] {
+        let documented_value = if value >= 1_000 {
+            format!("{},{:03}", value / 1_000, value % 1_000)
+        } else {
+            value.to_string()
+        };
+        assert!(
+            guide.contains(&format!("| {label} | {documented_value}")),
+            "component guide does not match source limit {label}={value}"
+        );
+    }
+    assert!(guide.contains(&format!(
+        "| Component source document | {} MiB |",
+        MAX_COMPONENT_SOURCE_BYTES / (1024 * 1024)
+    )));
+
+    let manifest = ValidatedManifest::load(root.join("examples/package-graph/shell.json")).unwrap();
+    let snapshot = manifest.snapshot();
+    assert_eq!(snapshot.components().definitions().len(), 2);
+    assert_eq!(snapshot.components().totals().source_read_count, 2);
+    assert_eq!(snapshot.components().totals().source_parse_count, 2);
+    assert_eq!(
+        snapshot
+            .components()
+            .dependency_first_order()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        [
+            "dev.coastlinesec.htmshell.shared:badge-label",
+            "dev.coastlinesec.htmshell.controls:status-card",
+        ]
+    );
+    let diagnostic = manifest.deterministic_package_graph_json().unwrap();
+    for expected in [
+        "\"component_exports\"",
+        "\"dependency_first_components\"",
+        "\"component_instances\"",
+        "\"instance_paths\"",
+    ] {
+        assert!(
+            diagnostic.contains(expected),
+            "component diagnostic omits {expected}"
+        );
+    }
+    assert!(!diagnostic.contains(root.to_str().unwrap()));
+
+    assert_eq!(built_in_registry_names().len(), 8);
+    assert!(!built_in_registry_names().contains(&"htm-use"));
 }
 
 #[test]

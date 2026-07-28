@@ -4,6 +4,7 @@ mod adapter;
 mod builtin;
 mod clock;
 mod collection;
+mod component;
 mod error;
 mod identity;
 mod incremental;
@@ -62,6 +63,15 @@ pub use collection::{
     MAX_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_REPEAT_TEMPLATE_DEPTH,
     MAX_UPOWER_DEVICES_PER_PROCESS, NumericValue, PipeWireDocumentDemand, RepeatItemSnapshot,
     RepeatSource, RepeatSourceSnapshot, StateValueFormat, ValueFormatError,
+};
+pub use component::{
+    ComponentCatalog, ComponentDefinition, ComponentDefinitionId, ComponentDefinitionKey,
+    ComponentDescendantProvenance, ComponentExport, ComponentInstanceId, ComponentInstanceRecord,
+    ComponentName, ComponentReference, ComponentValidationTotals, MAX_COMPONENT_EXPANDED_NODES,
+    MAX_COMPONENT_EXPORTS_PER_GRAPH, MAX_COMPONENT_EXPORTS_PER_PACKAGE,
+    MAX_COMPONENT_INSTANCES_PER_DOCUMENT, MAX_COMPONENT_NAME_BYTES, MAX_COMPONENT_NESTING_DEPTH,
+    MAX_COMPONENT_REFERENCES_PER_DOCUMENT, MAX_COMPONENT_SOURCE_BYTES, MAX_COMPONENT_SOURCE_NODES,
+    PreparedDocument, PreparedDocumentStats,
 };
 pub use error::RuntimeError;
 pub use incremental::{

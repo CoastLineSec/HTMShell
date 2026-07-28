@@ -24,6 +24,12 @@ Local package identity, dependencies, and immutable graph snapshots.
 
 - [`Package`](HTMShell.Package/README.md)
 
+## `HTMShell.Component`
+
+Static component definitions, references, and explicit uses.
+
+- [`Component`](HTMShell.Component/README.md)
+
 ## `HTMShell.Elements`
 
 Validated behavior declarations on ordinary HTML.

@@ -8,7 +8,7 @@ Package loading is offline. Manifests cannot select network locations, global pa
 
 A `shell` package owns the graph root, entry documents, and surface topology. It may depend on libraries. A shell cannot be imported.
 
-A `library` package may depend on other libraries. Loading a library validates only its package manifest and dependencies. A library cannot declare surfaces, load visual documents, create service demand, or affect root topology. Reusable component exports are not available yet.
+A `library` package may depend on other libraries and export inert static component definitions. Loading a library cannot declare surfaces, create service demand, load presentation CSS or assets, or affect root topology. An unused definition creates no document or visual work.
 
 ## Schema version 2
 
@@ -27,6 +27,12 @@ The `shell.json` manifest uses a `package` object and an ordered `dependencies` 
       "alias": "controls",
       "id": "org.example.controls",
       "path": "packages/controls"
+    }
+  ],
+  "components": [
+    {
+      "name": "shell-heading",
+      "source": "components/shell-heading.html"
     }
   ],
   "surfaces": [
@@ -60,13 +66,21 @@ The corresponding library manifest is:
     "kind": "library",
     "version": "0.1.0"
   },
-  "dependencies": []
+  "dependencies": [],
+  "components": [
+    {
+      "name": "status-card",
+      "source": "components/status-card.html"
+    }
+  ]
 }
 ```
 
 Package versions are optional SemVer 2.0.0 metadata. HTMShell records a declared version but does not solve ranges or select among versions.
 
 Unknown fields are rejected. Library manifests must omit `surfaces`.
+
+The optional ordered `components` array is accepted only by schema version 2. Each entry has exactly a `name` and a package-relative `source`. The manifest export table is authoritative: every exported name must match exactly one inert template declaration, and every declaration must be exported. See [static components](components.md).
 
 ## Package IDs and aliases
 
@@ -126,10 +140,18 @@ A manifestless headless directory containing `index.html` remains valid and uses
 | Dependency alias | 64 bytes |
 | Package manifest | 256 KiB |
 | Total candidate bytes read | 256 MiB |
+| Component exports per package | 256 |
+| Component exports per graph | 4,096 |
+| Component source document | 2 MiB |
+| Component source nodes per definition | 10,000 |
+| Component instances per prepared document | 4,096 |
+| Referenced definitions per prepared document | 256 |
+| Component nesting depth | 32 |
+| Expanded nodes per prepared document | 50,000 |
 
-Manifest and graph errors reject the candidate rather than truncating it. Library packages do not yet export components, HTML, CSS, or assets for use by another package. Component definitions, component inputs, slots, component-scoped CSS, and hot reload are not implemented.
+Manifest, package, component, and graph errors reject the candidate rather than truncating it. Static component definitions are supported, but component inputs, slots, component-local IDs, component-scoped CSS, state or action access, repeat integration, component-owned external resources, and hot reload are not implemented.
 
-See the [package graph example](../../examples/package-graph/shell.json) and the [`HTMShell.Package`](../types/HTMShell.Package/README.md) reference.
+See the [package graph example](../../examples/package-graph/shell.json), the [`HTMShell.Package`](../types/HTMShell.Package/README.md) reference, and the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference.
 
 Validate that example without creating Wayland surfaces:
 

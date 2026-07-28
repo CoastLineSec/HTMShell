@@ -27,7 +27,7 @@ use std::time::Instant;
 use stylo::color::ColorSpace;
 use stylo::values::computed::CSSPixelLength;
 
-const MAX_DOM_NODES: usize = 10_000;
+const MAX_DOM_NODES: usize = crate::MAX_COMPONENT_EXPANDED_NODES;
 const MAX_DOM_DEPTH: usize = 256;
 const MAX_RESOURCE_RESOLVE_PASSES: usize = 8;
 
@@ -77,7 +77,6 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
         RuntimeError::InvalidPackage("headless package snapshot has no index.html entry".into())
     })?;
     let source = entry.canonical_path().to_path_buf();
-    let html = entry.html();
     let package_read_ms = elapsed_ms(read_started);
 
     let audit = Arc::new(ResourceAudit::default());
@@ -90,9 +89,14 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
     let physical_height =
         ((options.viewport.logical_height as f32) * options.viewport.scale_factor).round() as u32;
 
+    let document_identity = ExperimentalDocumentIdentity { serial: 1 };
     let parse_started = Instant::now();
-    let mut document = HtmlDocument::from_html(
-        html,
+    let prepared = entry.prepared_document().ok_or_else(|| {
+        RuntimeError::InvalidPackage("headless package snapshot has no prepared index.html".into())
+    })?;
+    let instantiated = package_snapshot.instantiate_document(
+        prepared,
+        document_identity.serial,
         DocumentConfig {
             viewport: Some(Viewport::new(
                 physical_width,
@@ -106,7 +110,10 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
             style_threading: StyleThreading::Sequential,
             ..Default::default()
         },
-    );
+    )?;
+    let mut document = instantiated.document;
+    let component_instances = instantiated.instances;
+    let component_descendants = instantiated.descendants;
     document.set_incremental_layout(true);
     validate_document_limits(&document)?;
     let html_parse_ms = elapsed_ms(parse_started);
@@ -116,7 +123,6 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
     resolve_resources(&mut document, &audit, 0.0, &mut messages);
     let initial_resolve_ms = elapsed_ms(initial_resolve_started);
     let identities = IdentityRegistry::from_document(&document);
-    let document_identity = ExperimentalDocumentIdentity { serial: 1 };
     let mut render_session = CpuRenderSession::default();
 
     let initial_paint_started = Instant::now();
@@ -291,6 +297,8 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
         measurements,
         package_root: root,
         package_snapshot,
+        component_instances,
+        component_descendants,
     })
 }
 

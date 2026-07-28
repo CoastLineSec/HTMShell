@@ -41,7 +41,7 @@ Root fields:
 | `id` | Lowercase ASCII letters, digits, and interior hyphens. Maximum 64 bytes. |
 | `surfaces` | Exactly one `panel` and one `overlay`. IDs must be unique. |
 
-Schema version 2 replaces the root `id` with:
+Schema version 2 replaces the root `id` with package metadata and may add local dependencies and component exports:
 
 ```json
 {
@@ -52,6 +52,12 @@ Schema version 2 replaces the root `id` with:
     "version": "1.0.0"
   },
   "dependencies": [],
+  "components": [
+    {
+      "name": "status-card",
+      "source": "components/status-card.html"
+    }
+  ],
   "surfaces": [
     {
       "id": "panel",
@@ -73,7 +79,7 @@ Schema version 2 replaces the root `id` with:
 }
 ```
 
-The `package.id` uses the bounded reverse-DNS syntax, `package.kind` must be `shell` at the root, and `package.version` is optional SemVer 2.0.0 metadata. The existing surface fields and constraints are identical. See [`HTMShell.Package`](../HTMShell.Package/README.md) for dependency fields and graph rules.
+The `package.id` uses the bounded reverse-DNS syntax, `package.kind` must be `shell` at the root, and `package.version` is optional SemVer 2.0.0 metadata. The existing surface fields and constraints are identical. The optional ordered `components` array contains exact `name` and `source` fields. See [`HTMShell.Package`](../HTMShell.Package/README.md) for dependency fields and graph rules and [`HTMShell.Component`](../HTMShell.Component/README.md) for static component syntax.
 
 Shared surface fields:
 
@@ -92,6 +98,6 @@ The manifest is limited to 256 KiB. Document paths cannot be absolute, remote, o
 
 Dimensions are logical pixels. Scale is compositor-provided and cannot be selected by the manifest. Output names are not manifest selectors.
 
-Manifest hot reload, component exports, persistent output selection, scale overrides, additional surface kinds, and more than one panel or overlay template are unavailable.
+Manifest hot reload, component inputs, slots, component-scoped styles, component-owned resources, persistent output selection, scale overrides, additional surface kinds, and more than one panel or overlay template are unavailable.
 
 See the tracked [static panel manifest](../../../examples/static-panel/shell.json), [`PanelSurface`](PanelSurface.md), and [`OverlaySurface`](OverlaySurface.md).

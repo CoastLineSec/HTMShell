@@ -267,4 +267,6 @@ pub struct IncrementalExperimentRun {
     pub total_ms: f64,
     pub package_root: PathBuf,
     pub package_snapshot: Arc<crate::PackageSnapshot>,
+    pub component_instances: Vec<crate::ComponentInstanceRecord>,
+    pub component_descendants: Vec<crate::ComponentDescendantProvenance>,
 }

@@ -534,6 +534,8 @@ pub struct LiveDocument {
     audit: Arc<ResourceAudit>,
     package_root: PathBuf,
     package_snapshot: Option<Arc<crate::PackageSnapshot>>,
+    component_instances: Vec<crate::ComponentInstanceRecord>,
+    component_descendants: Vec<crate::ComponentDescendantProvenance>,
     source: PathBuf,
     viewport: ViewportSpec,
     document_identity: ExperimentalDocumentIdentity,
@@ -878,10 +880,12 @@ impl LiveDocument {
         let package_root = snapshot.root_package().canonical_root().to_path_buf();
         let source = surface.canonical_document().to_path_buf();
         let html = surface.html().to_owned();
+        let prepared_document = surface.prepared_document().cloned();
         Self::load_prepared(
             package_root,
             source,
             html,
+            prepared_document,
             Some(snapshot),
             kind,
             logical_width,
@@ -949,6 +953,7 @@ impl LiveDocument {
             source,
             html,
             None,
+            None,
             kind,
             logical_width,
             logical_height,
@@ -961,6 +966,7 @@ impl LiveDocument {
         package_root: PathBuf,
         source: PathBuf,
         html: String,
+        prepared_document: Option<Arc<crate::PreparedDocument>>,
         package_snapshot: Option<Arc<crate::PackageSnapshot>>,
         kind: LiveDocumentKind,
         logical_width: u32,
@@ -980,18 +986,38 @@ impl LiveDocument {
             package_root.clone(),
             Arc::clone(&audit),
         ));
+        let document_identity = ExperimentalDocumentIdentity {
+            serial: NEXT_LIVE_DOCUMENT_SERIAL.fetch_add(1, Ordering::Relaxed),
+        };
+        let config = DocumentConfig {
+            viewport: Some(blitz_viewport(viewport)),
+            base_url: Some(LocalOnlyResourceProvider::virtual_document_url().to_owned()),
+            net_provider: Some(provider),
+            html_parser_provider: Some(Arc::new(HtmlProvider)),
+            style_threading: StyleThreading::Sequential,
+            ..Default::default()
+        };
         let parse_started = Instant::now();
-        let mut document = HtmlDocument::from_html(
-            &html,
-            DocumentConfig {
-                viewport: Some(blitz_viewport(viewport)),
-                base_url: Some(LocalOnlyResourceProvider::virtual_document_url().to_owned()),
-                net_provider: Some(provider),
-                html_parser_provider: Some(Arc::new(HtmlProvider)),
-                style_threading: StyleThreading::Sequential,
-                ..Default::default()
-            },
-        );
+        let (mut document, component_instances, component_descendants) =
+            match (&package_snapshot, prepared_document) {
+                (Some(snapshot), Some(prepared)) => {
+                    let instantiated = snapshot.instantiate_document(
+                        &prepared,
+                        document_identity.serial,
+                        config,
+                    )?;
+                    (
+                        instantiated.document,
+                        instantiated.instances,
+                        instantiated.descendants,
+                    )
+                }
+                _ => (
+                    HtmlDocument::from_html(&html, config),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            };
         document.set_incremental_layout(true);
         validate_document_limits(&document)?;
         let html_parse_ms = elapsed_ms(parse_started);
@@ -1005,9 +1031,6 @@ impl LiveDocument {
         resolve_resources(&mut document, &audit, 0.0, &mut diagnostics);
         let initial_resolve_ms = elapsed_ms(resolve_started);
         let identities = IdentityRegistry::from_document(&document);
-        let document_identity = ExperimentalDocumentIdentity {
-            serial: NEXT_LIVE_DOCUMENT_SERIAL.fetch_add(1, Ordering::Relaxed),
-        };
         let registry_started = Instant::now();
         ensure_registry_valid()?;
         let registry_initialization_ms = elapsed_ms(registry_started);
@@ -1062,6 +1085,8 @@ impl LiveDocument {
             audit,
             package_root,
             package_snapshot,
+            component_instances,
+            component_descendants,
             source,
             viewport,
             document_identity,
@@ -1558,6 +1583,14 @@ impl LiveDocument {
         self.package_snapshot
             .as_ref()
             .map(|snapshot| snapshot.generation())
+    }
+
+    pub fn component_instances(&self) -> &[crate::ComponentInstanceRecord] {
+        &self.component_instances
+    }
+
+    pub fn component_descendants(&self) -> &[crate::ComponentDescendantProvenance] {
+        &self.component_descendants
     }
 
     pub fn source(&self) -> &Path {
