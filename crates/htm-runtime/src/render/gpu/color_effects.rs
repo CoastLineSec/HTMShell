@@ -1,4 +1,6 @@
+use super::blur_effects::{AlphaConversion, BlurEffectPipelines};
 use super::{BackendError, BackendErrorKind, GPU_WAIT_TIMEOUT, GpuPreparedScene, GpuStatistics};
+use crate::render::cpu_blur::derive_blur_parameters;
 use crate::render::cpu_effects::{
     CpuEffectExecution, CpuEffectPlan, RecordedNode, command_has_foreground_filter,
     filter_space_transforms, flatten_nodes, include_outset_box_shadows, parse_commands,
@@ -86,7 +88,11 @@ pub(super) struct PackedColorOperations {
 
 impl PackedColorOperations {
     pub(super) fn from_list(list: &ForegroundEffectList) -> Result<Self, BackendError> {
-        if list.functions.len() > MAX_FOREGROUND_EFFECT_FUNCTIONS {
+        Self::from_effects(&list.functions)
+    }
+
+    pub(super) fn from_effects(effects: &[ForegroundEffect]) -> Result<Self, BackendError> {
+        if effects.len() > MAX_FOREGROUND_EFFECT_FUNCTIONS {
             return Err(effect_error(
                 BackendErrorKind::ResourcePreparation,
                 "GPU foreground effect list exceeds the operation limit",
@@ -95,10 +101,10 @@ impl PackedColorOperations {
         }
         let mut packed = Self {
             bytes: [0; PACKED_OPERATION_BUFFER_BYTES],
-            operation_count: list.functions.len(),
+            operation_count: effects.len(),
         };
         packed.bytes[..4].copy_from_slice(
-            &u32::try_from(list.functions.len())
+            &u32::try_from(effects.len())
                 .map_err(|_| {
                     effect_error(
                         BackendErrorKind::ResourcePreparation,
@@ -108,7 +114,7 @@ impl PackedColorOperations {
                 })?
                 .to_le_bytes(),
         );
-        for (index, effect) in list.functions.iter().enumerate() {
+        for (index, effect) in effects.iter().enumerate() {
             let ForegroundEffect::Color(color) = effect else {
                 return Err(effect_error(
                     BackendErrorKind::FallbackRequired,
@@ -241,7 +247,7 @@ impl ColorEffectPipeline {
         })
     }
 
-    fn apply(
+    pub(super) fn apply(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -322,16 +328,18 @@ pub(super) fn render_prepared_scene(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     renderer: &mut vello::Renderer,
-    pipeline: &mut Option<ColorEffectPipeline>,
+    color_pipeline: &mut Option<ColorEffectPipeline>,
+    blur_pipelines: &mut Option<BlurEffectPipelines>,
     prepared: &GpuPreparedScene,
     root_transform: Affine,
+    physical_scale: f64,
     target_view: &wgpu::TextureView,
     target_width: u32,
     target_height: u32,
     statistics: &mut GpuStatistics,
 ) -> Result<(), BackendError> {
     let fallback_requests_before = statistics.gpu_color_filter_fallback_requests;
-    let has_native_color_effect = prepared.effect_plans.iter().any(|plan| {
+    let has_native_foreground_effect = prepared.effect_plans.iter().any(|plan| {
         matches!(
             &plan.execution,
             CpuEffectExecution::Ready(list)
@@ -339,7 +347,7 @@ pub(super) fn render_prepared_scene(
                     && list
                         .functions
                         .iter()
-                        .all(|effect| matches!(effect, ForegroundEffect::Color(_)))
+                        .all(|effect| matches!(effect, ForegroundEffect::Color(_) | ForegroundEffect::Blur(_)))
         )
     });
     let mut transformed = Scene::with_tolerance(prepared.recording.tolerance);
@@ -359,7 +367,9 @@ pub(super) fn render_prepared_scene(
         device,
         queue,
         renderer,
-        pipeline,
+        color_pipeline,
+        blur_pipelines,
+        physical_scale,
         &mut registered_images,
         &mut allocated_bytes,
         statistics,
@@ -411,7 +421,7 @@ pub(super) fn render_prepared_scene(
         renderer.unregister_texture(image);
     }
     if result.is_err()
-        && has_native_color_effect
+        && has_native_foreground_effect
         && statistics.gpu_color_filter_fallback_requests == fallback_requests_before
     {
         statistics.gpu_color_filter_fallback_requests = statistics
@@ -432,7 +442,9 @@ fn transform_nodes(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     renderer: &mut vello::Renderer,
-    pipeline: &mut Option<ColorEffectPipeline>,
+    color_pipeline: &mut Option<ColorEffectPipeline>,
+    blur_pipelines: &mut Option<BlurEffectPipelines>,
+    physical_scale: f64,
     registered_images: &mut Vec<ImageData>,
     allocated_bytes: &mut usize,
     statistics: &mut GpuStatistics,
@@ -466,7 +478,9 @@ fn transform_nodes(
             device,
             queue,
             renderer,
-            pipeline,
+            color_pipeline,
+            blur_pipelines,
+            physical_scale,
             registered_images,
             allocated_bytes,
             statistics,
@@ -496,14 +510,16 @@ fn transform_nodes(
                 if list
                     .functions
                     .iter()
-                    .any(|effect| !matches!(effect, ForegroundEffect::Color(_)))
+                    .any(|effect| matches!(effect, ForegroundEffect::DropShadow(_)))
                 {
                     statistics.gpu_color_filter_fallback_requests = statistics
                         .gpu_color_filter_fallback_requests
                         .saturating_add(1);
+                    statistics.gpu_spatial_cpu_fallbacks =
+                        statistics.gpu_spatial_cpu_fallbacks.saturating_add(1);
                     return Err(effect_error(
                         BackendErrorKind::FallbackRequired,
-                        "spatial foreground filters require complete CPU fallback",
+                        "drop-shadow foreground filters require complete CPU fallback",
                         true,
                     ));
                 }
@@ -512,7 +528,7 @@ fn transform_nodes(
                 let filtered_bounds = plan.filtered_bounds.as_ref().ok_or_else(|| {
                     effect_error(
                         BackendErrorKind::ResourcePreparation,
-                        "GPU color effect plan has no filtered bounds",
+                        "GPU foreground effect plan has no filtered bounds",
                         true,
                     )
                 })?;
@@ -524,27 +540,37 @@ fn transform_nodes(
                     to_filter_space,
                 )?
                 else {
-                    // Pointwise color filtering cannot move off-target pixels
-                    // into this target. Remove only the execution marker so an
-                    // unrelated partial tile can replay the complete scene.
+                    // Retained bounds already include every spatial stage. If
+                    // they do not intersect this replay target, the filtered
+                    // subtree cannot contribute to its authoritative pixels.
                     remove_identity_filter(push, target_width, target_height);
                     continue;
                 };
-                let image_bytes = checked_effect_image_bytes(bounds.width, bounds.height)?;
+                let has_blur = list
+                    .functions
+                    .iter()
+                    .any(|effect| matches!(effect, ForegroundEffect::Blur(blur) if blur.sigma.get() > 0.0));
+                let image_bytes = checked_effect_image_bytes(bounds.width, bounds.height)
+                    .inspect_err(|_| {
+                        if has_blur {
+                            statistics.gpu_blur_allocation_failures =
+                                statistics.gpu_blur_allocation_failures.saturating_add(1);
+                        }
+                    })?;
                 let layer_bytes = image_bytes
                     .checked_mul(2)
                     .and_then(|bytes| bytes.checked_add(PACKED_OPERATION_BUFFER_BYTES))
                     .ok_or_else(|| {
                         effect_error(
                             BackendErrorKind::TargetAllocation,
-                            "GPU color effect layer byte accounting overflowed",
+                            "GPU foreground effect layer byte accounting overflowed",
                             true,
                         )
                     })?;
                 *allocated_bytes = allocated_bytes.checked_add(layer_bytes).ok_or_else(|| {
                     effect_error(
                         BackendErrorKind::TargetAllocation,
-                        "GPU color effect surface byte accounting overflowed",
+                        "GPU foreground effect surface byte accounting overflowed",
                         true,
                     )
                 })?;
@@ -552,9 +578,13 @@ fn transform_nodes(
                     statistics.gpu_color_filter_allocation_failures = statistics
                         .gpu_color_filter_allocation_failures
                         .saturating_add(1);
+                    if has_blur {
+                        statistics.gpu_blur_allocation_failures =
+                            statistics.gpu_blur_allocation_failures.saturating_add(1);
+                    }
                     return Err(effect_error(
                         BackendErrorKind::TargetAllocation,
-                        "GPU color effect layers exceed the per-surface byte limit",
+                        "GPU foreground effect layers exceed the per-surface byte limit",
                         true,
                     ));
                 }
@@ -577,7 +607,12 @@ fn transform_nodes(
                     ));
                 }
 
-                let source_texture = create_source_texture(device, bounds.width, bounds.height);
+                let source_texture = create_effect_texture(
+                    device,
+                    bounds.width,
+                    bounds.height,
+                    "HTMShell Vello foreground effect SourceGraphic",
+                );
                 let source_view =
                     source_texture.create_view(&wgpu::TextureViewDescriptor::default());
                 renderer
@@ -601,28 +636,34 @@ fn transform_nodes(
                         )
                     })?;
 
-                let filtered_texture = create_filtered_texture(device, bounds.width, bounds.height);
+                let filtered_texture = create_effect_texture(
+                    device,
+                    bounds.width,
+                    bounds.height,
+                    "HTMShell Vello foreground effect output",
+                );
                 let filtered_view =
                     filtered_texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let operations = PackedColorOperations::from_list(&list)?;
-                if pipeline.is_none() {
-                    *pipeline = Some(ColorEffectPipeline::new(device, statistics)?);
-                } else {
-                    statistics.gpu_color_filter_cache_hits =
-                        statistics.gpu_color_filter_cache_hits.saturating_add(1);
+                let mut textures = [Some(source_texture), Some(filtered_texture)];
+                let views = [source_view, filtered_view];
+                let final_index = apply_ordered_gpu_effects(
+                    device,
+                    queue,
+                    color_pipeline,
+                    blur_pipelines,
+                    &list,
+                    physical_scale,
+                    &views,
+                    statistics,
+                )?;
+                let image = renderer.register_texture(
+                    textures[final_index]
+                        .take()
+                        .expect("final GPU effect texture remains owned"),
+                );
+                if let Some(unused) = textures[1 - final_index].take() {
+                    unused.destroy();
                 }
-                pipeline
-                    .as_ref()
-                    .expect("GPU color effect pipeline was initialized")
-                    .apply(
-                        device,
-                        queue,
-                        &source_view,
-                        &filtered_view,
-                        &operations,
-                        statistics,
-                    )?;
-                let image = renderer.register_texture(filtered_texture);
                 let brush = ImageBrush::new(image.clone());
                 registered_images.push(image);
 
@@ -640,6 +681,13 @@ fn transform_nodes(
                 statistics.gpu_color_filter_layer_creations = statistics
                     .gpu_color_filter_layer_creations
                     .saturating_add(1);
+                if has_blur {
+                    statistics.gpu_blur_layer_creations =
+                        statistics.gpu_blur_layer_creations.saturating_add(1);
+                    statistics.gpu_blur_output_pixels = statistics
+                        .gpu_blur_output_pixels
+                        .saturating_add(u64::from(bounds.width) * u64::from(bounds.height));
+                }
                 statistics.gpu_color_filter_pixels = statistics
                     .gpu_color_filter_pixels
                     .saturating_add(u64::from(bounds.width) * u64::from(bounds.height));
@@ -649,26 +697,150 @@ fn transform_nodes(
     Ok(())
 }
 
-fn create_source_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("HTMShell Vello color effect SourceGraphic"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectAlphaRepresentation {
+    Straight,
+    Premultiplied,
 }
 
-fn create_filtered_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+#[allow(clippy::too_many_arguments)]
+fn apply_ordered_gpu_effects(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    color_pipeline: &mut Option<ColorEffectPipeline>,
+    blur_pipelines: &mut Option<BlurEffectPipelines>,
+    list: &ForegroundEffectList,
+    physical_scale: f64,
+    views: &[wgpu::TextureView; 2],
+    statistics: &mut GpuStatistics,
+) -> Result<usize, BackendError> {
+    if !physical_scale.is_finite() || physical_scale <= 0.0 {
+        return Err(effect_error(
+            BackendErrorKind::InvalidPlan,
+            "GPU foreground effect scale is invalid",
+            false,
+        ));
+    }
+    let mut source_index = 0usize;
+    let mut representation = EffectAlphaRepresentation::Straight;
+    let mut index = 0usize;
+    while index < list.functions.len() {
+        match &list.functions[index] {
+            ForegroundEffect::Color(_) => {
+                if representation == EffectAlphaRepresentation::Premultiplied {
+                    ensure_blur_pipelines(device, blur_pipelines, statistics)?.apply_conversion(
+                        device,
+                        queue,
+                        &views[source_index],
+                        &views[1 - source_index],
+                        AlphaConversion::Unpremultiply,
+                        statistics,
+                    )?;
+                    source_index = 1 - source_index;
+                    representation = EffectAlphaRepresentation::Straight;
+                }
+                let start = index;
+                while index < list.functions.len()
+                    && matches!(list.functions[index], ForegroundEffect::Color(_))
+                {
+                    index += 1;
+                }
+                let operations =
+                    PackedColorOperations::from_effects(&list.functions[start..index])?;
+                if color_pipeline.is_none() {
+                    *color_pipeline = Some(ColorEffectPipeline::new(device, statistics)?);
+                } else {
+                    statistics.gpu_color_filter_cache_hits =
+                        statistics.gpu_color_filter_cache_hits.saturating_add(1);
+                }
+                color_pipeline
+                    .as_ref()
+                    .expect("GPU color effect pipeline was initialized")
+                    .apply(
+                        device,
+                        queue,
+                        &views[source_index],
+                        &views[1 - source_index],
+                        &operations,
+                        statistics,
+                    )?;
+                source_index = 1 - source_index;
+            }
+            ForegroundEffect::Blur(blur) => {
+                index += 1;
+                let physical_sigma = f64::from(blur.sigma.get()) * physical_scale;
+                let parameters = derive_blur_parameters(physical_sigma)?;
+                if matches!(
+                    parameters,
+                    crate::render::cpu_blur::BlurParameters::Identity
+                ) {
+                    continue;
+                }
+                if representation == EffectAlphaRepresentation::Straight {
+                    ensure_blur_pipelines(device, blur_pipelines, statistics)?.apply_conversion(
+                        device,
+                        queue,
+                        &views[source_index],
+                        &views[1 - source_index],
+                        AlphaConversion::Premultiply,
+                        statistics,
+                    )?;
+                    source_index = 1 - source_index;
+                    representation = EffectAlphaRepresentation::Premultiplied;
+                }
+                ensure_blur_pipelines(device, blur_pipelines, statistics)?.apply_blur(
+                    device,
+                    queue,
+                    &mut source_index,
+                    views,
+                    &parameters,
+                    statistics,
+                )?;
+            }
+            ForegroundEffect::DropShadow(_) => {
+                return Err(effect_error(
+                    BackendErrorKind::FallbackRequired,
+                    "drop-shadow requires complete CPU fallback",
+                    true,
+                ));
+            }
+        }
+    }
+    if representation == EffectAlphaRepresentation::Premultiplied {
+        ensure_blur_pipelines(device, blur_pipelines, statistics)?.apply_conversion(
+            device,
+            queue,
+            &views[source_index],
+            &views[1 - source_index],
+            AlphaConversion::Unpremultiply,
+            statistics,
+        )?;
+        source_index = 1 - source_index;
+    }
+    Ok(source_index)
+}
+
+fn ensure_blur_pipelines<'a>(
+    device: &wgpu::Device,
+    pipelines: &'a mut Option<BlurEffectPipelines>,
+    statistics: &mut GpuStatistics,
+) -> Result<&'a mut BlurEffectPipelines, BackendError> {
+    if pipelines.is_none() {
+        *pipelines = Some(BlurEffectPipelines::new(device, statistics)?);
+    }
+    Ok(pipelines
+        .as_mut()
+        .expect("GPU blur pipelines were initialized"))
+}
+
+fn create_effect_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    label: &'static str,
+) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("HTMShell Vello color effect output"),
+        label: Some(label),
         size: wgpu::Extent3d {
             width,
             height,
@@ -678,7 +850,10 @@ fn create_filtered_texture(device: &wgpu::Device, width: u32, height: u32) -> wg
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     })
 }

@@ -8,7 +8,8 @@ use super::{
 };
 use crate::LiveGpuPreparedFrame;
 use crate::render::{
-    DamageRegion, PhysicalDamageRect, PixelFormat, RenderSurfaceId, SceneRevision,
+    DamageRegion, ForegroundEffect, PhysicalDamageRect, PixelFormat, RenderSurfaceId, SceneEffect,
+    SceneRevision,
 };
 use kurbo::Affine;
 use std::collections::BTreeMap;
@@ -334,6 +335,25 @@ pub struct LiveGpuStatistics {
     pub gpu_color_filter_pipeline_failures: u64,
     pub gpu_color_filter_device_resets: u64,
     pub gpu_color_filter_pixels: u64,
+    pub gpu_blur_layer_creations: u64,
+    pub gpu_blur_layer_reuses: u64,
+    pub gpu_blur_gaussian_frames: u64,
+    pub gpu_blur_three_box_frames: u64,
+    pub gpu_blur_gaussian_passes: u64,
+    pub gpu_blur_box_passes: u64,
+    pub gpu_blur_premultiply_conversions: u64,
+    pub gpu_blur_unpremultiply_conversions: u64,
+    pub gpu_blur_kernel_uploads: u64,
+    pub gpu_blur_kernel_cache_hits: u64,
+    pub gpu_blur_box_parameter_uploads: u64,
+    pub gpu_blur_partial_frames: u64,
+    pub gpu_blur_full_frames: u64,
+    pub gpu_spatial_cpu_fallbacks: u64,
+    pub gpu_blur_guarded_replay_pixels: u64,
+    pub gpu_blur_output_pixels: u64,
+    pub gpu_blur_allocation_failures: u64,
+    pub gpu_blur_pipeline_failures: u64,
+    pub gpu_blur_device_resets: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -394,6 +414,8 @@ struct BackingImage {
 struct ScratchTarget {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    width: u32,
+    height: u32,
 }
 
 struct PersistentBacking {
@@ -851,6 +873,25 @@ impl LiveGpuPresenter {
                 .statistics
                 .gpu_color_filter_fallback_requests
                 .saturating_add(1);
+            if plan.scene.nodes.iter().any(|node| {
+                node.effects.iter().any(|effect| {
+                    matches!(
+                        effect,
+                        SceneEffect::ForegroundFilter { list, .. }
+                            if list.functions.iter().any(
+                                |function| matches!(function, ForegroundEffect::DropShadow(_))
+                            )
+                    )
+                })
+            }) {
+                self.backend.statistics.gpu_spatial_cpu_fallbacks = self
+                    .backend
+                    .statistics
+                    .gpu_spatial_cpu_fallbacks
+                    .saturating_add(1);
+                self.statistics.gpu_spatial_cpu_fallbacks =
+                    self.statistics.gpu_spatial_cpu_fallbacks.saturating_add(1);
+            }
             let eligibility = LiveGpuFrameMode::CpuFallback;
             debug_assert_eq!(eligibility, LiveGpuFrameMode::CpuFallback);
             return Err(LiveGpuError::new(
@@ -1126,6 +1167,10 @@ impl LiveGpuPresenter {
                         .gpu_color_filter_partial_frames
                         .saturating_add(1);
                 }
+                if update.blur_passes > 0 {
+                    self.statistics.gpu_blur_partial_frames =
+                        self.statistics.gpu_blur_partial_frames.saturating_add(1);
+                }
             }
             LiveGpuFrameMode::FullGpu => {
                 self.statistics.full_target_renders =
@@ -1139,6 +1184,10 @@ impl LiveGpuPresenter {
                         .statistics
                         .gpu_color_filter_full_frames
                         .saturating_add(1);
+                }
+                if update.blur_passes > 0 {
+                    self.statistics.gpu_blur_full_frames =
+                        self.statistics.gpu_blur_full_frames.saturating_add(1);
                 }
                 if matches!(
                     decision,
@@ -1183,6 +1232,28 @@ impl LiveGpuPresenter {
         self.statistics.gpu_color_filter_device_resets =
             backend_statistics.gpu_color_filter_device_resets;
         self.statistics.gpu_color_filter_pixels = backend_statistics.gpu_color_filter_pixels;
+        self.statistics.gpu_blur_layer_creations = backend_statistics.gpu_blur_layer_creations;
+        self.statistics.gpu_blur_layer_reuses = backend_statistics.gpu_blur_layer_reuses;
+        self.statistics.gpu_blur_gaussian_frames = backend_statistics.gpu_blur_gaussian_frames;
+        self.statistics.gpu_blur_three_box_frames = backend_statistics.gpu_blur_three_box_frames;
+        self.statistics.gpu_blur_gaussian_passes = backend_statistics.gpu_blur_gaussian_passes;
+        self.statistics.gpu_blur_box_passes = backend_statistics.gpu_blur_box_passes;
+        self.statistics.gpu_blur_premultiply_conversions =
+            backend_statistics.gpu_blur_premultiply_conversions;
+        self.statistics.gpu_blur_unpremultiply_conversions =
+            backend_statistics.gpu_blur_unpremultiply_conversions;
+        self.statistics.gpu_blur_kernel_uploads = backend_statistics.gpu_blur_kernel_uploads;
+        self.statistics.gpu_blur_kernel_cache_hits = backend_statistics.gpu_blur_kernel_cache_hits;
+        self.statistics.gpu_blur_box_parameter_uploads =
+            backend_statistics.gpu_blur_box_parameter_uploads;
+        self.statistics.gpu_spatial_cpu_fallbacks = backend_statistics.gpu_spatial_cpu_fallbacks;
+        self.statistics.gpu_blur_guarded_replay_pixels =
+            backend_statistics.gpu_blur_guarded_replay_pixels;
+        self.statistics.gpu_blur_output_pixels = backend_statistics.gpu_blur_output_pixels;
+        self.statistics.gpu_blur_allocation_failures =
+            backend_statistics.gpu_blur_allocation_failures;
+        self.statistics.gpu_blur_pipeline_failures = backend_statistics.gpu_blur_pipeline_failures;
+        self.statistics.gpu_blur_device_resets = backend_statistics.gpu_blur_device_resets;
         Ok(PendingLiveGpuFrame {
             surface: plan.surface,
             scene_revision: plan.scene_revision,
@@ -1279,15 +1350,23 @@ impl LiveGpuPresenter {
         self.backend.device_generation =
             DeviceGeneration(self.backend.device_generation.0.saturating_add(1));
         self.backend.color_effect_pipeline = None;
+        self.backend.blur_effect_pipelines = None;
         self.backend.statistics.gpu_color_filter_device_resets = self
             .backend
             .statistics
             .gpu_color_filter_device_resets
             .saturating_add(1);
+        self.backend.statistics.gpu_blur_device_resets = self
+            .backend
+            .statistics
+            .gpu_blur_device_resets
+            .saturating_add(1);
         self.statistics.gpu_color_filter_device_resets = self
             .statistics
             .gpu_color_filter_device_resets
             .saturating_add(1);
+        self.statistics.gpu_blur_device_resets =
+            self.statistics.gpu_blur_device_resets.saturating_add(1);
         self.statistics.device_losses = self.statistics.device_losses.saturating_add(1);
     }
 
@@ -1364,6 +1443,7 @@ struct BackingUpdate {
     scratch_created: usize,
     scratch_reused: usize,
     color_filter_passes: u64,
+    blur_passes: u64,
 }
 
 fn update_persistent_backing(
@@ -1394,6 +1474,8 @@ fn update_persistent_backing(
         )),
         DamageRenderDecision::FullGpu { .. } => {
             let before = backend.statistics.gpu_color_filter_passes;
+            let gaussian_before = backend.statistics.gpu_blur_gaussian_passes;
+            let box_before = backend.statistics.gpu_blur_box_passes;
             render_prepared_target(
                 backend,
                 prepared,
@@ -1414,6 +1496,31 @@ fn update_persistent_backing(
                     .gpu_color_filter_full_frames
                     .saturating_add(1);
             }
+            let gaussian_passes = backend
+                .statistics
+                .gpu_blur_gaussian_passes
+                .saturating_sub(gaussian_before);
+            let box_passes = backend
+                .statistics
+                .gpu_blur_box_passes
+                .saturating_sub(box_before);
+            let blur_passes = gaussian_passes.saturating_add(box_passes);
+            if gaussian_passes > 0 {
+                backend.statistics.gpu_blur_gaussian_frames = backend
+                    .statistics
+                    .gpu_blur_gaussian_frames
+                    .saturating_add(1);
+            }
+            if box_passes > 0 {
+                backend.statistics.gpu_blur_three_box_frames = backend
+                    .statistics
+                    .gpu_blur_three_box_frames
+                    .saturating_add(1);
+            }
+            if blur_passes > 0 {
+                backend.statistics.gpu_blur_full_frames =
+                    backend.statistics.gpu_blur_full_frames.saturating_add(1);
+            }
             std::mem::swap(&mut backing.current, &mut backing.transaction);
             Ok(BackingUpdate {
                 selected_tiles: 0,
@@ -1424,18 +1531,58 @@ fn update_persistent_backing(
                 scratch_created: 0,
                 scratch_reused: 0,
                 color_filter_passes,
+                blur_passes,
             })
         }
         DamageRenderDecision::Partial {
-            tiles, tile_pixels, ..
+            tiles,
+            tile_pixels,
+            guarded_pixels,
+            ..
         } => {
-            let scratch_extent = DAMAGE_TILE_SIZE.saturating_add(DAMAGE_TILE_GUARD * 2);
-            let existing_scratch = backing.scratch.len();
-            while backing.scratch.len() < tiles.len() {
-                backing.scratch.push(create_scratch_target(&backend.device));
+            bounded_aggregate_scratch_bytes(
+                tiles
+                    .iter()
+                    .map(|tile| (tile.scratch_width, tile.scratch_height)),
+            )?;
+            let mut scratch_created = 0usize;
+            let mut scratch_reused = 0usize;
+            for (index, tile) in tiles.iter().enumerate() {
+                if index < backing.scratch.len() {
+                    let existing = &backing.scratch[index];
+                    if existing.width == tile.scratch_width
+                        && existing.height == tile.scratch_height
+                    {
+                        scratch_reused = scratch_reused.saturating_add(1);
+                        continue;
+                    }
+                    let replaced = backing.scratch.remove(index);
+                    replaced.texture.destroy();
+                    backing.scratch.insert(
+                        index,
+                        create_scratch_target(
+                            &backend.device,
+                            tile.scratch_width,
+                            tile.scratch_height,
+                        )?,
+                    );
+                    scratch_created = scratch_created.saturating_add(1);
+                } else {
+                    backing.scratch.push(create_scratch_target(
+                        &backend.device,
+                        tile.scratch_width,
+                        tile.scratch_height,
+                    )?);
+                    scratch_created = scratch_created.saturating_add(1);
+                }
+            }
+            for stale in backing.scratch.drain(tiles.len()..) {
+                stale.texture.destroy();
             }
             let mut guard_pixels = 0u64;
             let before = backend.statistics.gpu_color_filter_passes;
+            let gaussian_before = backend.statistics.gpu_blur_gaussian_passes;
+            let box_before = backend.statistics.gpu_blur_box_passes;
             for (index, tile) in tiles.iter().enumerate() {
                 render_prepared_target(
                     backend,
@@ -1444,8 +1591,8 @@ fn update_persistent_backing(
                     tile.scratch_origin_x,
                     tile.scratch_origin_y,
                     &backing.scratch[index].view,
-                    scratch_extent,
-                    scratch_extent,
+                    tile.scratch_width,
+                    tile.scratch_height,
                 )?;
             }
             let mut encoder =
@@ -1482,9 +1629,8 @@ fn update_persistent_backing(
                         depth_or_array_layers: 1,
                     },
                 );
-                guard_pixels = guard_pixels.saturating_add(
-                    u64::from(scratch_extent) * u64::from(scratch_extent) - tile.core_pixels(),
-                );
+                guard_pixels = guard_pixels
+                    .saturating_add(tile.scratch_pixels().saturating_sub(tile.core_pixels()));
             }
             backend.queue.submit([encoder.finish()]);
             let color_filter_passes = backend
@@ -1497,17 +1643,45 @@ fn update_persistent_backing(
                     .gpu_color_filter_partial_frames
                     .saturating_add(1);
             }
+            let gaussian_passes = backend
+                .statistics
+                .gpu_blur_gaussian_passes
+                .saturating_sub(gaussian_before);
+            let box_passes = backend
+                .statistics
+                .gpu_blur_box_passes
+                .saturating_sub(box_before);
+            let blur_passes = gaussian_passes.saturating_add(box_passes);
+            if gaussian_passes > 0 {
+                backend.statistics.gpu_blur_gaussian_frames = backend
+                    .statistics
+                    .gpu_blur_gaussian_frames
+                    .saturating_add(1);
+            }
+            if box_passes > 0 {
+                backend.statistics.gpu_blur_three_box_frames = backend
+                    .statistics
+                    .gpu_blur_three_box_frames
+                    .saturating_add(1);
+            }
+            if blur_passes > 0 {
+                backend.statistics.gpu_blur_partial_frames =
+                    backend.statistics.gpu_blur_partial_frames.saturating_add(1);
+                backend.statistics.gpu_blur_guarded_replay_pixels = backend
+                    .statistics
+                    .gpu_blur_guarded_replay_pixels
+                    .saturating_add(*guarded_pixels);
+            }
             Ok(BackingUpdate {
                 selected_tiles: tiles.len(),
-                rasterized_pixels: u64::try_from(tiles.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_mul(u64::from(scratch_extent) * u64::from(scratch_extent)),
+                rasterized_pixels: *guarded_pixels,
                 backing_pixels: *tile_pixels,
                 surface_pixels,
                 guard_pixels,
-                scratch_created: tiles.len().saturating_sub(existing_scratch),
-                scratch_reused: tiles.len().min(existing_scratch),
+                scratch_created,
+                scratch_reused,
                 color_filter_passes,
+                blur_passes,
             })
         }
     }
@@ -1533,8 +1707,10 @@ fn render_prepared_target(
         &backend.queue,
         &mut backend.renderer,
         &mut backend.color_effect_pipeline,
+        &mut backend.blur_effect_pipelines,
         prepared,
         transform,
+        scale,
         view,
         width,
         height,
@@ -1583,18 +1759,24 @@ fn create_backing_image(
     }
 }
 
-fn create_scratch_target(device: &wgpu::Device) -> ScratchTarget {
-    let extent = DAMAGE_TILE_SIZE.saturating_add(DAMAGE_TILE_GUARD * 2);
-    let scratch_bytes = u64::from(extent) * u64::from(extent) * 4;
-    debug_assert!(
-        scratch_bytes.saturating_mul(super::partial::MAX_PARTIAL_TILE_REPLAYS as u64)
-            <= MAX_LIVE_SCRATCH_BYTES
-    );
+fn create_scratch_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> Result<ScratchTarget, LiveGpuError> {
+    let scratch_bytes = scratch_target_bytes(width, height)?;
+    if width == 0 || height == 0 || scratch_bytes > MAX_LIVE_SCRATCH_BYTES {
+        return Err(LiveGpuError::new(
+            LiveGpuErrorKind::ResourcePreparation,
+            "live GPU scratch exceeds its bounded allocation limit",
+            true,
+        ));
+    }
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("HTMShell live damage tile scratch"),
         size: wgpu::Extent3d {
-            width: extent,
-            height: extent,
+            width,
+            height,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -1605,7 +1787,57 @@ fn create_scratch_target(device: &wgpu::Device) -> ScratchTarget {
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    ScratchTarget { texture, view }
+    Ok(ScratchTarget {
+        texture,
+        view,
+        width,
+        height,
+    })
+}
+
+fn scratch_target_bytes(width: u32, height: u32) -> Result<u64, LiveGpuError> {
+    u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| {
+            LiveGpuError::new(
+                LiveGpuErrorKind::ResourcePreparation,
+                "live GPU scratch byte calculation overflowed",
+                true,
+            )
+        })
+}
+
+fn aggregate_scratch_bytes(
+    dimensions: impl IntoIterator<Item = (u32, u32)>,
+) -> Result<u64, LiveGpuError> {
+    dimensions
+        .into_iter()
+        .try_fold(0u64, |bytes, (width, height)| {
+            bytes
+                .checked_add(scratch_target_bytes(width, height)?)
+                .ok_or_else(|| {
+                    LiveGpuError::new(
+                        LiveGpuErrorKind::ResourcePreparation,
+                        "live GPU aggregate scratch byte calculation overflowed",
+                        true,
+                    )
+                })
+        })
+}
+
+fn bounded_aggregate_scratch_bytes(
+    dimensions: impl IntoIterator<Item = (u32, u32)>,
+) -> Result<u64, LiveGpuError> {
+    let bytes = aggregate_scratch_bytes(dimensions)?;
+    if bytes > MAX_LIVE_SCRATCH_BYTES {
+        return Err(LiveGpuError::new(
+            LiveGpuErrorKind::ResourcePreparation,
+            "live GPU aggregate scratch exceeds its bounded allocation limit",
+            true,
+        ));
+    }
+    Ok(bytes)
 }
 
 fn destroy_target_images(target: &mut LiveTarget) {
@@ -1699,6 +1931,17 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use vello::peniko::{Color, Fill};
+
+    #[test]
+    fn aggregate_scratch_storage_is_bounded_before_allocation() {
+        assert_eq!(
+            bounded_aggregate_scratch_bytes([(4096, 4096)]).unwrap(),
+            MAX_LIVE_SCRATCH_BYTES
+        );
+        let error = bounded_aggregate_scratch_bytes([(4096, 4096), (1, 1)]).unwrap_err();
+        assert_eq!(error.kind, LiveGpuErrorKind::ResourcePreparation);
+        assert!(error.recoverable);
+    }
 
     fn srgb_decode(value: f32) -> f32 {
         if value <= 0.04045 {
@@ -2365,6 +2608,128 @@ mod tests {
         )
         .unwrap();
         assert!(update.color_filter_passes > 0);
+        assert!(update.backing_pixels < u64::from(width) * u64::from(height));
+
+        let actual = read_texture(
+            &backend.device,
+            &backend.queue,
+            &partial.current.texture,
+            width,
+            height,
+        );
+        let mut fresh = persistent_backing_for_size(&backend, &layout, width, height);
+        let full = DamageRenderDecision::FullGpu {
+            damage: vec![crate::render::PhysicalDamageRect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            }],
+            reason: super::super::partial::FullRenderReason::Initial,
+        };
+        update_persistent_backing(
+            &mut backend,
+            &mut fresh,
+            &updated_prepared,
+            &updated_plan,
+            &full,
+        )
+        .unwrap();
+        let expected = read_texture(
+            &backend.device,
+            &backend.queue,
+            &fresh.current.texture,
+            width,
+            height,
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn native_blur_guarded_partial_backing_matches_fresh_full_render() {
+        let mut backend =
+            VelloOffscreenRenderer::new(false).expect("compatible offscreen GPU adapter");
+        let layout = proof_layout(&backend.device);
+        let width = 256;
+        let height = 192;
+        let (mut initial_plan, initial_cpu) =
+            super::super::tests::color_filter_document_proof("blur(2px)", None, 40_101, 120);
+        initial_plan.logical_width = width;
+        initial_plan.logical_height = height;
+        initial_plan.physical_width = width;
+        initial_plan.physical_height = height;
+        let initial_scene = Arc::make_mut(&mut initial_plan.scene);
+        initial_scene.viewport.logical_width = width;
+        initial_scene.viewport.logical_height = height;
+        let initial_prepared = GpuPreparedScene::from_cpu(
+            initial_plan.document,
+            initial_cpu,
+            initial_plan.scene.live_resources(),
+            collect_effect_plans(&initial_plan.scene),
+        );
+        let mut partial = persistent_backing_for_size(&backend, &layout, width, height);
+        let initial_decision = select_damage_work(&initial_plan, false, true);
+        update_persistent_backing(
+            &mut backend,
+            &mut partial,
+            &initial_prepared,
+            &initial_plan,
+            &initial_decision,
+        )
+        .unwrap();
+        partial.initialized = true;
+        partial.revision = Some(SceneRevision(1));
+        partial.force_full_repaint = false;
+
+        let (mut updated_plan, mut updated_cpu) =
+            super::super::tests::color_filter_document_proof("blur(4px)", None, 40_101, 120);
+        updated_plan.scene_revision = SceneRevision(2);
+        updated_plan.prior_scene_revision = Some(SceneRevision(1));
+        updated_plan.logical_width = width;
+        updated_plan.logical_height = height;
+        updated_plan.physical_width = width;
+        updated_plan.physical_height = height;
+        updated_plan.damage = DamageRegion::Rects(vec![crate::model::LogicalRect {
+            x: 0.0,
+            y: 0.0,
+            width: 48.0,
+            height: 44.0,
+        }]);
+        updated_plan.full_repaint = false;
+        updated_plan.delta.from_revision = Some(SceneRevision(1));
+        updated_plan.delta.to_revision = SceneRevision(2);
+        updated_plan.delta.full_scene_replacement = false;
+        let scene = Arc::make_mut(&mut updated_plan.scene);
+        scene.revision = SceneRevision(2);
+        scene.viewport.logical_width = width;
+        scene.viewport.logical_height = height;
+        updated_cpu.revision = SceneRevision(2);
+        let updated_prepared = GpuPreparedScene::from_cpu(
+            updated_plan.document,
+            updated_cpu,
+            updated_plan.scene.live_resources(),
+            collect_effect_plans(&updated_plan.scene),
+        );
+        let decision = select_damage_work(&updated_plan, true, false);
+        let DamageRenderDecision::Partial { tiles, .. } = &decision else {
+            panic!("bounded blur update should use guarded partial replay");
+        };
+        assert!(
+            tiles
+                .iter()
+                .all(|tile| tile.scratch_width > 68 && tile.scratch_height > 68)
+        );
+        let update = update_persistent_backing(
+            &mut backend,
+            &mut partial,
+            &updated_prepared,
+            &updated_plan,
+            &decision,
+        )
+        .unwrap();
+        assert!(update.blur_passes > 0);
+        assert!(update.guard_pixels > 0);
         assert!(update.backing_pixels < u64::from(width) * u64::from(height));
 
         let actual = read_texture(

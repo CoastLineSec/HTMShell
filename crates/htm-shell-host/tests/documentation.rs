@@ -249,7 +249,9 @@ fn foreground_filter_docs_and_example_cover_cpu_and_native_vello_boundaries() {
         "eight nonspatial color functions",
         "experimental native Vello execution",
         "complete CPU-frame fallback",
-        "does not execute blur natively",
+        "executes blur natively",
+        "cumulative physical blur reach",
+        "Backing-to-surface conversion remains full target",
         "does not execute drop shadow natively",
         "Vello remains optional and experimental",
     ] {
@@ -259,7 +261,6 @@ fn foreground_filter_docs_and_example_cover_cpu_and_native_vello_boundaries() {
         );
     }
     for forbidden in [
-        "native Vello blur",
         "native Vello drop shadow",
         "native GPU backdrop",
         "renderer selector",

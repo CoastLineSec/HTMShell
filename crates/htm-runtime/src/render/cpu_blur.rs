@@ -1,6 +1,6 @@
 use super::{BackendError, BackendErrorKind, MAX_EFFECT_SURFACE_BYTES};
 
-const DIRECT_GAUSSIAN_THRESHOLD: f64 = 2.0;
+pub(super) const DIRECT_GAUSSIAN_THRESHOLD: f64 = 2.0;
 const CHANNELS_PER_PIXEL: usize = 4;
 const MASK_CHANNELS: usize = 1;
 const BOX_FIXED_SCALE: f64 = 257.0;
@@ -18,8 +18,33 @@ pub(super) struct BoxBlurPass {
 }
 
 impl BoxBlurPass {
-    fn width(self) -> u32 {
+    pub(super) fn width(self) -> u32 {
         self.before + self.after + 1
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum BlurParameters {
+    Identity,
+    DirectGaussian { kernel: Vec<f64> },
+    ThreeBox { passes: [BoxBlurPass; 3] },
+}
+
+pub(super) fn derive_blur_parameters(sigma: f64) -> Result<BlurParameters, BackendError> {
+    if !sigma.is_finite() || sigma < 0.0 {
+        return Err(blur_error("blur sigma is invalid"));
+    }
+    if sigma == 0.0 {
+        return Ok(BlurParameters::Identity);
+    }
+    if sigma < DIRECT_GAUSSIAN_THRESHOLD {
+        Ok(BlurParameters::DirectGaussian {
+            kernel: gaussian_kernel(sigma)?,
+        })
+    } else {
+        Ok(BlurParameters::ThreeBox {
+            passes: three_box_blur_passes(sigma)?,
+        })
     }
 }
 
@@ -279,10 +304,8 @@ fn apply_cpu_blur_channels(
             "CPU blur input does not match its declared dimensions",
         ));
     }
-    if !sigma.is_finite() || sigma < 0.0 {
-        return Err(blur_error("CPU blur sigma is invalid"));
-    }
-    if sigma == 0.0 {
+    let parameters = derive_blur_parameters(sigma)?;
+    if matches!(parameters, BlurParameters::Identity) {
         return Ok(CpuBlurResult {
             pixels,
             algorithm: CpuBlurAlgorithm::DirectGaussian,
@@ -296,53 +319,59 @@ fn apply_cpu_blur_channels(
     let algorithm;
     let pass_count;
     let scratch_reused;
-    if sigma < DIRECT_GAUSSIAN_THRESHOLD {
-        algorithm = CpuBlurAlgorithm::DirectGaussian;
-        let kernel = gaussian_kernel(sigma)?;
-        convolve_gaussian_horizontal(
-            &pixels,
-            &mut work,
-            width,
-            height,
-            channels,
-            premultiplied_rgba,
-            &kernel,
-        );
-        std::mem::swap(&mut pixels, &mut work);
-        convolve_gaussian_vertical(
-            &pixels,
-            &mut work,
-            width,
-            height,
-            channels,
-            premultiplied_rgba,
-            &kernel,
-        );
-        std::mem::swap(&mut pixels, &mut work);
-        pass_count = 2;
-        scratch_reused = pixel_scratch_reused;
-    } else {
-        algorithm = CpuBlurAlgorithm::ThreeBox;
-        let passes = three_box_blur_passes(sigma)?;
-        let spatial_scratch_reused =
-            scratch.prepare_three_box(width, height, work.capacity(), committed_surface_bytes)?;
-        convolve_three_boxes(
-            &pixels,
-            &mut work,
-            width,
-            height,
-            channels,
-            premultiplied_rgba,
-            passes,
-            ThreeBoxScratch {
-                plane: &mut scratch.plane,
-                line_a: &mut scratch.line_a,
-                line_b: &mut scratch.line_b,
-            },
-        );
-        std::mem::swap(&mut pixels, &mut work);
-        pass_count = 6;
-        scratch_reused = pixel_scratch_reused && spatial_scratch_reused;
+    match parameters {
+        BlurParameters::Identity => unreachable!("identity returned before scratch allocation"),
+        BlurParameters::DirectGaussian { kernel } => {
+            algorithm = CpuBlurAlgorithm::DirectGaussian;
+            convolve_gaussian_horizontal(
+                &pixels,
+                &mut work,
+                width,
+                height,
+                channels,
+                premultiplied_rgba,
+                &kernel,
+            );
+            std::mem::swap(&mut pixels, &mut work);
+            convolve_gaussian_vertical(
+                &pixels,
+                &mut work,
+                width,
+                height,
+                channels,
+                premultiplied_rgba,
+                &kernel,
+            );
+            std::mem::swap(&mut pixels, &mut work);
+            pass_count = 2;
+            scratch_reused = pixel_scratch_reused;
+        }
+        BlurParameters::ThreeBox { passes } => {
+            algorithm = CpuBlurAlgorithm::ThreeBox;
+            let spatial_scratch_reused = scratch.prepare_three_box(
+                width,
+                height,
+                work.capacity(),
+                committed_surface_bytes,
+            )?;
+            convolve_three_boxes(
+                &pixels,
+                &mut work,
+                width,
+                height,
+                channels,
+                premultiplied_rgba,
+                passes,
+                ThreeBoxScratch {
+                    plane: &mut scratch.plane,
+                    line_a: &mut scratch.line_a,
+                    line_b: &mut scratch.line_b,
+                },
+            );
+            std::mem::swap(&mut pixels, &mut work);
+            pass_count = 6;
+            scratch_reused = pixel_scratch_reused && spatial_scratch_reused;
+        }
     }
     scratch.put(work, width, height);
     Ok(CpuBlurResult {

@@ -22,7 +22,7 @@ ceil(3 * sigma)
 
 Samples beyond the SourceGraphic are transparent black. The CPU reference compositor blurs premultiplied encoded-sRGB RGBA directly, using identical weights for red, green, blue, and alpha. This avoids colored halos and preserves `RGB <= alpha`.
 
-Sigma is retained in logical pixels. At presentation scale, the CPU implementation converts it to physical pixels. Sigma below 2 physical pixels uses a normalized direct separable Gaussian. Sigma at or above 2 physical pixels uses a deterministic three-box approximation. Both paths are single-threaded and bounded.
+Sigma is retained in logical pixels. Each renderer derives physical sigma from the output's rational scale. Sigma below 2 physical pixels uses a normalized direct separable Gaussian. Sigma at or above 2 physical pixels uses a deterministic three-box approximation. CPU and Vello share the kernel and box-width derivation.
 
 Functions execute left to right, and repeated blur stages remain distinct:
 
@@ -36,6 +36,10 @@ The SourceGraphic includes the element background, border, content, descendants,
 
 Each effect image is limited to 4,096 physical pixels per dimension and 64 MiB. All live effect images and spatial scratch for one surface share a 256 MiB budget. Allocation failure reports a render error; it never substitutes an unblurred subtree.
 
-The optional experimental Vello path does not execute blur natively. Any list containing blur uses complete CPU-frame fallback, including lists that also contain GPU-native color functions. `backdrop-filter`, filter animation, and transitions are unsupported.
+The optional experimental Vello path executes blur natively with finite separable render passes over premultiplied `Rgba8Unorm`. Explicit conversion passes preserve the straight-alpha contract of color functions before and after blur. Ordered color and blur combinations and repeated blur stages remain on the GPU. Successful live frames use no CPU frame rasterization, readback, or shared-memory presentation.
+
+Damage-limited Vello rendering expands replay tiles by the cumulative physical blur reach plus two antialias pixels, then copies only the authoritative tile core into persistent backing. Excessive guarded area, unsafe spatial transforms, initialization, resize, scale changes, and recovery use a complete GPU render. The complete backing is still converted to every acquired surface image.
+
+Any list containing `drop-shadow()` remains indivisible and uses complete CPU-frame fallback. `backdrop-filter`, filter animation, and transitions are unsupported.
 
 Blur can reduce readability and obscure visual focus indicators. Keep essential labels and focus feedback clear.

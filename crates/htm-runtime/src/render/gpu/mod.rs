@@ -1,3 +1,4 @@
+mod blur_effects;
 mod color_effects;
 mod live;
 mod painter;
@@ -93,6 +94,25 @@ pub(crate) struct GpuStatistics {
     pub gpu_color_filter_pipeline_failures: u64,
     pub gpu_color_filter_device_resets: u64,
     pub gpu_color_filter_pixels: u64,
+    pub gpu_blur_layer_creations: u64,
+    pub gpu_blur_layer_reuses: u64,
+    pub gpu_blur_gaussian_frames: u64,
+    pub gpu_blur_three_box_frames: u64,
+    pub gpu_blur_gaussian_passes: u64,
+    pub gpu_blur_box_passes: u64,
+    pub gpu_blur_premultiply_conversions: u64,
+    pub gpu_blur_unpremultiply_conversions: u64,
+    pub gpu_blur_kernel_uploads: u64,
+    pub gpu_blur_kernel_cache_hits: u64,
+    pub gpu_blur_box_parameter_uploads: u64,
+    pub gpu_blur_partial_frames: u64,
+    pub gpu_blur_full_frames: u64,
+    pub gpu_spatial_cpu_fallbacks: u64,
+    pub gpu_blur_guarded_replay_pixels: u64,
+    pub gpu_blur_output_pixels: u64,
+    pub gpu_blur_allocation_failures: u64,
+    pub gpu_blur_pipeline_failures: u64,
+    pub gpu_blur_device_resets: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -281,6 +301,7 @@ pub(crate) struct VelloOffscreenRenderer {
     queue: wgpu::Queue,
     renderer: vello::Renderer,
     color_effect_pipeline: Option<color_effects::ColorEffectPipeline>,
+    blur_effect_pipelines: Option<blur_effects::BlurEffectPipelines>,
     info: BackendInfo,
     device_generation: DeviceGeneration,
     next_target_generation: u64,
@@ -416,6 +437,7 @@ impl VelloOffscreenRenderer {
             queue,
             renderer,
             color_effect_pipeline: None,
+            blur_effect_pipelines: None,
             info,
             device_generation: DeviceGeneration(1),
             next_target_generation: 0,
@@ -657,6 +679,20 @@ impl Renderer for VelloOffscreenRenderer {
                 .statistics
                 .gpu_color_filter_fallback_requests
                 .saturating_add(1);
+            if plan.scene.nodes.iter().any(|node| {
+                node.effects.iter().any(|effect| {
+                    matches!(
+                        effect,
+                        SceneEffect::ForegroundFilter { list, .. }
+                            if list.functions.iter().any(
+                                |function| matches!(function, ForegroundEffect::DropShadow(_))
+                            )
+                    )
+                })
+            }) {
+                self.statistics.gpu_spatial_cpu_fallbacks =
+                    self.statistics.gpu_spatial_cpu_fallbacks.saturating_add(1);
+            }
             return Err(BackendError::new(
                 BackendErrorKind::FallbackRequired,
                 "retained scene contains an effect assigned to CPU frame fallback",
@@ -746,13 +782,17 @@ impl Renderer for VelloOffscreenRenderer {
                 .view
                 .clone();
             let color_passes_before = self.statistics.gpu_color_filter_passes;
+            let gaussian_passes_before = self.statistics.gpu_blur_gaussian_passes;
+            let box_passes_before = self.statistics.gpu_blur_box_passes;
             color_effects::render_prepared_scene(
                 &self.device,
                 &self.queue,
                 &mut self.renderer,
                 &mut self.color_effect_pipeline,
+                &mut self.blur_effect_pipelines,
                 &prepared,
                 Affine::scale(scale),
+                scale,
                 &target_view,
                 target.width,
                 target.height,
@@ -763,6 +803,20 @@ impl Renderer for VelloOffscreenRenderer {
                     .statistics
                     .gpu_color_filter_full_frames
                     .saturating_add(1);
+            }
+            if self.statistics.gpu_blur_gaussian_passes > gaussian_passes_before {
+                self.statistics.gpu_blur_gaussian_frames =
+                    self.statistics.gpu_blur_gaussian_frames.saturating_add(1);
+            }
+            if self.statistics.gpu_blur_box_passes > box_passes_before {
+                self.statistics.gpu_blur_three_box_frames =
+                    self.statistics.gpu_blur_three_box_frames.saturating_add(1);
+            }
+            if self.statistics.gpu_blur_gaussian_passes > gaussian_passes_before
+                || self.statistics.gpu_blur_box_passes > box_passes_before
+            {
+                self.statistics.gpu_blur_full_frames =
+                    self.statistics.gpu_blur_full_frames.saturating_add(1);
             }
             let offscreen = self
                 .targets
@@ -876,6 +930,7 @@ impl Renderer for VelloOffscreenRenderer {
             )
         })?;
         self.color_effect_pipeline = None;
+        self.blur_effect_pipelines = None;
         self.device_generation.0 = self.device_generation.0.checked_add(1).ok_or_else(|| {
             BackendError::new(
                 BackendErrorKind::BackendReset,
@@ -887,6 +942,8 @@ impl Renderer for VelloOffscreenRenderer {
             .statistics
             .gpu_color_filter_device_resets
             .saturating_add(1);
+        self.statistics.gpu_blur_device_resets =
+            self.statistics.gpu_blur_device_resets.saturating_add(1);
         self.statistics.resets = self.statistics.resets.saturating_add(1);
         Ok(())
     }
@@ -1093,10 +1150,12 @@ fn effect_coverage(effect: &SceneEffect) -> GpuCoverage {
         SceneEffect::RejectedForegroundFilter { .. } => GpuCoverage::Native,
         SceneEffect::ForegroundFilter { list, .. }
             if list.is_visual_identity()
-                || list
-                    .functions
-                    .iter()
-                    .all(|effect| matches!(effect, ForegroundEffect::Color(_))) =>
+                || list.functions.iter().all(|effect| {
+                    matches!(
+                        effect,
+                        ForegroundEffect::Color(_) | ForegroundEffect::Blur(_)
+                    )
+                }) =>
         {
             GpuCoverage::Native
         }
@@ -1215,11 +1274,11 @@ mod tests {
     use super::*;
     use crate::model::{LogicalRect, ViewportSpec};
     use crate::render::{
-        BlurEffect, CanonicalF32, ColorEffect, ColorEffectKind, ForegroundEffect,
-        ForegroundEffectCoverage, ForegroundEffectId, ForegroundEffectLayerMetadata,
-        ForegroundEffectList, FrameReason, FrameReasonSet, ResourceKind, ResourceOwner,
-        RetainedScene, SceneBounds, SceneDelta, SceneNode, SceneNodeId, SceneResource,
-        SceneResourceKey, SceneSubpart,
+        BlurEffect, CanonicalF32, ColorEffect, ColorEffectKind, DropShadowEffect, EffectColor,
+        ForegroundEffect, ForegroundEffectCoverage, ForegroundEffectId,
+        ForegroundEffectLayerMetadata, ForegroundEffectList, FrameReason, FrameReasonSet,
+        ResourceKind, ResourceOwner, RetainedScene, SceneBounds, SceneDelta, SceneNode,
+        SceneNodeId, SceneResource, SceneResourceKey, SceneSubpart,
     };
     use crate::{ExperimentalDocumentIdentity, ExperimentalNodeIdentity};
     use anyrender::render_to_buffer;
@@ -1412,6 +1471,47 @@ mod tests {
         }
     }
 
+    fn modeled_drop_shadow_filter() -> SceneEffect {
+        let source_bounds = LogicalRect {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 48.0,
+        };
+        let list = ForegroundEffectList::from_functions(
+            ForegroundEffectId::for_node(
+                ExperimentalDocumentIdentity { serial: 43 },
+                ExperimentalNodeIdentity {
+                    slot: 4,
+                    generation: 9,
+                },
+            ),
+            vec![ForegroundEffect::DropShadow(DropShadowEffect {
+                offset_x: CanonicalF32::new(2.0).unwrap(),
+                offset_y: CanonicalF32::new(2.0).unwrap(),
+                sigma: CanonicalF32::new(1.0).unwrap(),
+                color: EffectColor {
+                    red: CanonicalF32::new(0.0).unwrap(),
+                    green: CanonicalF32::new(0.0).unwrap(),
+                    blue: CanonicalF32::new(0.0).unwrap(),
+                    alpha: CanonicalF32::new(1.0).unwrap(),
+                },
+            })],
+        )
+        .unwrap();
+        let filtered_bounds = list.propagated_bounds(&source_bounds).unwrap();
+        let future_layer = ForegroundEffectLayerMetadata::for_list(&list);
+        let coverage = ForegroundEffectCoverage::for_list(&list);
+        SceneEffect::ForegroundFilter {
+            list,
+            source_graphic_bounds: source_bounds,
+            filtered_bounds,
+            nesting_depth: 1,
+            coverage,
+            future_layer,
+        }
+    }
+
     fn proof_recording(plan: &FramePlan) -> GpuPreparedScene {
         let mut recording = anyrender::Scene::new();
         recording.fill(
@@ -1499,6 +1599,22 @@ mod tests {
             image.as_ref(),
             Affine::translate((8.0, 8.0)) * Affine::scale(12.0),
         );
+        recording
+    }
+
+    fn filtered_image_recording() -> anyrender::Scene {
+        let mut recording = anyrender::Scene::new();
+        let clip = kurbo::Rect::new(0.0, 0.0, 64.0, 48.0);
+        recording.push_layer(
+            BlendMode::default(),
+            1.0,
+            Affine::IDENTITY,
+            &clip,
+            Some(Arc::new(anyrender::Filter::empty())),
+            None,
+        );
+        recording.append_scene(image_recording(), Affine::IDENTITY);
+        recording.pop_layer();
         recording
     }
 
@@ -1813,7 +1929,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_profile_runs_color_filters_and_falls_back_for_spatial_filters() {
+    fn coverage_profile_runs_color_and_blur_filters_and_falls_back_for_drop_shadow() {
         let surface = RenderSurfaceId {
             instance: 1,
             generation: 1,
@@ -1833,8 +1949,27 @@ mod tests {
         assert_eq!(
             VelloOffscreenRenderer::coverage(&proof_plan(surface, Some(modeled_blur_filter(2.0))))
                 .unwrap(),
+            GpuCoverage::Native
+        );
+        assert_eq!(
+            VelloOffscreenRenderer::coverage(&proof_plan(
+                surface,
+                Some(modeled_drop_shadow_filter())
+            ))
+            .unwrap(),
             GpuCoverage::CpuFrameFallback
         );
+        for filter in [
+            "blur(4px) drop-shadow(4px 4px 4px black)",
+            "drop-shadow(4px 4px 4px black) blur(4px)",
+            "brightness(2) blur(4px) drop-shadow(4px 4px black)",
+        ] {
+            let (plan, _) = color_filter_document_proof(filter, None, 92_000, 120);
+            assert_eq!(
+                VelloOffscreenRenderer::coverage(&plan).unwrap(),
+                GpuCoverage::CpuFrameFallback
+            );
+        }
     }
 
     #[test]
@@ -1878,8 +2013,12 @@ mod tests {
             effect_coverage(&modeled_foreground_filter(1.1)),
             GpuCoverage::Native
         );
+        assert_eq!(
+            effect_coverage(&modeled_blur_filter(2.0)),
+            GpuCoverage::Native
+        );
         for effect in [
-            modeled_blur_filter(2.0),
+            modeled_drop_shadow_filter(),
             SceneEffect::BackdropFilter {
                 signature: 4,
                 conservative_full_bounds: true,
@@ -2365,11 +2504,33 @@ mod tests {
                 prepared,
             )
             .unwrap();
-        assert_eq!(path, RenderPath::CpuFallback);
+        assert_eq!(path, RenderPath::Gpu);
         assert!(blurred[3] > 0);
         assert!(blurred[0] <= blurred[3]);
         assert!(blurred[1] <= blurred[3]);
         assert!(blurred[2] <= blurred[3]);
+
+        let shadow_surface = RenderSurfaceId {
+            instance: 16,
+            generation: 1,
+        };
+        let shadow_plan = proof_plan(shadow_surface, Some(modeled_drop_shadow_filter()));
+        let prepared = CpuPreparedScene {
+            revision: shadow_plan.scene_revision,
+            recording: filtered_solid_recording(),
+        };
+        let (_shadowed, path) = facade
+            .render(
+                &shadow_plan,
+                RenderTarget {
+                    width: 64,
+                    height: 48,
+                    pixel_format: PixelFormat::PremultipliedRgba8,
+                },
+                prepared,
+            )
+            .unwrap();
+        assert_eq!(path, RenderPath::CpuFallback);
 
         assert_eq!(renderer.targets.len(), 6);
         assert_eq!(renderer.statistics.frames_rendered, 8);
@@ -2556,6 +2717,105 @@ mod tests {
 
     #[test]
     #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn hardware_native_blur_matches_cpu_algorithms_and_ordering() {
+        let filters = [
+            "blur(0)",
+            "blur(.5px)",
+            "blur(1px)",
+            "blur(1.999px)",
+            "blur(2px)",
+            "blur(4px)",
+            "blur(8px)",
+            "blur(16px)",
+            "blur(64px)",
+            "brightness(2) blur(4px)",
+            "blur(4px) brightness(2)",
+            "opacity(.5) blur(4px)",
+            "blur(4px) opacity(.5)",
+            "grayscale(1) blur(2px) saturate(2)",
+            "blur(1px) blur(4px)",
+        ];
+        let mut renderer =
+            VelloOffscreenRenderer::new(false).expect("compatible offscreen GPU adapter");
+        for (index, filter) in filters.into_iter().enumerate() {
+            let (plan, prepared) =
+                color_filter_document_proof(filter, None, 80_000 + index as u64, 120);
+            let expected = cpu_reference_pixels(&plan, prepared.clone());
+            let actual = gpu_pixels(&mut renderer, &plan, prepared.recording);
+            let tolerance = if filter == "blur(0)" { 0 } else { 3 };
+            assert_tolerant_pixels(&expected, &actual, tolerance, 0.0);
+            let (maximum_error, differing_percent) = pixel_difference_metrics(&expected, &actual);
+            eprintln!(
+                "native_blur filter={filter} max_error={maximum_error} differing_percent={differing_percent:.3}"
+            );
+            renderer.release_target(plan.surface);
+        }
+        let statistics = renderer.statistics();
+        assert!(statistics.gpu_blur_gaussian_passes > 0);
+        assert!(statistics.gpu_blur_box_passes > 0);
+        assert!(statistics.gpu_blur_premultiply_conversions > 0);
+        assert!(statistics.gpu_blur_unpremultiply_conversions > 0);
+        assert_eq!(statistics.fallback_requests, 0);
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn hardware_native_blur_preserves_fractional_scale_and_nesting() {
+        let mut renderer =
+            VelloOffscreenRenderer::new(false).expect("compatible offscreen GPU adapter");
+        for numerator in [120, 150, 180] {
+            let (plan, prepared) = color_filter_document_proof(
+                "blur(1.5px) saturate(1.25)",
+                Some("brightness(1.1) blur(.5px)"),
+                81_000 + u64::from(numerator),
+                numerator,
+            );
+            let expected = cpu_reference_pixels(&plan, prepared.clone());
+            let actual = gpu_pixels(&mut renderer, &plan, prepared.recording);
+            assert_tolerant_pixels(&expected, &actual, 4, 0.0);
+            renderer.release_target(plan.surface);
+        }
+        let statistics = renderer.statistics();
+        assert!(statistics.gpu_blur_gaussian_frames > 0);
+        assert!(statistics.gpu_blur_three_box_frames > 0);
+        assert_eq!(statistics.fallback_requests, 0);
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn hardware_native_blur_covers_text_svg_images_and_box_shadows() {
+        let mut renderer =
+            VelloOffscreenRenderer::new(false).expect("compatible offscreen GPU adapter");
+        let (plan, prepared) = text_svg_document_proof(Some("blur(2px)"), 82_001);
+        let expected = cpu_reference_pixels(&plan, prepared.clone());
+        let actual = gpu_pixels(&mut renderer, &plan, prepared.recording);
+        assert_tolerant_pixels(&expected, &actual, 4, 0.0);
+        renderer.release_target(plan.surface);
+
+        let surface = RenderSurfaceId {
+            instance: 82_002,
+            generation: 1,
+        };
+        let plan = proof_plan(surface, Some(modeled_blur_filter(2.0)));
+        let recording = filtered_image_recording();
+        let prepared = CpuPreparedScene {
+            revision: plan.scene_revision,
+            recording: recording.clone(),
+        };
+        let expected = cpu_reference_pixels(&plan, prepared);
+        let actual = gpu_pixels(&mut renderer, &plan, recording);
+        assert_tolerant_pixels(&expected, &actual, 4, 0.0);
+        assert!(actual.chunks_exact(4).all(|pixel| {
+            pixel[0] <= pixel[3]
+                && pixel[1] <= pixel[3]
+                && pixel[2] <= pixel[3]
+                && (pixel[3] != 0 || pixel[..3] == [0, 0, 0])
+        }));
+        assert_eq!(renderer.statistics().fallback_requests, 0);
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
     fn hardware_native_color_filter_reuse_stress_is_bounded() {
         const FRAMES: u64 = 500;
         let mut renderer =
@@ -2580,6 +2840,44 @@ mod tests {
             statistics.gpu_color_filter_cache_hits,
             FRAMES.saturating_sub(1)
         );
+        assert_eq!(statistics.fallback_requests, 0);
+        assert!(renderer.targets.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn hardware_native_blur_reuse_stress_is_bounded() {
+        const FRAMES: u64 = 500;
+        let mut renderer =
+            VelloOffscreenRenderer::new(false).expect("compatible offscreen GPU adapter");
+        for index in 0..FRAMES {
+            let sigma = if index.is_multiple_of(2) { 0.5 } else { 4.0 };
+            let filter = format!("brightness(1.1) blur({sigma:.1}px)");
+            let (plan, prepared) = color_filter_document_proof(&filter, None, 90_000 + index, 120);
+            let expected =
+                (index % 100 == 0).then(|| cpu_reference_pixels(&plan, prepared.clone()));
+            let actual = gpu_pixels(&mut renderer, &plan, prepared.recording);
+            if let Some(expected) = expected {
+                assert_tolerant_pixels(&expected, &actual, 3, 0.0);
+            }
+            renderer.release_target(plan.surface);
+        }
+        let statistics = renderer.statistics();
+        assert_eq!(
+            statistics
+                .gpu_blur_gaussian_frames
+                .saturating_add(statistics.gpu_blur_three_box_frames),
+            FRAMES
+        );
+        assert_eq!(statistics.gpu_blur_gaussian_passes, FRAMES);
+        assert_eq!(statistics.gpu_blur_box_passes, (FRAMES / 2) * 6);
+        assert_eq!(statistics.gpu_blur_kernel_uploads, 1);
+        assert_eq!(statistics.gpu_blur_kernel_cache_hits, FRAMES / 2 - 1);
+        assert_eq!(statistics.gpu_blur_box_parameter_uploads, (FRAMES / 2) * 6);
+        assert_eq!(statistics.gpu_blur_layer_creations, FRAMES);
+        assert_eq!(statistics.gpu_blur_layer_reuses, 0);
+        assert_eq!(statistics.gpu_blur_pipeline_failures, 0);
+        assert_eq!(statistics.gpu_blur_allocation_failures, 0);
         assert_eq!(statistics.fallback_requests, 0);
         assert!(renderer.targets.is_empty());
     }
@@ -2636,16 +2934,35 @@ mod tests {
         assert_eq!(statistics.gpu_color_filter_passes, 0);
         assert_eq!(statistics.gpu_color_filter_operation_uploads, 0);
         assert!(renderer.color_effect_pipeline.is_none());
+        assert!(renderer.blur_effect_pipelines.is_none());
     }
 
     #[test]
     #[ignore = "requires a compatible Vulkan or GLES adapter"]
-    fn hardware_spatial_lists_use_complete_cpu_fallback_without_gpu_prefixes() {
+    fn hardware_identity_blur_suppresses_layer_pipeline_and_parameters() {
+        let (plan, prepared) = color_filter_document_proof("blur(0)", None, 40_003, 120);
+        let expected = cpu_reference_pixels(&plan, prepared.clone());
+        let mut renderer =
+            VelloOffscreenRenderer::new(false).expect("compatible offscreen GPU adapter");
+        let actual = gpu_pixels(&mut renderer, &plan, prepared.recording);
+        assert_eq!(actual, expected);
+        let statistics = renderer.statistics();
+        assert_eq!(statistics.gpu_color_filter_identity_suppressions, 1);
+        assert_eq!(statistics.gpu_blur_layer_creations, 0);
+        assert_eq!(statistics.gpu_blur_gaussian_passes, 0);
+        assert_eq!(statistics.gpu_blur_box_passes, 0);
+        assert_eq!(statistics.gpu_blur_kernel_uploads, 0);
+        assert!(renderer.blur_effect_pipelines.is_none());
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn hardware_drop_shadow_lists_use_complete_cpu_fallback_without_gpu_prefixes() {
         for (index, filter) in [
-            "brightness(2) blur(1px)",
-            "blur(1px) brightness(2)",
             "contrast(2) drop-shadow(4px 4px 1px black)",
             "drop-shadow(4px 4px 1px black) sepia(1)",
+            "brightness(2) blur(1px) drop-shadow(4px 4px black)",
+            "drop-shadow(4px 4px black) blur(1px) brightness(2)",
         ]
         .into_iter()
         .enumerate()
@@ -2667,6 +2984,9 @@ mod tests {
             assert_eq!(statistics.gpu_color_filter_passes, 0);
             assert_eq!(statistics.gpu_color_filter_operation_uploads, 0);
             assert_eq!(statistics.gpu_color_filter_fallback_requests, 1);
+            assert_eq!(statistics.gpu_blur_gaussian_passes, 0);
+            assert_eq!(statistics.gpu_blur_box_passes, 0);
+            assert_eq!(statistics.gpu_spatial_cpu_fallbacks, 1);
         }
     }
 }

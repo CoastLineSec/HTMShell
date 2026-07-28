@@ -45,13 +45,15 @@ Drop shadow follows rendered alpha rather than box geometry. Transparent image h
 
 The element's external clip, element opacity, and transform apply after its filter list. Consequently, blur may extend outside the SourceGraphic before the external clip is applied. `filter: opacity(50%)` is distinct from the `opacity` property and both apply when both are present.
 
-CPU headless and CPU Wayland presentation use the same reference compositor. The optional experimental Vello path executes lists containing only the eight color functions with a bounded native GPU effect layer. It uses the same encoded-sRGB matrices, function order, repeated stages, straight-alpha semantics, and per-stage clamping as the CPU reference.
+CPU headless and CPU Wayland presentation use the same reference compositor. The optional experimental Vello path executes the eight color functions and `blur()` with bounded native GPU effect layers. It uses the same encoded-sRGB matrices, function order, repeated stages, per-stage clamping, Gaussian parameters, three-box widths, and transparent-edge semantics as the CPU reference.
 
-Vello color-only frames do not use CPU frame rasterization, GPU readback, or shared-memory presentation. Identity-only lists skip the GPU effect layer. Lists containing `blur()` or `drop-shadow()` remain indivisible and select one complete CPU-rendered frame; Vello does not execute a color prefix or suffix around a spatial stage. The GPU effect layer uses canonical `Rgba8Unorm`, permits at most 16 operations, and follows the same 4,096 pixel dimension, 64 MiB image, 256 MiB per-surface, and nesting limits.
+Vello color and blur frames do not use CPU frame rasterization, GPU readback, or shared-memory presentation. Identity-only lists skip the GPU effect layer. The GPU pipeline converts straight RGBA to premultiplied RGBA before a blur stage and converts back only when a later color stage or Vello composition requires it. Consecutive blur stages remain premultiplied. Lists containing `drop-shadow()` remain indivisible and select one complete CPU-rendered frame; Vello does not execute a color or blur prefix or suffix around the shadow. The GPU effect layer uses canonical `Rgba8Unorm`, permits at most 16 functions, and follows the same 4,096 pixel dimension, 64 MiB image, 256 MiB per-surface, and nesting limits.
+
+Damage-limited Vello replay expands each 64 by 64 pixel tile by the cumulative physical blur reach plus the existing two-pixel antialias guard. Only the tile core enters persistent backing. The guarded replay area, not just the core area, controls the 30 percent partial-render threshold. Unsafe transformed spatial layers and excessive guarded areas use a complete GPU render. Backing-to-surface conversion remains full target.
 
 ## Current boundary
 
-All ten functions in this bounded foreground profile render through the CPU reference compositor. The eight nonspatial color functions also have experimental native Vello execution. Blur and drop shadow use complete CPU-frame fallback in Vello mode. Vello remains optional and experimental. URL filters, multiple drop shadows in one list, spread, inset shadows, and `backdrop-filter` are not supported.
+All ten functions in this bounded foreground profile render through the CPU reference compositor. The eight nonspatial color functions and blur also have experimental native Vello execution. Drop shadow uses complete CPU-frame fallback in Vello mode. Vello remains optional and experimental. URL filters, multiple drop shadows in one list, spread, inset shadows, and `backdrop-filter` are not supported.
 
 Foreground filters are static. Animation and transitions are not implemented.
 

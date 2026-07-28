@@ -144,11 +144,12 @@ impl ForegroundEffectCoverage {
                 ForegroundEffectBackendCoverage::Pending
             },
             gpu: if list.is_visual_identity()
-                || list
-                    .functions
-                    .iter()
-                    .all(|effect| matches!(effect, ForegroundEffect::Color(_)))
-            {
+                || list.functions.iter().all(|effect| {
+                    matches!(
+                        effect,
+                        ForegroundEffect::Color(_) | ForegroundEffect::Blur(_)
+                    )
+                }) {
                 ForegroundEffectBackendCoverage::Native
             } else {
                 ForegroundEffectBackendCoverage::CpuFrameFallbackRequired
@@ -1178,7 +1179,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_marks_all_bounded_foreground_effects_cpu_native_and_gpu_fallback() {
+    fn coverage_marks_color_and_blur_gpu_native_and_drop_shadow_fallback() {
         let identity = list(vec![scalar(ColorEffectKind::Brightness, 1.0)]);
         let color = list(vec![scalar(ColorEffectKind::Invert, 1.0)]);
         let blur = list(vec![
@@ -1219,7 +1220,7 @@ mod tests {
             ForegroundEffectCoverage {
                 model_ready: true,
                 cpu: ForegroundEffectBackendCoverage::Native,
-                gpu: ForegroundEffectBackendCoverage::CpuFrameFallbackRequired,
+                gpu: ForegroundEffectBackendCoverage::Native,
             }
         );
         assert_eq!(

@@ -1,5 +1,8 @@
-use crate::render::{DamageRegion, FramePlan, PhysicalDamageRect, logical_damage_to_physical};
-use std::collections::BTreeSet;
+use crate::render::{
+    DamageRegion, ForegroundEffect, FramePlan, PhysicalDamageRect, SceneEffect,
+    logical_damage_to_physical,
+};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) const DAMAGE_TILE_SIZE: u32 = 64;
 pub(super) const DAMAGE_TILE_GUARD: u32 = 2;
@@ -24,6 +27,7 @@ pub(super) enum FullRenderReason {
     Fragmentation,
     ReplayThreshold,
     AreaThreshold,
+    SpatialGuard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,11 +37,17 @@ pub(super) struct DamageTile {
     pub scratch_origin_y: u32,
     pub source_x: u32,
     pub source_y: u32,
+    pub scratch_width: u32,
+    pub scratch_height: u32,
 }
 
 impl DamageTile {
     pub(super) fn core_pixels(self) -> u64 {
         u64::from(self.core.width) * u64::from(self.core.height)
+    }
+
+    pub(super) fn scratch_pixels(self) -> u64 {
+        u64::from(self.scratch_width) * u64::from(self.scratch_height)
     }
 }
 
@@ -48,6 +58,7 @@ pub(super) enum DamageRenderDecision {
         damage: Vec<PhysicalDamageRect>,
         tiles: Vec<DamageTile>,
         tile_pixels: u64,
+        guarded_pixels: u64,
     },
     FullGpu {
         damage: Vec<PhysicalDamageRect>,
@@ -114,6 +125,13 @@ pub(super) fn select_damage_work(
             reason: FullRenderReason::ForcedRecovery,
         };
     }
+    let spatial_guard = spatial_replay_guard(plan);
+    if !spatial_guard.partial_safe {
+        return DamageRenderDecision::FullGpu {
+            damage,
+            reason: FullRenderReason::SpatialGuard,
+        };
+    }
 
     let mut coordinates = BTreeSet::new();
     for rect in &damage {
@@ -138,6 +156,7 @@ pub(super) fn select_damage_work(
 
     let mut tiles = Vec::with_capacity(coordinates.len());
     let mut tile_pixels = 0u64;
+    let mut guarded_pixels = 0u64;
     for (tile_y, tile_x) in coordinates {
         let x = tile_x.saturating_mul(DAMAGE_TILE_SIZE);
         let y = tile_y.saturating_mul(DAMAGE_TILE_SIZE);
@@ -146,8 +165,16 @@ pub(super) fn select_damage_work(
         if width == 0 || height == 0 {
             continue;
         }
-        let scratch_origin_x = x.saturating_sub(DAMAGE_TILE_GUARD);
-        let scratch_origin_y = y.saturating_sub(DAMAGE_TILE_GUARD);
+        let scratch_origin_x = x.saturating_sub(spatial_guard.pixels);
+        let scratch_origin_y = y.saturating_sub(spatial_guard.pixels);
+        let scratch_right = x
+            .saturating_add(width)
+            .saturating_add(spatial_guard.pixels)
+            .min(plan.physical_width);
+        let scratch_bottom = y
+            .saturating_add(height)
+            .saturating_add(spatial_guard.pixels)
+            .min(plan.physical_height);
         let tile = DamageTile {
             core: PhysicalDamageRect {
                 x,
@@ -159,8 +186,11 @@ pub(super) fn select_damage_work(
             scratch_origin_y,
             source_x: x - scratch_origin_x,
             source_y: y - scratch_origin_y,
+            scratch_width: scratch_right.saturating_sub(scratch_origin_x),
+            scratch_height: scratch_bottom.saturating_sub(scratch_origin_y),
         };
         tile_pixels = tile_pixels.saturating_add(tile.core_pixels());
+        guarded_pixels = guarded_pixels.saturating_add(tile.scratch_pixels());
         tiles.push(tile);
     }
 
@@ -171,7 +201,7 @@ pub(super) fn select_damage_work(
         };
     }
     let target_pixels = u64::from(plan.physical_width) * u64::from(plan.physical_height);
-    if tile_pixels.saturating_mul(100) > target_pixels.saturating_mul(MAX_PARTIAL_AREA_PERCENT) {
+    if guarded_pixels.saturating_mul(100) > target_pixels.saturating_mul(MAX_PARTIAL_AREA_PERCENT) {
         return DamageRenderDecision::FullGpu {
             damage,
             reason: FullRenderReason::AreaThreshold,
@@ -182,6 +212,85 @@ pub(super) fn select_damage_work(
         damage,
         tiles,
         tile_pixels,
+        guarded_pixels,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SpatialReplayGuard {
+    pixels: u32,
+    partial_safe: bool,
+}
+
+fn spatial_replay_guard(plan: &FramePlan) -> SpatialReplayGuard {
+    let scale = f64::from(plan.scale_numerator) / f64::from(plan.scale_denominator);
+    if !scale.is_finite() || scale <= 0.0 {
+        return SpatialReplayGuard {
+            pixels: DAMAGE_TILE_GUARD,
+            partial_safe: false,
+        };
+    }
+    let mut nodes: Vec<_> = plan.scene.nodes.iter().collect();
+    nodes.sort_by_key(|node| (node.tree_order, node.paint_order, node.id));
+    let mut cumulative = BTreeMap::new();
+    let mut transformed_ancestors = BTreeMap::new();
+    let mut maximum = 0u32;
+    let mut partial_safe = true;
+    for node in nodes {
+        let inherited_transform = node
+            .parent
+            .and_then(|parent| transformed_ancestors.get(&parent).copied())
+            .unwrap_or(false);
+        let local_transform = node.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                SceneEffect::Transform { coefficients }
+                    if coefficients[0] != 1.0
+                        || coefficients[1] != 0.0
+                        || coefficients[2] != 0.0
+                        || coefficients[3] != 1.0
+            )
+        });
+        let has_spatial_transform = inherited_transform || local_transform;
+        transformed_ancestors.insert(node.id, has_spatial_transform);
+        let mut local = 0u32;
+        for effect in &node.effects {
+            let SceneEffect::ForegroundFilter { list, .. } = effect else {
+                continue;
+            };
+            for function in &list.functions {
+                match function {
+                    ForegroundEffect::Blur(blur) if blur.sigma.get() > 0.0 => {
+                        let reach = (3.0 * f64::from(blur.sigma.get()) * scale).ceil();
+                        if !reach.is_finite() || reach > f64::from(u32::MAX) {
+                            partial_safe = false;
+                        } else {
+                            local = local.saturating_add(reach as u32);
+                        }
+                    }
+                    ForegroundEffect::DropShadow(_) => partial_safe = false,
+                    ForegroundEffect::Color(_) | ForegroundEffect::Blur(_) => {}
+                }
+            }
+            if local > 0 && has_spatial_transform {
+                partial_safe = false;
+            }
+        }
+        let inherited = node
+            .parent
+            .and_then(|parent| cumulative.get(&parent).copied())
+            .unwrap_or(0u32);
+        let reach = inherited.saturating_add(local);
+        maximum = maximum.max(reach);
+        cumulative.insert(node.id, reach);
+    }
+    let pixels = maximum.saturating_add(DAMAGE_TILE_GUARD);
+    if pixels >= plan.physical_width.max(plan.physical_height) {
+        partial_safe = false;
+    }
+    SpatialReplayGuard {
+        pixels,
+        partial_safe,
     }
 }
 
@@ -350,6 +459,7 @@ mod tests {
             damage,
             tiles,
             tile_pixels,
+            ..
         } = decision
         else {
             panic!("small damage should be partial");
@@ -562,5 +672,78 @@ mod tests {
             assert!(damage.len() <= MAX_WAYLAND_DAMAGE_RECTS);
             assert!(tiles.len() <= MAX_PARTIAL_TILE_REPLAYS);
         }
+    }
+
+    #[test]
+    fn blur_replay_guard_scales_and_unsafe_spatial_transform_selects_full() {
+        let (mut blurred, _) =
+            super::super::tests::color_filter_document_proof("blur(4px)", None, 91_001, 150);
+        blurred.logical_width = 256;
+        blurred.logical_height = 192;
+        blurred.physical_width = 320;
+        blurred.physical_height = 240;
+        blurred.prior_scene_revision = Some(SceneRevision(1));
+        blurred.damage = DamageRegion::Rects(vec![rect(120.0, 120.0, 4.0, 4.0)]);
+        blurred.full_repaint = false;
+        let DamageRenderDecision::Partial { tiles, .. } = select_damage_work(&blurred, true, false)
+        else {
+            panic!("bounded blur should remain partial");
+        };
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].source_x, 17);
+        assert_eq!(tiles[0].source_y, 17);
+        assert_eq!(tiles[0].scratch_width, DAMAGE_TILE_SIZE + 34);
+        assert_eq!(tiles[0].scratch_height, DAMAGE_TILE_SIZE + 34);
+
+        let (filtered_id, filtered_parent) = {
+            let scene = Arc::make_mut(&mut blurred.scene);
+            let filtered = scene
+                .nodes
+                .iter_mut()
+                .find(|node| {
+                    node.effects
+                        .iter()
+                        .any(|effect| matches!(effect, SceneEffect::ForegroundFilter { .. }))
+                })
+                .expect("filtered node");
+            filtered.effects.push(SceneEffect::Transform {
+                coefficients: [2.0, 0.0, 0.0, 2.0, 0.0, 0.0],
+            });
+            (filtered.id, filtered.parent.expect("filtered parent"))
+        };
+        assert!(matches!(
+            select_damage_work(&blurred, true, false),
+            DamageRenderDecision::FullGpu {
+                reason: FullRenderReason::SpatialGuard,
+                ..
+            }
+        ));
+
+        {
+            let scene = Arc::make_mut(&mut blurred.scene);
+            scene
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == filtered_id)
+                .expect("filtered node")
+                .effects
+                .pop();
+            scene
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == filtered_parent)
+                .expect("parent node")
+                .effects
+                .push(SceneEffect::Transform {
+                    coefficients: [1.5, 0.0, 0.0, 1.5, 0.0, 0.0],
+                });
+        }
+        assert!(matches!(
+            select_damage_work(&blurred, true, false),
+            DamageRenderDecision::FullGpu {
+                reason: FullRenderReason::SpatialGuard,
+                ..
+            }
+        ));
     }
 }

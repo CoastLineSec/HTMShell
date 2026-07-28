@@ -31,27 +31,34 @@ rasterization, GPU readback, nor shared-memory presentation.
 
 Vello renders solid and rounded geometry, text, SVG, opacity, clips, affine
 transforms, background layers, and box shadows. Raster images are decoded by
-the existing bounded resource path and composed by the GPU. Color-only
-foreground filter lists isolate the complete SourceGraphic into a bounded
-straight-alpha `Rgba8Unorm` texture. One fixed shader consumes up to 16 packed
-semantic operations in order and clamps after every stage. Nested filters
-resolve inside-out, and the filtered texture returns to Vello without CPU
-rasterization or readback. Identity-only lists skip the layer and shader.
+the existing bounded resource path and composed by the GPU. Color and blur
+foreground filter lists isolate the complete SourceGraphic into bounded
+`Rgba8Unorm` textures. One fixed color shader consumes ordered semantic color
+runs and clamps after every operation. Finite conversion passes premultiply
+before spatial processing and safely restore straight alpha before a later
+color run or Vello composition. Direct Gaussian and three-box render passes use
+the CPU reference renderer's derived parameters and transparent-black exterior
+sampling. Nested filters resolve inside-out, and the filtered texture returns
+to Vello without CPU rasterization or readback. Identity-only lists skip the
+layer and shaders.
 
-Lists containing blur or drop shadow remain indivisible and request complete
-CPU fallback; color prefixes and suffixes are not split across backends.
+Lists containing drop shadow remain indivisible and request complete CPU
+fallback; color and blur prefixes and suffixes are not split across backends.
 Backdrop filters also request complete CPU fallback so content is never
-silently omitted. GPU effect textures, operation buffers, and the one
-device-generation-scoped pipeline obey the renderer's bounded effect limits.
+silently omitted. GPU effect textures, parameter buffers, and
+device-generation-scoped pipelines obey the renderer's bounded effect limits.
 
 ## Damage and presentation
 
 Each live GPU presenter owns a complete persistent backing image. Small logical
 damage is converted conservatively to physical coordinates and replayed through
-bounded 64 by 64 pixel tiles with a 2 pixel guard. Partial work is limited to
-16 tile replays and 30 percent of the target area; larger or uncertain changes
-use a complete GPU render. A partial transaction becomes current only after all
-selected tiles have rendered and copied successfully.
+bounded 64 by 64 pixel tiles. Pointwise content uses a 2 pixel antialias guard.
+Blur adds its cumulative physical support to that guard. Only the authoritative
+tile core is copied into persistent backing, and the guarded replay area drives
+the 30 percent threshold. Partial work is limited to 16 tile replays; larger,
+transformed spatial, or uncertain changes use a complete GPU render. A partial
+transaction becomes current only after all selected tiles have rendered and
+copied successfully.
 
 Swapchain image contents are never assumed to persist and buffer age is not
 used. Every acquired image is populated completely from the current backing by
@@ -70,7 +77,7 @@ and frame callbacks remain distinct responsibilities.
 The Vello backend cache is keyed by device generation, neutral resource
 identity, resource version, and prepared representation. Entry, byte, and
 single-resource limits bound the cache. Device reset discards backend handles,
-including the color-effect pipeline and layers, while neutral scenes and
+including foreground-effect pipelines and layers, while neutral scenes and
 resources remain authoritative.
 
 Exactly one presenter owns a Wayland surface generation. GPU absence,
