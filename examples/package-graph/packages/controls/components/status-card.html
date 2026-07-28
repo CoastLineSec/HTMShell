@@ -1,8 +1,28 @@
 <!doctype html>
 <template data-htm-component="status-card">
   <article class="graph-status-card">
-    <h2>Static library component</h2>
-    <p>One immutable definition is instantiated into each root document.</p>
-    <htm-use component="shared.badge-label"></htm-use>
+    <h2>
+      <span data-htm-element="state-text" data-htm-bind="input.label"></span>
+    </h2>
+    <p>
+      Count:
+      <data data-htm-element="state-value" data-htm-bind="input.count"></data>
+    </p>
+    <p>
+      Enabled:
+      <span data-htm-element="state-token" data-htm-bind="input.enabled"></span>
+    </p>
+    <p>
+      Accent:
+      <span data-htm-element="state-text" data-htm-bind="input.accent"></span>
+    </p>
+    <p>
+      Spacing:
+      <span data-htm-element="state-text" data-htm-bind="input.spacing"></span>
+    </p>
+    <htm-use
+      component="shared.badge-label"
+      input-label="Nested through a direct library alias"
+      input-tone="active"></htm-use>
   </article>
 </template>

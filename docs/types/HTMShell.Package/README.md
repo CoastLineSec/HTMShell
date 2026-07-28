@@ -52,7 +52,7 @@ Dependency paths cannot use parent traversal, absolute paths, backslashes, URLs,
 
 One graph contains exactly one `shell`, at its root. Only that package may declare the supported panel and overlay topology. A `library` may depend on libraries but cannot create surfaces or load presentation content as an import side effect.
 
-Schema version 2 shell and library packages may declare an ordered `components` export table. Definitions remain inert until an explicit root or component [`htm-use`](../HTMShell.Component/README.md#component-use) references them. Libraries still cannot contribute topology, presentation stylesheets, assets, state, actions, services, or surfaces as import side effects.
+Schema version 2 shell and library packages may declare an ordered `components` export table with optional literal typed input declarations. Definitions remain inert until an explicit root or component [`htm-use`](../HTMShell.Component/README.md#component-use) references them. Libraries still cannot contribute topology, presentation stylesheets, assets, state, actions, services, or surfaces as import side effects.
 
 The graph is resolved in deterministic dependency-first order. Cycles, ID conflicts, location conflicts, version conflicts, and package-kind violations reject the complete candidate.
 
@@ -60,8 +60,8 @@ Validated package data is published as one immutable generation. Headless and li
 
 ## Limits
 
-The graph permits at most 64 packages, 32 direct dependencies per package, dependency depth 16, 256 component exports per package, and 4,096 component exports per graph. Each manifest is at most 256 KiB, each component source document is at most 2 MiB, and one candidate may read at most 256 MiB.
+The graph permits at most 64 packages, 32 direct dependencies per package, dependency depth 16, 256 component exports per package, and 4,096 component exports per graph. Each component declares at most 64 literal inputs. Each manifest is at most 256 KiB, each component source document is at most 2 MiB, and one candidate may read at most 256 MiB.
 
-There is no network resolution, package registry, version solver, optional dependency, global search path, component input, slot projection, scoped component CSS, component-owned external resource loading, or hot reload.
+There is no network resolution, package registry, version solver, optional dependency, global search path, dynamic component binding, slot projection, scoped component CSS, component-owned external resource loading, or hot reload.
 
-See [local packages](../../guide/packages.md), [static components](../../guide/components.md), and [`ShellManifest`](../HTMShell/ShellManifest.md).
+See [local packages](../../guide/packages.md), [components](../../guide/components.md), [component inputs](../HTMShell.Component/Input.md), and [`ShellManifest`](../HTMShell/ShellManifest.md).

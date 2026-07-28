@@ -62,6 +62,11 @@ body {
   font-size: 0.85rem;
 }
 
+.package-badge-state {
+  color: #7cc4ff;
+  font-size: 0.75rem;
+}
+
 button {
   margin: 6px;
   padding: 8px 12px;

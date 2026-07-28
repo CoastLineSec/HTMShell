@@ -75,7 +75,11 @@ impl std::error::Error for RuntimeError {
 
 impl From<crate::PackageLoadError> for RuntimeError {
     fn from(value: crate::PackageLoadError) -> Self {
-        Self::Package(value)
+        if value.kind() == crate::PackageErrorKind::DocumentDepthLimit {
+            Self::LimitExceeded(value.to_string())
+        } else {
+            Self::Package(value)
+        }
     }
 }
 

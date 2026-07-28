@@ -1,8 +1,8 @@
-# Static components
+# Components
 
 HTMShell schema version 2 packages can export inert, reusable HTML fragments. A component definition is parsed and validated once while an immutable package snapshot candidate is built. An explicit `htm-use` then creates a fresh instance by cloning normalized template nodes. No source text is substituted or reparsed per instance.
 
-This initial profile is intentionally static. It provides deterministic composition without component inputs, slots, local IDs, local state, actions, service state, repeat integration, scoped styles, or external component-owned resources.
+Components may declare bounded literal inputs. They still have no slots, local IDs, local state, actions, service state, repeat integration, scoped styles, or external component-owned resources.
 
 ## Export a definition
 
@@ -20,13 +20,25 @@ Both `shell` and `library` packages may declare an optional ordered `components`
   "components": [
     {
       "name": "status-card",
-      "source": "components/status-card.html"
+      "source": "components/status-card.html",
+      "inputs": [
+        {
+          "name": "label",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "count",
+          "type": "number",
+          "default": 0
+        }
+      ]
     }
   ]
 }
 ```
 
-Each entry has exactly `name` and `source`. The manifest owns the public export table. A template found in a file is not exported implicitly.
+Each entry has `name`, `source`, and an optional ordered `inputs` array. The manifest owns the public export and input tables. A template found in a file is not exported implicitly.
 
 Only the root shell package owns surfaces and topology. A library component always renders inside the root-owned document that explicitly instantiates it.
 
@@ -53,11 +65,11 @@ Whitespace, comments, and ordinary parser metadata may surround declarations. Re
 
 A definition may contain ordinary text and layout elements, ordinary classes, inline SVG without external references, non-resource inline styles, foreground filters, and nested `htm-use` directives. Definitions are inert: loading or leaving one unused creates no surface, document instance, CSS load, asset load, service demand, renderer resource, frame, or Wayland object.
 
-The static profile rejects:
+The component profile rejects:
 
-- all eight built-in behavior declarations, including `state-text`, `state-token`, `state-value`, `action-button`, `clock-text`, `repeat`, `range-control`, and `peak-monitor`;
-- contextual repeat forms, state references, action references, service references, and other runtime `data-htm-*` behavior;
-- `slot` elements and attributes, component input attributes, and renderable invocation children;
+- `action-button`, `clock-text`, `repeat`, `range-control`, `peak-monitor`, and contextual repeat forms;
+- arbitrary state references, action references, service references, and other runtime `data-htm-*` behavior;
+- `slot` elements and attributes and renderable invocation children;
 - `id`, `for`, fragment references, and supported ARIA local-reference attributes;
 - scripts, style elements, stylesheet links, `@import`, `url()`, and URL-valued CSS;
 - external images, SVG references, fonts, media, data files, or other component-owned resources.
@@ -80,7 +92,69 @@ It can use a direct library dependency through the declaring package's alias:
 
 A nested component resolves references in its definition owner's package scope. Bare references select an export in that package. Qualified references use one direct dependency alias from that package. Parent aliases, transitive aliases, package IDs, filesystem paths, `self`, and `root` do not leak into the scope.
 
-`htm-use` requires exactly one `component` attribute. It accepts no `id`, `class`, `style`, input, or slot attributes. Only whitespace and comments may be children. Unknown references, attributes, or renderable children reject the complete candidate. Schema version 1 and manifestless headless roots cannot use `htm-use`.
+`htm-use` requires one `component` attribute. Its only other accepted attributes are declared `input-*` literals. It accepts no `id`, `class`, `style`, unprefixed input, or slot attributes. Only whitespace and comments may be children. Unknown references, attributes, inputs, or renderable children reject the complete candidate. Schema version 1 and manifestless headless roots cannot use `htm-use`.
+
+## Literal inputs
+
+An export may declare at most 64 inputs. Input names contain 1 through 64 lowercase ASCII bytes, start with a letter, and use lowercase letters, digits, and single interior hyphens. They cannot end with a hyphen. These names are reserved:
+
+```text
+component slot id class style input state action service resource repeat surface host
+```
+
+The six input types are `string`, `number`, `boolean`, `token`, `color`, and `length`. A declaration is either required or supplies a typed default:
+
+```json
+{
+  "name": "status-card",
+  "source": "components/status-card.html",
+  "inputs": [
+    {
+      "name": "label",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "enabled",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "name": "accent",
+      "type": "color",
+      "default": "#7cc4ff"
+    }
+  ]
+}
+```
+
+Pass literals with `input-<name>`:
+
+```html
+<htm-use
+  component="controls.status-card"
+  input-label="Connected"
+  input-enabled="false"
+  input-accent="rgb(124 196 255)">
+</htm-use>
+```
+
+Strings preserve the HTML-decoded Unicode value and whitespace. Numbers are complete finite decimal literals, normalize negative zero, and do not accept units. Booleans accept exactly `true` or `false`. Tokens use the existing single state-token vocabulary. Colors use context-free CSS color syntax and normalize to encoded-sRGB RGBA. Lengths accept finite `px` values and unitless zero; percentages and font-, viewport-, container-, variable-, or calculation-dependent lengths are invalid.
+
+Each instance owns an immutable input map in declaration order. Required inputs must be supplied, defaults are normalized before publication, and a defaulted value has the same semantic input version as an explicitly supplied equivalent value. Invocation attribute order does not affect the version. Input values do not define component instance or descendant identity.
+
+Components consume a value only through their nearest host's `input.<name>` namespace. `state-text` can display the canonical value of all six types, `state-token` accepts `token` and `boolean`, and `state-value` accepts `number` with raw formatting. These local consumers create no global state key, subscription, action lookup, or native-service demand:
+
+```html
+<template data-htm-component="status-card">
+  <article class="status-card">
+    <span data-htm-element="state-text" data-htm-bind="input.label"></span>
+    <span data-htm-element="state-token" data-htm-bind="input.enabled"></span>
+  </article>
+</template>
+```
+
+Nested components receive only their own declared literals and defaults. Parent inputs are not inherited or forwarded. Placeholder scanning, interpolation, expressions, state-reference inputs, action-reference inputs, and resource-reference inputs do not exist.
 
 ## Host and identity
 
@@ -105,9 +179,13 @@ All package manifests, component sources, component references, component cycles
 | Referenced definitions per prepared document | 256 |
 | Component nesting depth | 32 |
 | Expanded nodes per prepared document | 50,000 |
+| Input declarations per component | 64 |
+| Supplied inputs per invocation | 64 |
+| String input | 4,096 UTF-8 bytes |
+| Supplied literal bytes per invocation | 16 KiB |
 
 Component references form a separately validated dependency graph. Direct, indirect, and cross-package recursion cannot become current. The dependency-first definition order is deterministic, shared definitions are parsed once, and diamonds reuse one immutable definition.
 
-See the [package graph example](../../examples/package-graph/shell.json), the [local package guide](packages.md), and the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference.
+See the [package graph example](../../examples/package-graph/shell.json), the [local package guide](packages.md), the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference, and the [component input reference](../types/HTMShell.Component/Input.md).
 
-Component inputs, slots, local ID scoping, state and action access, repeat integration, component-scoped CSS, external component resources, and hot reload remain unavailable.
+Slots, local ID scoping, dynamic state and action bindings, repeat integration, component-scoped CSS, external component resources, and hot reload remain unavailable.

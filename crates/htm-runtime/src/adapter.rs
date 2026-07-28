@@ -28,7 +28,7 @@ use stylo::color::ColorSpace;
 use stylo::values::computed::CSSPixelLength;
 
 const MAX_DOM_NODES: usize = crate::MAX_COMPONENT_EXPANDED_NODES;
-const MAX_DOM_DEPTH: usize = 256;
+pub(crate) const MAX_DOM_DEPTH: usize = 256;
 const MAX_RESOURCE_RESOLVE_PASSES: usize = 8;
 
 pub fn run_package(package: impl AsRef<Path>) -> Result<ExperimentRun, RuntimeError> {
@@ -114,6 +114,7 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
     let mut document = instantiated.document;
     let component_instances = instantiated.instances;
     let component_descendants = instantiated.descendants;
+    let component_input_consumers = instantiated.input_consumers;
     document.set_incremental_layout(true);
     validate_document_limits(&document)?;
     let html_parse_ms = elapsed_ms(parse_started);
@@ -299,6 +300,7 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
         package_snapshot,
         component_instances,
         component_descendants,
+        component_input_consumers,
     })
 }
 

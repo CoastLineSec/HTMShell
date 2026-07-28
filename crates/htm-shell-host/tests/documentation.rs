@@ -2,7 +2,9 @@ use htm_runtime::{
     CLOCK_FORMAT_CONVERSIONS, CLOCK_FORMAT_FLAGS, CLOCK_PUBLIC_ATTRIBUTES, ClockFormat,
     ContextualRepeatSource, ItemBindingKey, LiveDocument, LiveDocumentKind, LiveRenderRequest,
     MAX_CANDIDATE_BYTES, MAX_COMPONENT_EXPANDED_NODES, MAX_COMPONENT_EXPORTS_PER_GRAPH,
-    MAX_COMPONENT_EXPORTS_PER_PACKAGE, MAX_COMPONENT_INSTANCES_PER_DOCUMENT,
+    MAX_COMPONENT_EXPORTS_PER_PACKAGE, MAX_COMPONENT_INPUT_ATTRIBUTES,
+    MAX_COMPONENT_INPUT_LITERAL_BYTES, MAX_COMPONENT_INPUT_NAME_BYTES,
+    MAX_COMPONENT_INPUT_STRING_BYTES, MAX_COMPONENT_INPUTS, MAX_COMPONENT_INSTANCES_PER_DOCUMENT,
     MAX_COMPONENT_NAME_BYTES, MAX_COMPONENT_NESTING_DEPTH, MAX_COMPONENT_REFERENCES_PER_DOCUMENT,
     MAX_COMPONENT_SOURCE_BYTES, MAX_COMPONENT_SOURCE_NODES,
     MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT, MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
@@ -213,7 +215,7 @@ fn local_package_documentation_matches_the_loader_contract() {
         "immutable generation",
         "last successfully published snapshot",
         "Headless and live",
-        "Static component",
+        "component definitions",
         "hot reload",
     ] {
         assert!(
@@ -271,19 +273,22 @@ fn local_package_documentation_matches_the_loader_contract() {
 }
 
 #[test]
-fn component_documentation_matches_the_static_composition_contract() {
+fn component_documentation_matches_the_literal_input_contract() {
     let root = workspace_root();
     let package_guide = fs::read_to_string(root.join("docs/guide/packages.md")).unwrap();
     let guide = fs::read_to_string(root.join("docs/guide/components.md")).unwrap();
     let reference =
         fs::read_to_string(root.join("docs/types/HTMShell.Component/README.md")).unwrap();
+    let input_reference =
+        fs::read_to_string(root.join("docs/types/HTMShell.Component/Input.md")).unwrap();
     let manifest_reference =
         fs::read_to_string(root.join("docs/types/HTMShell/ShellManifest.md")).unwrap();
-    let public = format!("{package_guide}\n{guide}\n{reference}\n{manifest_reference}");
+    let public =
+        format!("{package_guide}\n{guide}\n{reference}\n{input_reference}\n{manifest_reference}");
 
     for statement in [
         "`components`",
-        "`name` and `source`",
+        "`name`, `source`",
         "data-htm-component",
         "`htm-use`",
         "Bare references",
@@ -295,7 +300,19 @@ fn component_documentation_matches_the_static_composition_contract() {
         "no layout box",
         "inert",
         "Only the root",
-        "component inputs",
+        "literal inputs",
+        "`string`, `number`, `boolean`, `token`, `color`, and `length`",
+        "`input-*`",
+        "`input.<name>`",
+        "`state-text`",
+        "`state-token`",
+        "`state-value`",
+        "instance-local",
+        "explicitly supplied equivalent value",
+        "state-reference",
+        "action-reference",
+        "resource-reference",
+        "interpolation",
         "slots",
         "component-local IDs",
         "component-scoped CSS",
@@ -357,6 +374,35 @@ fn component_documentation_matches_the_static_composition_contract() {
         "| Component source document | {} MiB |",
         MAX_COMPONENT_SOURCE_BYTES / (1024 * 1024)
     )));
+    for (value, label) in [
+        (
+            MAX_COMPONENT_INPUTS as u64,
+            "Input declarations per component",
+        ),
+        (
+            MAX_COMPONENT_INPUT_ATTRIBUTES as u64,
+            "Supplied inputs per invocation",
+        ),
+        (MAX_COMPONENT_INPUT_NAME_BYTES as u64, "Input name bytes"),
+        (
+            MAX_COMPONENT_INPUT_STRING_BYTES as u64,
+            "String input bytes",
+        ),
+    ] {
+        let documented_value = if value >= 1_000 {
+            format!("{},{:03}", value / 1_000, value % 1_000)
+        } else {
+            value.to_string()
+        };
+        assert!(
+            input_reference.contains(&format!("| {label} | {documented_value}")),
+            "component input reference does not match source limit {label}={value}"
+        );
+    }
+    assert!(input_reference.contains(&format!(
+        "| Supplied literal bytes per invocation | {} KiB |",
+        MAX_COMPONENT_INPUT_LITERAL_BYTES / 1024
+    )));
 
     let manifest = ValidatedManifest::load(root.join("examples/package-graph/shell.json")).unwrap();
     let snapshot = manifest.snapshot();
@@ -381,6 +427,9 @@ fn component_documentation_matches_the_static_composition_contract() {
         "\"dependency_first_components\"",
         "\"component_instances\"",
         "\"instance_paths\"",
+        "\"inputs\"",
+        "\"semantic_version\"",
+        "\"consumers\"",
     ] {
         assert!(
             diagnostic.contains(expected),

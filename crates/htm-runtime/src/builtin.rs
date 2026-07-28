@@ -891,7 +891,7 @@ pub enum StateValueKind {
     Boolean,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StateToken {
     Open,
     Closed,
@@ -1206,6 +1206,17 @@ impl StateToken {
 
     pub fn valid_for(self, key: StateBindingKey) -> bool {
         key.token_values().contains(&self.as_str())
+    }
+}
+
+impl std::str::FromStr for StateToken {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|token| token.as_str() == value)
+            .ok_or(())
     }
 }
 
@@ -1684,6 +1695,7 @@ impl BuiltInElementIndex {
         document_generation: ExperimentalDocumentIdentity,
         surface_kind: BuiltInSurfaceKind,
         source: &str,
+        local_input_consumers: &BTreeSet<usize>,
     ) -> Result<Self, RuntimeError> {
         ensure_registry_valid()?;
         let mut elements = BTreeMap::new();
@@ -1707,6 +1719,9 @@ impl BuiltInElementIndex {
         }
 
         for (order, slot) in slots.into_iter().enumerate() {
+            if local_input_consumers.contains(&slot) {
+                continue;
+            }
             let Some(node) = document.get_node(slot) else {
                 continue;
             };
@@ -4674,6 +4689,7 @@ mod tests {
             ExperimentalDocumentIdentity { serial: 9 },
             kind,
             "fixture.html",
+            &BTreeSet::new(),
         )
     }
 

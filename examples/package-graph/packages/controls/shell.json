@@ -15,7 +15,39 @@
   "components": [
     {
       "name": "status-card",
-      "source": "components/status-card.html"
+      "source": "components/status-card.html",
+      "inputs": [
+        {
+          "name": "label",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "count",
+          "type": "number",
+          "default": 0
+        },
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "default": true
+        },
+        {
+          "name": "tone",
+          "type": "token",
+          "default": "ready"
+        },
+        {
+          "name": "accent",
+          "type": "color",
+          "default": "#b8c9ff"
+        },
+        {
+          "name": "spacing",
+          "type": "length",
+          "default": "8px"
+        }
+      ]
     }
   ]
 }

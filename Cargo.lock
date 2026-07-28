@@ -1054,6 +1054,7 @@ dependencies = [
  "serde_json",
  "skrifa",
  "stylo",
+ "stylo_traits",
  "url",
  "vello",
 ]

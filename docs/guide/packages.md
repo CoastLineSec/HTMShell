@@ -32,7 +32,14 @@ The `shell.json` manifest uses a `package` object and an ordered `dependencies` 
   "components": [
     {
       "name": "shell-heading",
-      "source": "components/shell-heading.html"
+      "source": "components/shell-heading.html",
+      "inputs": [
+        {
+          "name": "label",
+          "type": "string",
+          "required": true
+        }
+      ]
     }
   ],
   "surfaces": [
@@ -80,7 +87,7 @@ Package versions are optional SemVer 2.0.0 metadata. HTMShell records a declared
 
 Unknown fields are rejected. Library manifests must omit `surfaces`.
 
-The optional ordered `components` array is accepted only by schema version 2. Each entry has exactly a `name` and a package-relative `source`. The manifest export table is authoritative: every exported name must match exactly one inert template declaration, and every declaration must be exported. See [static components](components.md).
+The optional ordered `components` array is accepted only by schema version 2. Each entry has a `name`, a package-relative `source`, and an optional ordered `inputs` array. The manifest export and input tables are authoritative: every exported name must match exactly one inert template declaration, and every declaration must be exported. Inputs are finite typed literals resolved before publication. See [components](components.md).
 
 ## Package IDs and aliases
 
@@ -148,8 +155,12 @@ A manifestless headless directory containing `index.html` remains valid and uses
 | Referenced definitions per prepared document | 256 |
 | Component nesting depth | 32 |
 | Expanded nodes per prepared document | 50,000 |
+| Input declarations per component | 64 |
+| Supplied inputs per invocation | 64 |
+| String input | 4,096 UTF-8 bytes |
+| Supplied literal bytes per invocation | 16 KiB |
 
-Manifest, package, component, and graph errors reject the candidate rather than truncating it. Static component definitions are supported, but component inputs, slots, component-local IDs, component-scoped CSS, state or action access, repeat integration, component-owned external resources, and hot reload are not implemented.
+Manifest, package, component, input, and graph errors reject the candidate rather than truncating it. Component definitions and literal typed inputs are supported, but slots, component-local IDs, component-scoped CSS, dynamic state or action bindings, repeat integration, component-owned external resources, and hot reload are not implemented.
 
 See the [package graph example](../../examples/package-graph/shell.json), the [`HTMShell.Package`](../types/HTMShell.Package/README.md) reference, and the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference.
 

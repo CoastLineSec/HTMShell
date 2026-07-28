@@ -84,6 +84,7 @@ fn run_inner(package: &Path) -> Result<IncrementalExperimentRun, RuntimeError> {
     let mut document = instantiated.document;
     let component_instances = instantiated.instances;
     let component_descendants = instantiated.descendants;
+    let component_input_consumers = instantiated.input_consumers;
     document.set_incremental_layout(true);
     validate_document_limits(&document)?;
     let parse_ms = elapsed_ms(parse_started);
@@ -543,6 +544,7 @@ fn run_inner(package: &Path) -> Result<IncrementalExperimentRun, RuntimeError> {
         package_snapshot,
         component_instances,
         component_descendants,
+        component_input_consumers,
     })
 }
 

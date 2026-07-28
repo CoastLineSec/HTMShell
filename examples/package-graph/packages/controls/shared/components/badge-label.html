@@ -1,4 +1,11 @@
 <!doctype html>
 <template data-htm-component="badge-label">
-  <span class="package-badge">Nested through a direct library alias</span>
+  <span
+    class="package-badge"
+    data-htm-element="state-text"
+    data-htm-bind="input.label"></span>
+  <span
+    class="package-badge-state"
+    data-htm-element="state-token"
+    data-htm-bind="input.tone"></span>
 </template>

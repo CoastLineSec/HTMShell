@@ -2,13 +2,21 @@ use crate::package::{
     PackageAlias, PackageErrorKind, PackageId, PackageLoadError, PackageSchemaSource,
     PackageSnapshotGeneration, ResolvedPackage,
 };
+use crate::{NumericValue, StateToken, StateValueFormat};
 use blitz_dom::node::NodeData;
-use blitz_dom::{Attribute, DocumentConfig, QualName};
+use blitz_dom::{Attribute, DocumentConfig, LocalName, QualName, ns};
 use blitz_html::HtmlDocument;
+use cssparser::{Parser, ParserInput, Token};
+use selectors::matching::QuirksMode;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
+use style_traits::ParsingMode;
+use stylo::parser::{Parse, ParserContext};
+use stylo::stylesheets::{CssRuleType, Origin, UrlExtraData};
+use stylo::values::specified;
+use url::Url;
 
 pub const MAX_COMPONENT_NAME_BYTES: usize = 64;
 pub const MAX_COMPONENT_EXPORTS_PER_PACKAGE: usize = 256;
@@ -19,11 +27,536 @@ pub const MAX_COMPONENT_INSTANCES_PER_DOCUMENT: usize = 4_096;
 pub const MAX_COMPONENT_REFERENCES_PER_DOCUMENT: usize = 256;
 pub const MAX_COMPONENT_NESTING_DEPTH: usize = 32;
 pub const MAX_COMPONENT_EXPANDED_NODES: usize = 50_000;
+pub const MAX_COMPONENT_INPUTS: usize = 64;
+pub const MAX_COMPONENT_INPUT_NAME_BYTES: usize = 64;
+pub const MAX_COMPONENT_INPUT_STRING_BYTES: usize = 4_096;
+pub const MAX_COMPONENT_INPUT_LITERAL_BYTES: usize = 16 * 1_024;
+pub const MAX_COMPONENT_INPUT_ATTRIBUTES: usize = 64;
 
 const COMPONENT_ATTRIBUTE: &str = "data-htm-component";
 const BUILTIN_ATTRIBUTE: &str = "data-htm-element";
 const USE_ELEMENT: &str = "htm-use";
 const TEMPLATE_ELEMENT: &str = "template";
+const BIND_ATTRIBUTE: &str = "data-htm-bind";
+const FORMAT_ATTRIBUTE: &str = "data-htm-format";
+const STATE_ATTRIBUTE: &str = "data-htm-state";
+
+const RESERVED_COMPONENT_INPUT_NAMES: &[&str] = &[
+    "component",
+    "slot",
+    "id",
+    "class",
+    "style",
+    "input",
+    "state",
+    "action",
+    "service",
+    "resource",
+    "repeat",
+    "surface",
+    "host",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct ComponentInputName(String);
+
+impl ComponentInputName {
+    pub fn parse(value: &str) -> Result<Self, PackageLoadError> {
+        if value.is_empty() || value.len() > MAX_COMPONENT_INPUT_NAME_BYTES || !value.is_ascii() {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::InvalidComponentInputName,
+                format!(
+                    "component input name must contain 1..={MAX_COMPONENT_INPUT_NAME_BYTES} ASCII bytes"
+                ),
+            ));
+        }
+        let bytes = value.as_bytes();
+        if !bytes[0].is_ascii_lowercase()
+            || bytes.last() == Some(&b'-')
+            || value.contains("--")
+            || !bytes
+                .iter()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+        {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::InvalidComponentInputName,
+                format!(
+                    "component input name `{value}` must start with a lowercase letter and contain only lowercase letters, digits, and single interior hyphens"
+                ),
+            ));
+        }
+        if RESERVED_COMPONENT_INPUT_NAMES.contains(&value) {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::ReservedComponentInputName,
+                format!("component input name `{value}` is reserved"),
+            ));
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ComponentInputName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComponentInputType {
+    String,
+    Number,
+    Boolean,
+    Token,
+    Color,
+    Length,
+}
+
+impl ComponentInputType {
+    pub fn parse(value: &str) -> Result<Self, PackageLoadError> {
+        match value {
+            "string" => Ok(Self::String),
+            "number" => Ok(Self::Number),
+            "boolean" => Ok(Self::Boolean),
+            "token" => Ok(Self::Token),
+            "color" => Ok(Self::Color),
+            "length" => Ok(Self::Length),
+            "state-reference" => Err(PackageLoadError::new(
+                PackageErrorKind::ComponentStateReferenceInputNotSupported,
+                "state-reference component inputs are not supported",
+            )),
+            "action-reference" => Err(PackageLoadError::new(
+                PackageErrorKind::ComponentActionReferenceInputNotSupported,
+                "action-reference component inputs are not supported",
+            )),
+            "resource-reference" => Err(PackageLoadError::new(
+                PackageErrorKind::ComponentResourceReferenceInputNotSupported,
+                "resource-reference component inputs are not supported",
+            )),
+            _ => Err(PackageLoadError::new(
+                PackageErrorKind::UnsupportedComponentInputType,
+                format!("unsupported component input type `{value}`"),
+            )),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+            Self::Token => "token",
+            Self::Color => "color",
+            Self::Length => "length",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComponentNumber(u64);
+
+impl ComponentNumber {
+    fn parse(value: &str) -> Result<Self, String> {
+        if value.is_empty() || value.len() > crate::MAX_RANGE_NUMBER_BYTES {
+            return Err(format!(
+                "number must contain 1..={} bytes",
+                crate::MAX_RANGE_NUMBER_BYTES
+            ));
+        }
+        let mut parsed = value
+            .parse::<f64>()
+            .map_err(|_| "number must be a complete decimal literal".to_owned())?;
+        if !parsed.is_finite() {
+            return Err("number must be finite".to_owned());
+        }
+        if parsed == 0.0 {
+            parsed = 0.0;
+        }
+        Ok(Self(parsed.to_bits()))
+    }
+
+    pub fn get(self) -> f64 {
+        f64::from_bits(self.0)
+    }
+
+    fn canonical(self) -> String {
+        NumericValue::finite_decimal(self.get())
+            .format(StateValueFormat::Raw)
+            .expect("component numbers are finite")
+            .display
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComponentColor([u8; 4]);
+
+impl ComponentColor {
+    pub fn rgba(self) -> [u8; 4] {
+        self.0
+    }
+
+    fn canonical(self) -> String {
+        let [red, green, blue, alpha] = self.0;
+        if alpha == u8::MAX {
+            format!("#{red:02x}{green:02x}{blue:02x}")
+        } else {
+            format!("#{red:02x}{green:02x}{blue:02x}{alpha:02x}")
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComponentLength(u32);
+
+impl ComponentLength {
+    pub fn logical_px(self) -> f32 {
+        f32::from_bits(self.0)
+    }
+
+    fn canonical(self) -> String {
+        if self.logical_px() == 0.0 {
+            "0px".to_owned()
+        } else {
+            NumericValue::finite_decimal(self.logical_px() as f64)
+                .format(StateValueFormat::Raw)
+                .expect("component lengths are finite")
+                .display
+                + "px"
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ComponentInputValue {
+    String(String),
+    Number(ComponentNumber),
+    Boolean(bool),
+    Token(StateToken),
+    Color(ComponentColor),
+    Length(ComponentLength),
+}
+
+impl ComponentInputValue {
+    pub const fn input_type(&self) -> ComponentInputType {
+        match self {
+            Self::String(_) => ComponentInputType::String,
+            Self::Number(_) => ComponentInputType::Number,
+            Self::Boolean(_) => ComponentInputType::Boolean,
+            Self::Token(_) => ComponentInputType::Token,
+            Self::Color(_) => ComponentInputType::Color,
+            Self::Length(_) => ComponentInputType::Length,
+        }
+    }
+
+    pub fn canonical_string(&self) -> String {
+        match self {
+            Self::String(value) => value.clone(),
+            Self::Number(value) => value.canonical(),
+            Self::Boolean(value) => value.to_string(),
+            Self::Token(value) => value.as_str().to_owned(),
+            Self::Color(value) => value.canonical(),
+            Self::Length(value) => value.canonical(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentInputDeclaration {
+    name: ComponentInputName,
+    input_type: ComponentInputType,
+    required: bool,
+    default: Option<ComponentInputValue>,
+}
+
+impl ComponentInputDeclaration {
+    pub(crate) fn new(
+        name: ComponentInputName,
+        input_type: ComponentInputType,
+        required: bool,
+        default: Option<ComponentInputValue>,
+    ) -> Self {
+        Self {
+            name,
+            input_type,
+            required,
+            default,
+        }
+    }
+
+    pub fn name(&self) -> &ComponentInputName {
+        &self.name
+    }
+
+    pub fn input_type(&self) -> ComponentInputType {
+        self.input_type
+    }
+
+    pub fn required(&self) -> bool {
+        self.required
+    }
+
+    pub fn default(&self) -> Option<&ComponentInputValue> {
+        self.default.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComponentInputProvenance {
+    Supplied,
+    Defaulted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedComponentInput {
+    declaration: ComponentInputDeclaration,
+    value: ComponentInputValue,
+    provenance: ComponentInputProvenance,
+}
+
+impl ResolvedComponentInput {
+    pub fn declaration(&self) -> &ComponentInputDeclaration {
+        &self.declaration
+    }
+
+    pub fn value(&self) -> &ComponentInputValue {
+        &self.value
+    }
+
+    pub fn provenance(&self) -> ComponentInputProvenance {
+        self.provenance
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComponentInputVersion(Arc<str>);
+
+impl ComponentInputVersion {
+    pub fn deterministic_string(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedComponentInputs {
+    values: Arc<[ResolvedComponentInput]>,
+    version: ComponentInputVersion,
+}
+
+impl ResolvedComponentInputs {
+    fn new(values: Vec<ResolvedComponentInput>) -> Self {
+        let version = component_input_version(&values);
+        Self {
+            values: values.into(),
+            version,
+        }
+    }
+
+    fn for_instance(&self) -> Self {
+        Self::new(self.values.to_vec())
+    }
+
+    pub fn values(&self) -> &[ResolvedComponentInput] {
+        &self.values
+    }
+
+    pub fn version(&self) -> &ComponentInputVersion {
+        &self.version
+    }
+
+    pub fn get(&self, name: &ComponentInputName) -> Option<&ComponentInputValue> {
+        self.values
+            .iter()
+            .find(|value| value.declaration.name() == name)
+            .map(ResolvedComponentInput::value)
+    }
+
+    pub fn is_structurally_compatible_with(&self, other: &Self) -> bool {
+        self.values.len() == other.values.len()
+            && self
+                .values
+                .iter()
+                .zip(other.values.iter())
+                .all(|(left, right)| {
+                    left.declaration.name() == right.declaration.name()
+                        && left.declaration.input_type() == right.declaration.input_type()
+                })
+    }
+}
+
+pub(crate) fn parse_component_input_default(
+    input_type: ComponentInputType,
+    value: &serde_json::Value,
+) -> Result<ComponentInputValue, PackageLoadError> {
+    let literal = match (input_type, value) {
+        (ComponentInputType::Boolean, serde_json::Value::Bool(value)) => {
+            return Ok(ComponentInputValue::Boolean(*value));
+        }
+        (ComponentInputType::Number, serde_json::Value::Number(value)) => value.to_string(),
+        (
+            ComponentInputType::String
+            | ComponentInputType::Token
+            | ComponentInputType::Color
+            | ComponentInputType::Length,
+            serde_json::Value::String(value),
+        ) => value.clone(),
+        _ => {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::InvalidComponentInputDefault,
+                format!(
+                    "component input default must be a JSON value matching `{}`",
+                    input_type.as_str()
+                ),
+            ));
+        }
+    };
+    parse_component_input_literal(input_type, &literal).map_err(|error| {
+        PackageLoadError::new(
+            PackageErrorKind::InvalidComponentInputDefault,
+            error.to_string(),
+        )
+    })
+}
+
+fn parse_component_input_literal(
+    input_type: ComponentInputType,
+    value: &str,
+) -> Result<ComponentInputValue, PackageLoadError> {
+    if value.contains('\0') {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::InvalidComponentInputLiteral,
+            "component input literal must not contain NUL",
+        ));
+    }
+    match input_type {
+        ComponentInputType::String => {
+            if value.len() > MAX_COMPONENT_INPUT_STRING_BYTES {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentInputStringLimit,
+                    format!(
+                        "component string input exceeds {MAX_COMPONENT_INPUT_STRING_BYTES} UTF-8 bytes"
+                    ),
+                ));
+            }
+            Ok(ComponentInputValue::String(value.to_owned()))
+        }
+        ComponentInputType::Number => ComponentNumber::parse(value)
+            .map(ComponentInputValue::Number)
+            .map_err(|message| {
+                PackageLoadError::new(PackageErrorKind::InvalidComponentInputLiteral, message)
+            }),
+        ComponentInputType::Boolean => match value {
+            "true" => Ok(ComponentInputValue::Boolean(true)),
+            "false" => Ok(ComponentInputValue::Boolean(false)),
+            _ => Err(PackageLoadError::new(
+                PackageErrorKind::InvalidComponentInputLiteral,
+                "boolean component inputs accept exactly `true` or `false`",
+            )),
+        },
+        ComponentInputType::Token => value
+            .parse::<StateToken>()
+            .map(ComponentInputValue::Token)
+            .map_err(|()| {
+                PackageLoadError::new(
+                    PackageErrorKind::InvalidComponentInputLiteral,
+                    format!("`{value}` is not a supported state token"),
+                )
+            }),
+        ComponentInputType::Color => parse_component_color(value)
+            .map(ComponentInputValue::Color)
+            .map_err(|message| {
+                PackageLoadError::new(PackageErrorKind::InvalidComponentInputLiteral, message)
+            }),
+        ComponentInputType::Length => parse_component_length(value)
+            .map(ComponentInputValue::Length)
+            .map_err(|message| {
+                PackageLoadError::new(PackageErrorKind::InvalidComponentInputLiteral, message)
+            }),
+    }
+}
+
+fn parse_component_color(value: &str) -> Result<ComponentColor, String> {
+    let url_data: UrlExtraData = Url::parse("htm-local://package/input")
+        .expect("static component input URL is valid")
+        .into();
+    let context = ParserContext::new(
+        Origin::Author,
+        &url_data,
+        Some(CssRuleType::Style),
+        ParsingMode::DEFAULT,
+        QuirksMode::NoQuirks,
+        Default::default(),
+        None,
+        None,
+        Default::default(),
+    );
+    let mut parser_input = ParserInput::new(value);
+    let mut parser = Parser::new(&mut parser_input);
+    let parsed = parser
+        .parse_entirely(|parser| specified::Color::parse(&context, parser))
+        .map_err(|_| "component color is not a supported context-free CSS color".to_owned())?;
+    let specified::Color::Absolute(color) = parsed else {
+        return Err(
+            "component color must resolve without currentColor or style context".to_owned(),
+        );
+    };
+    let color = color.color.into_srgb_legacy();
+    let [red, green, blue, alpha] = [
+        color.components.0,
+        color.components.1,
+        color.components.2,
+        color.alpha,
+    ]
+    .map(cssparser::color::clamp_unit_f32);
+    Ok(ComponentColor([red, green, blue, alpha]))
+}
+
+fn parse_component_length(value: &str) -> Result<ComponentLength, String> {
+    let mut input = ParserInput::new(value);
+    let mut parser = Parser::new(&mut input);
+    let parsed = parser
+        .parse_entirely(|parser| {
+            let location = parser.current_source_location();
+            match parser.next()? {
+                Token::Number { value, .. } if *value == 0.0 => Ok(0.0),
+                Token::Dimension { value, unit, .. } if unit.eq_ignore_ascii_case("px") => {
+                    Ok(*value)
+                }
+                _ => Err(location.new_custom_error::<(), ()>(())),
+            }
+        })
+        .map_err(|_| {
+            "component length accepts only finite px values or unitless zero".to_owned()
+        })?;
+    if !parsed.is_finite() {
+        return Err("component length must be finite".to_owned());
+    }
+    let normalized = if parsed == 0.0 { 0.0 } else { parsed };
+    Ok(ComponentLength(normalized.to_bits()))
+}
+
+fn component_input_version(values: &[ResolvedComponentInput]) -> ComponentInputVersion {
+    let mut serialized = String::from("component-inputs-v1;");
+    for value in values {
+        let name = value.declaration.name().as_str();
+        let canonical = value.value.canonical_string();
+        serialized.push_str(&name.len().to_string());
+        serialized.push(':');
+        serialized.push_str(name);
+        serialized.push(':');
+        serialized.push_str(value.declaration.input_type().as_str());
+        serialized.push(':');
+        serialized.push_str(&canonical.len().to_string());
+        serialized.push(':');
+        serialized.push_str(&canonical);
+        serialized.push(';');
+    }
+    ComponentInputVersion(serialized.into())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct ComponentName(String);
@@ -145,11 +678,20 @@ impl fmt::Display for ComponentReference {
 pub struct ComponentExport {
     name: ComponentName,
     source: String,
+    inputs: Arc<[ComponentInputDeclaration]>,
 }
 
 impl ComponentExport {
-    pub(crate) fn new(name: ComponentName, source: String) -> Self {
-        Self { name, source }
+    pub(crate) fn new(
+        name: ComponentName,
+        source: String,
+        inputs: Vec<ComponentInputDeclaration>,
+    ) -> Self {
+        Self {
+            name,
+            source,
+            inputs: inputs.into(),
+        }
     }
 
     pub fn name(&self) -> &ComponentName {
@@ -158,6 +700,10 @@ impl ComponentExport {
 
     pub fn source(&self) -> &str {
         &self.source
+    }
+
+    pub fn inputs(&self) -> &[ComponentInputDeclaration] {
+        &self.inputs
     }
 }
 
@@ -188,6 +734,24 @@ impl ComponentDefinitionKey {
 impl fmt::Display for ComponentDefinitionKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", self.package_id, self.name)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ComponentInputConsumerKind {
+    StateText,
+    StateToken,
+    StateValue,
+}
+
+impl ComponentInputConsumerKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StateText => "state-text",
+            Self::StateToken => "state-token",
+            Self::StateValue => "state-value",
+        }
     }
 }
 
@@ -237,6 +801,16 @@ pub(crate) enum ComponentTemplateNode {
     Host {
         reference: ComponentReference,
         target: ComponentDefinitionKey,
+        inputs: ResolvedComponentInputs,
+        source_ordinal: u32,
+    },
+    InputConsumer {
+        name: QualName,
+        attributes: Vec<Attribute>,
+        children: Arc<[ComponentTemplateNode]>,
+        consumer_kind: ComponentInputConsumerKind,
+        input: ComponentInputName,
+        value_format: StateValueFormat,
         source_ordinal: u32,
     },
 }
@@ -249,6 +823,7 @@ pub struct ComponentDefinition {
     source_node_count: usize,
     dependencies: Arc<[ComponentDefinitionKey]>,
     resolved_references: Arc<[(ComponentReference, ComponentDefinitionKey)]>,
+    inputs: Arc<[ComponentInputDeclaration]>,
 }
 
 impl ComponentDefinition {
@@ -270,6 +845,10 @@ impl ComponentDefinition {
 
     pub fn resolved_references(&self) -> &[(ComponentReference, ComponentDefinitionKey)] {
         &self.resolved_references
+    }
+
+    pub fn inputs(&self) -> &[ComponentInputDeclaration] {
+        &self.inputs
     }
 }
 
@@ -325,6 +904,7 @@ pub(crate) struct UnresolvedComponentDefinition {
     pub logical_source: String,
     pub nodes: Vec<UnresolvedTemplateNode>,
     pub source_node_count: usize,
+    pub inputs: Arc<[ComponentInputDeclaration]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,6 +924,16 @@ pub(crate) enum UnresolvedTemplateNode {
     },
     Use {
         reference: ComponentReference,
+        supplied_inputs: Vec<(ComponentInputName, String)>,
+        source_ordinal: u32,
+    },
+    InputConsumer {
+        name: QualName,
+        attributes: Vec<Attribute>,
+        children: Vec<UnresolvedTemplateNode>,
+        consumer_kind: ComponentInputConsumerKind,
+        input: ComponentInputName,
+        value_format: StateValueFormat,
         source_ordinal: u32,
     },
 }
@@ -384,13 +974,15 @@ impl PreparedDocument {
             document_serial,
             instances: Vec::with_capacity(self.stats.component_instances),
             descendants: Vec::new(),
+            input_consumers: Vec::new(),
         };
-        let children = instantiate_nodes(&mut document, &self.nodes, None, &[], &mut state)?;
+        let children = instantiate_nodes(&mut document, &self.nodes, None, None, &[], &mut state)?;
         document.mutate().append_children(0, &children);
         Ok(InstantiatedDocument {
             document,
             instances: state.instances,
             descendants: state.descendants,
+            input_consumers: state.input_consumers,
         })
     }
 }
@@ -451,6 +1043,7 @@ pub struct ComponentInstanceRecord {
     reference: ComponentReference,
     logical_path: String,
     top_level_slots: Arc<[usize]>,
+    inputs: ResolvedComponentInputs,
 }
 
 impl ComponentInstanceRecord {
@@ -472,6 +1065,10 @@ impl ComponentInstanceRecord {
 
     pub fn top_level_slots(&self) -> &[usize] {
         &self.top_level_slots
+    }
+
+    pub fn inputs(&self) -> &ResolvedComponentInputs {
+        &self.inputs
     }
 }
 
@@ -501,10 +1098,42 @@ impl ComponentDescendantProvenance {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentInputConsumerRecord {
+    instance_id: ComponentInstanceId,
+    node_slot: usize,
+    template_source_ordinal: u32,
+    kind: ComponentInputConsumerKind,
+    input: ComponentInputName,
+}
+
+impl ComponentInputConsumerRecord {
+    pub fn instance_id(&self) -> &ComponentInstanceId {
+        &self.instance_id
+    }
+
+    pub fn node_slot(&self) -> usize {
+        self.node_slot
+    }
+
+    pub fn template_source_ordinal(&self) -> u32 {
+        self.template_source_ordinal
+    }
+
+    pub fn kind(&self) -> ComponentInputConsumerKind {
+        self.kind
+    }
+
+    pub fn input(&self) -> &ComponentInputName {
+        &self.input
+    }
+}
+
 pub(crate) struct InstantiatedDocument {
     pub document: HtmlDocument,
     pub instances: Vec<ComponentInstanceRecord>,
     pub descendants: Vec<ComponentDescendantProvenance>,
+    pub input_consumers: Vec<ComponentInputConsumerRecord>,
 }
 
 struct InstantiationState<'a> {
@@ -513,16 +1142,18 @@ struct InstantiationState<'a> {
     document_serial: u64,
     instances: Vec<ComponentInstanceRecord>,
     descendants: Vec<ComponentDescendantProvenance>,
+    input_consumers: Vec<ComponentInputConsumerRecord>,
 }
 
 pub(crate) fn parse_component_source(
     html: &str,
     owner: &PackageId,
     logical_source: &str,
-    expected: &BTreeSet<ComponentName>,
+    expected: &BTreeMap<ComponentName, Arc<[ComponentInputDeclaration]>>,
 ) -> Result<BTreeMap<ComponentName, UnresolvedComponentDefinition>, PackageLoadError> {
     reject_duplicate_control_attributes(html, logical_source)?;
     let document = HtmlDocument::from_html(html, parser_config());
+    validate_document_depth(&document, owner, logical_source)?;
     let body = find_html_element(&document, "body").ok_or_else(|| {
         component_error(
             PackageErrorKind::ComponentSourceParse,
@@ -582,7 +1213,7 @@ pub(crate) fn parse_component_source(
                 };
                 let name = ComponentName::parse(value)
                     .map_err(|error| error.in_package(owner.to_string()).at(logical_source))?;
-                if !expected.contains(&name) {
+                if !expected.contains_key(&name) {
                     return Err(component_error(
                         PackageErrorKind::ComponentTemplateUnexported,
                         owner,
@@ -600,6 +1231,14 @@ pub(crate) fn parse_component_source(
                 }
                 let mut ordinal = 0u32;
                 let mut source_node_count = 0usize;
+                let context = ComponentNormalizationContext {
+                    owner,
+                    logical_source,
+                    definition_name: &name,
+                    inputs: expected
+                        .get(&name)
+                        .expect("validated component export inputs exist"),
+                };
                 let children = node
                     .children
                     .iter()
@@ -607,9 +1246,7 @@ pub(crate) fn parse_component_source(
                         normalize_component_node(
                             &document,
                             *child,
-                            owner,
-                            logical_source,
-                            &name,
+                            context,
                             &mut ordinal,
                             &mut source_node_count,
                         )
@@ -628,10 +1265,15 @@ pub(crate) fn parse_component_source(
                 definitions.insert(
                     name.clone(),
                     UnresolvedComponentDefinition {
-                        key: ComponentDefinitionKey::new(owner.clone(), name),
+                        key: ComponentDefinitionKey::new(owner.clone(), name.clone()),
                         logical_source: logical_source.to_owned(),
                         nodes: children,
                         source_node_count,
+                        inputs: Arc::clone(
+                            expected
+                                .get(&name)
+                                .expect("validated component export inputs exist"),
+                        ),
                     },
                 );
             }
@@ -645,7 +1287,7 @@ pub(crate) fn parse_component_source(
             }
         }
     }
-    for name in expected {
+    for name in expected.keys() {
         if !definitions.contains_key(name) {
             return Err(component_error(
                 PackageErrorKind::ComponentTemplateMissing,
@@ -680,20 +1322,28 @@ pub(crate) fn build_component_catalog(
         .iter()
         .map(|definition| definition.key.clone())
         .collect();
+    let input_declarations: BTreeMap<_, _> = unresolved
+        .iter()
+        .map(|definition| (definition.key.clone(), Arc::clone(&definition.inputs)))
+        .collect();
     let mut definitions = Vec::with_capacity(unresolved.len());
     let mut indices = BTreeMap::new();
     for unresolved in unresolved {
         let mut dependencies = Vec::new();
         let mut dependency_set = BTreeSet::new();
         let mut references = Vec::new();
+        let mut resolution = ComponentResolutionContext {
+            packages: &package_by_id,
+            available: &available,
+            input_declarations: &input_declarations,
+            dependencies: &mut dependencies,
+            dependency_set: &mut dependency_set,
+            references: &mut references,
+        };
         let nodes = resolve_nodes(
             unresolved.nodes,
             &unresolved.key.package_id,
-            &package_by_id,
-            &available,
-            &mut dependencies,
-            &mut dependency_set,
-            &mut references,
+            &mut resolution,
         )?;
         let index = definitions.len();
         indices.insert(unresolved.key.clone(), index);
@@ -704,6 +1354,7 @@ pub(crate) fn build_component_catalog(
             source_node_count: unresolved.source_node_count,
             dependencies: dependencies.into(),
             resolved_references: references.into(),
+            inputs: unresolved.inputs,
         }));
     }
     let order = component_dependency_order(&definitions, &indices)?;
@@ -723,6 +1374,7 @@ pub(crate) fn prepare_root_document(
 ) -> Result<PreparedDocument, PackageLoadError> {
     reject_duplicate_control_attributes(html, logical_path)?;
     let document = HtmlDocument::from_html(html, parser_config());
+    validate_document_depth(&document, owner.id(), logical_path)?;
     let mut ordinal = 0u32;
     let mut inside_template = false;
     let nodes = document
@@ -752,15 +1404,27 @@ pub(crate) fn prepare_root_document(
     })
 }
 
+#[derive(Clone, Copy)]
+struct ComponentNormalizationContext<'a> {
+    owner: &'a PackageId,
+    logical_source: &'a str,
+    definition_name: &'a ComponentName,
+    inputs: &'a [ComponentInputDeclaration],
+}
+
 fn normalize_component_node(
     document: &HtmlDocument,
     slot: usize,
-    owner: &PackageId,
-    logical_source: &str,
-    definition_name: &ComponentName,
+    context: ComponentNormalizationContext<'_>,
     ordinal: &mut u32,
     count: &mut usize,
 ) -> Result<UnresolvedTemplateNode, PackageLoadError> {
+    let ComponentNormalizationContext {
+        owner,
+        logical_source,
+        definition_name,
+        inputs,
+    } = context;
     *count = count.checked_add(1).ok_or_else(|| {
         component_error(
             PackageErrorKind::ComponentSourceNodeLimit,
@@ -796,32 +1460,44 @@ fn normalize_component_node(
                 ));
             }
             if tag == USE_ELEMENT {
-                validate_use_element(element, &node.children, document, owner, logical_source)?;
+                let supplied_inputs =
+                    validate_use_element(element, &node.children, document, owner, logical_source)?;
                 let value = element_attr(element, "component")
                     .expect("validated htm-use has component attribute");
                 let reference = ComponentReference::parse(value)
                     .map_err(|error| error.in_package(owner.to_string()).at(logical_source))?;
                 return Ok(UnresolvedTemplateNode::Use {
                     reference,
+                    supplied_inputs,
+                    source_ordinal,
+                });
+            }
+            let children = node
+                .children
+                .iter()
+                .map(|child| normalize_component_node(document, *child, context, ordinal, count))
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some((consumer_kind, input, value_format)) = validate_component_input_consumer(
+                element,
+                &children,
+                inputs,
+                owner,
+                logical_source,
+            )? {
+                return Ok(UnresolvedTemplateNode::InputConsumer {
+                    name: element.name.clone(),
+                    attributes: element.attrs().to_vec(),
+                    children: children
+                        .into_iter()
+                        .filter(|child| matches!(child, UnresolvedTemplateNode::Comment { .. }))
+                        .collect(),
+                    consumer_kind,
+                    input,
+                    value_format,
                     source_ordinal,
                 });
             }
             validate_static_component_element(element, owner, logical_source)?;
-            let children = node
-                .children
-                .iter()
-                .map(|child| {
-                    normalize_component_node(
-                        document,
-                        *child,
-                        owner,
-                        logical_source,
-                        definition_name,
-                        ordinal,
-                        count,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
             Ok(UnresolvedTemplateNode::Element {
                 name: element.name.clone(),
                 attributes: element.attrs().to_vec(),
@@ -884,18 +1560,45 @@ fn normalize_root_node(
                         "`htm-use` is not supported inside root document templates or repeats",
                     ));
                 }
-                validate_use_element(element, &node.children, document, owner.id(), logical_path)?;
+                let supplied_inputs = validate_use_element(
+                    element,
+                    &node.children,
+                    document,
+                    owner.id(),
+                    logical_path,
+                )?;
                 let reference = ComponentReference::parse(
                     element_attr(element, "component")
                         .expect("validated htm-use has component attribute"),
                 )
                 .map_err(|error| error.in_package(owner.id().to_string()).at(logical_path))?;
                 let target = resolve_reference_from_package(owner, &reference, catalog)?;
+                let definition = catalog
+                    .definition(&target)
+                    .expect("resolved definition exists");
+                let inputs = resolve_component_inputs(
+                    definition.inputs(),
+                    supplied_inputs,
+                    owner.id(),
+                    &target.name,
+                    logical_path,
+                )?;
                 return Ok(ComponentTemplateNode::Host {
                     reference,
                     target,
+                    inputs,
                     source_ordinal,
                 });
+            }
+            if element_attr(element, BIND_ATTRIBUTE)
+                .is_some_and(|value| value.starts_with("input."))
+            {
+                return Err(component_error(
+                    PackageErrorKind::ComponentInputNamespaceOutsideComponent,
+                    owner.id(),
+                    logical_path,
+                    "`input.*` is available only inside a component instance",
+                ));
             }
             let previous = *inside_template;
             if tag == TEMPLATE_ELEMENT || element_attr(element, BUILTIN_ATTRIBUTE) == Some("repeat")
@@ -926,6 +1629,189 @@ fn normalize_root_node(
             })
         }
     }
+}
+
+fn validate_component_input_consumer(
+    element: &blitz_dom::ElementData,
+    children: &[UnresolvedTemplateNode],
+    inputs: &[ComponentInputDeclaration],
+    owner: &PackageId,
+    logical_source: &str,
+) -> Result<
+    Option<(
+        ComponentInputConsumerKind,
+        ComponentInputName,
+        StateValueFormat,
+    )>,
+    PackageLoadError,
+> {
+    let Some(kind_name) = element_attr(element, BUILTIN_ATTRIBUTE) else {
+        return Ok(None);
+    };
+    let (kind, allowed_tags): (ComponentInputConsumerKind, &[&str]) = match kind_name {
+        "state-text" => (
+            ComponentInputConsumerKind::StateText,
+            &["span", "p", "output"],
+        ),
+        "state-token" => (
+            ComponentInputConsumerKind::StateToken,
+            &["div", "span", "section"],
+        ),
+        "state-value" => (ComponentInputConsumerKind::StateValue, &["data"]),
+        _ => return Ok(None),
+    };
+    let Some(binding) =
+        element_attr(element, BIND_ATTRIBUTE).filter(|binding| binding.starts_with("input."))
+    else {
+        return Ok(None);
+    };
+    let tag = element.name.local.as_ref();
+    if !allowed_tags.contains(&tag) {
+        return Err(component_error(
+            PackageErrorKind::ComponentInputConsumerTypeMismatch,
+            owner,
+            logical_source,
+            format!("`{kind_name}` cannot use component element `<{tag}>`"),
+        ));
+    }
+    if children.iter().any(|node| {
+        matches!(
+            node,
+            UnresolvedTemplateNode::Element { .. }
+                | UnresolvedTemplateNode::Use { .. }
+                | UnresolvedTemplateNode::InputConsumer { .. }
+        )
+    }) {
+        return Err(component_error(
+            PackageErrorKind::ComponentInputConsumerTypeMismatch,
+            owner,
+            logical_source,
+            format!("`{kind_name}` content must not contain child elements"),
+        ));
+    }
+    for attribute in element.attrs() {
+        let name = attribute.name.local.as_ref();
+        let allowed = match kind {
+            ComponentInputConsumerKind::StateValue => {
+                matches!(name, BUILTIN_ATTRIBUTE | BIND_ATTRIBUTE | FORMAT_ATTRIBUTE)
+            }
+            ComponentInputConsumerKind::StateText | ComponentInputConsumerKind::StateToken => {
+                matches!(name, BUILTIN_ATTRIBUTE | BIND_ATTRIBUTE)
+            }
+        };
+        if name.starts_with("data-htm-") && !allowed {
+            return Err(component_error(
+                PackageErrorKind::ComponentStateActionNotSupported,
+                owner,
+                logical_source,
+                format!("unsupported component input consumer attribute `{name}`"),
+            ));
+        }
+        if matches!(
+            name,
+            "id" | "for"
+                | "slot"
+                | "value"
+                | "aria-labelledby"
+                | "aria-describedby"
+                | "aria-controls"
+                | "aria-owns"
+                | "aria-activedescendant"
+                | "list"
+                | "form"
+                | "headers"
+        ) || (name == "href" && attribute.value.starts_with('#'))
+        {
+            return Err(component_error(
+                PackageErrorKind::ComponentFeatureNotSupported,
+                owner,
+                logical_source,
+                format!("component-local attribute `{name}` is not supported"),
+            ));
+        }
+        if matches!(
+            name,
+            "src"
+                | "srcset"
+                | "href"
+                | "xlink:href"
+                | "poster"
+                | "data"
+                | "background"
+                | "action"
+                | "formaction"
+        ) {
+            return Err(component_error(
+                PackageErrorKind::ComponentResourceNotSupported,
+                owner,
+                logical_source,
+                format!("component resource attribute `{name}` is not supported"),
+            ));
+        }
+        if name == "style" {
+            let lowercase = attribute.value.to_ascii_lowercase();
+            if lowercase.contains("url")
+                || lowercase.contains("@import")
+                || attribute.value.contains('\\')
+            {
+                return Err(component_error(
+                    PackageErrorKind::ComponentResourceNotSupported,
+                    owner,
+                    logical_source,
+                    "component inline style must not load external resources",
+                ));
+            }
+        }
+    }
+    let input_name = binding
+        .strip_prefix("input.")
+        .expect("component input binding prefix was checked");
+    let input = ComponentInputName::parse(input_name)
+        .map_err(|error| error.in_package(owner.to_string()).at(logical_source))?;
+    let declaration = inputs
+        .iter()
+        .find(|declaration| declaration.name() == &input)
+        .ok_or_else(|| {
+            component_error(
+                PackageErrorKind::ComponentInputNamespaceUnknown,
+                owner,
+                logical_source,
+                format!("component input `{input}` is not declared"),
+            )
+        })?;
+    let compatible = match kind {
+        ComponentInputConsumerKind::StateText => true,
+        ComponentInputConsumerKind::StateToken => matches!(
+            declaration.input_type(),
+            ComponentInputType::Token | ComponentInputType::Boolean
+        ),
+        ComponentInputConsumerKind::StateValue => {
+            declaration.input_type() == ComponentInputType::Number
+        }
+    };
+    if !compatible {
+        return Err(component_error(
+            PackageErrorKind::ComponentInputConsumerTypeMismatch,
+            owner,
+            logical_source,
+            format!(
+                "`{kind_name}` cannot consume component input `{input}` of type `{}`",
+                declaration.input_type().as_str()
+            ),
+        ));
+    }
+    let value_format = match element_attr(element, FORMAT_ATTRIBUTE) {
+        None | Some("raw") => StateValueFormat::Raw,
+        Some(value) => {
+            return Err(component_error(
+                PackageErrorKind::ComponentInputConsumerTypeMismatch,
+                owner,
+                logical_source,
+                format!("component state-value supports only raw format, not `{value}`"),
+            ));
+        }
+    };
+    Ok(Some((kind, input, value_format)))
 }
 
 fn validate_static_component_element(
@@ -1051,7 +1937,7 @@ fn validate_static_component_element(
                 PackageErrorKind::ComponentFeatureNotSupported,
                 owner,
                 logical_source,
-                "component inputs are not supported",
+                "component input placeholder attributes are not supported",
             ));
         }
     }
@@ -1064,13 +1950,13 @@ fn validate_use_element(
     document: &HtmlDocument,
     owner: &PackageId,
     logical_source: &str,
-) -> Result<(), PackageLoadError> {
-    if element.attrs().len() != 1 || element_attr(element, "component").is_none() {
+) -> Result<Vec<(ComponentInputName, String)>, PackageLoadError> {
+    if element_attr(element, "component").is_none() {
         return Err(component_error(
             PackageErrorKind::ComponentInvocationAttributes,
             owner,
             logical_source,
-            "`htm-use` requires exactly one `component` attribute",
+            "`htm-use` requires one `component` attribute",
         ));
     }
     if element_attr(element, "component").is_some_and(str::is_empty) {
@@ -1080,6 +1966,65 @@ fn validate_use_element(
             logical_source,
             "`htm-use` component reference must not be empty",
         ));
+    }
+    let supplied_count = element.attrs().len().saturating_sub(1);
+    if supplied_count > MAX_COMPONENT_INPUT_ATTRIBUTES {
+        return Err(component_error(
+            PackageErrorKind::ComponentInputCountLimit,
+            owner,
+            logical_source,
+            format!(
+                "`htm-use` supplies {supplied_count} inputs; limit is {MAX_COMPONENT_INPUT_ATTRIBUTES}"
+            ),
+        ));
+    }
+    let mut supplied = Vec::with_capacity(supplied_count);
+    let mut supplied_names = BTreeSet::new();
+    let mut literal_bytes = 0usize;
+    for attribute in element.attrs() {
+        let attribute_name = attribute.name.local.as_ref();
+        if attribute_name == "component" {
+            continue;
+        }
+        let Some(suffix) = attribute_name.strip_prefix("input-") else {
+            return Err(component_error(
+                PackageErrorKind::ComponentInvocationAttributes,
+                owner,
+                logical_source,
+                format!("unsupported `htm-use` attribute `{attribute_name}`"),
+            ));
+        };
+        let input = ComponentInputName::parse(suffix)
+            .map_err(|error| error.in_package(owner.to_string()).at(logical_source))?;
+        if !supplied_names.insert(input.clone()) {
+            return Err(component_error(
+                PackageErrorKind::ComponentInputDuplicate,
+                owner,
+                logical_source,
+                format!("`htm-use` repeats input `{input}`"),
+            ));
+        }
+        literal_bytes = literal_bytes
+            .checked_add(attribute.value.len())
+            .ok_or_else(|| {
+                component_error(
+                    PackageErrorKind::ComponentInputLiteralByteLimit,
+                    owner,
+                    logical_source,
+                    "component input literal byte count overflowed",
+                )
+            })?;
+        if literal_bytes > MAX_COMPONENT_INPUT_LITERAL_BYTES {
+            return Err(component_error(
+                PackageErrorKind::ComponentInputLiteralByteLimit,
+                owner,
+                logical_source,
+                format!(
+                    "`htm-use` literal inputs exceed {MAX_COMPONENT_INPUT_LITERAL_BYTES} UTF-8 bytes"
+                ),
+            ));
+        }
+        supplied.push((input, attribute.value.to_string()));
     }
     for child in children {
         let child = document
@@ -1098,17 +2043,22 @@ fn validate_use_element(
             }
         }
     }
-    Ok(())
+    Ok(supplied)
+}
+
+struct ComponentResolutionContext<'a> {
+    packages: &'a BTreeMap<PackageId, Arc<ResolvedPackage>>,
+    available: &'a BTreeSet<ComponentDefinitionKey>,
+    input_declarations: &'a BTreeMap<ComponentDefinitionKey, Arc<[ComponentInputDeclaration]>>,
+    dependencies: &'a mut Vec<ComponentDefinitionKey>,
+    dependency_set: &'a mut BTreeSet<ComponentDefinitionKey>,
+    references: &'a mut Vec<(ComponentReference, ComponentDefinitionKey)>,
 }
 
 fn resolve_nodes(
     nodes: Vec<UnresolvedTemplateNode>,
     owner: &PackageId,
-    packages: &BTreeMap<PackageId, Arc<ResolvedPackage>>,
-    available: &BTreeSet<ComponentDefinitionKey>,
-    dependencies: &mut Vec<ComponentDefinitionKey>,
-    dependency_set: &mut BTreeSet<ComponentDefinitionKey>,
-    references: &mut Vec<(ComponentReference, ComponentDefinitionKey)>,
+    context: &mut ComponentResolutionContext<'_>,
 ) -> Result<Vec<ComponentTemplateNode>, PackageLoadError> {
     nodes
         .into_iter()
@@ -1131,48 +2081,135 @@ fn resolve_nodes(
             } => Ok(ComponentTemplateNode::Element {
                 name,
                 attributes,
-                children: resolve_nodes(
-                    children,
-                    owner,
-                    packages,
-                    available,
-                    dependencies,
-                    dependency_set,
-                    references,
-                )?
-                .into(),
+                children: resolve_nodes(children, owner, context)?.into(),
                 source_ordinal,
             }),
             UnresolvedTemplateNode::Use {
                 reference,
+                supplied_inputs,
                 source_ordinal,
             } => {
-                let package = packages.get(owner).ok_or_else(|| {
+                let package = context.packages.get(owner).ok_or_else(|| {
                     PackageLoadError::new(
                         PackageErrorKind::ComponentExportUnknown,
                         format!("component owner package `{owner}` is absent"),
                     )
                 })?;
                 let target = resolve_reference_key(package, &reference)?;
-                if !available.contains(&target) {
+                if !context.available.contains(&target) {
                     return Err(PackageLoadError::new(
                         PackageErrorKind::ComponentExportUnknown,
                         format!("component reference `{reference}` resolves to missing `{target}`"),
                     )
                     .in_package(owner.to_string()));
                 }
-                if dependency_set.insert(target.clone()) {
-                    dependencies.push(target.clone());
+                let declarations = context.input_declarations.get(&target).ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentExportUnknown,
+                        format!("component input declarations for `{target}` are absent"),
+                    )
+                })?;
+                let inputs = resolve_component_inputs(
+                    declarations,
+                    supplied_inputs,
+                    owner,
+                    &target.name,
+                    "component template",
+                )?;
+                if context.dependency_set.insert(target.clone()) {
+                    context.dependencies.push(target.clone());
                 }
-                references.push((reference.clone(), target.clone()));
+                context.references.push((reference.clone(), target.clone()));
                 Ok(ComponentTemplateNode::Host {
                     reference,
                     target,
+                    inputs,
                     source_ordinal,
                 })
             }
+            UnresolvedTemplateNode::InputConsumer {
+                name,
+                attributes,
+                children,
+                consumer_kind,
+                input,
+                value_format,
+                source_ordinal,
+            } => Ok(ComponentTemplateNode::InputConsumer {
+                name,
+                attributes,
+                children: resolve_nodes(children, owner, context)?.into(),
+                consumer_kind,
+                input,
+                value_format,
+                source_ordinal,
+            }),
         })
         .collect()
+}
+
+fn resolve_component_inputs(
+    declarations: &[ComponentInputDeclaration],
+    supplied: Vec<(ComponentInputName, String)>,
+    owner: &PackageId,
+    component: &ComponentName,
+    logical_source: &str,
+) -> Result<ResolvedComponentInputs, PackageLoadError> {
+    let supplied: BTreeMap<_, _> = supplied.into_iter().collect();
+    for name in supplied.keys() {
+        if !declarations
+            .iter()
+            .any(|declaration| declaration.name() == name)
+        {
+            return Err(component_error(
+                PackageErrorKind::ComponentInputUnknown,
+                owner,
+                logical_source,
+                format!("component `{component}` does not declare input `{name}`"),
+            ));
+        }
+    }
+    let mut values = Vec::with_capacity(declarations.len());
+    for declaration in declarations {
+        let (value, provenance) = match supplied.get(declaration.name()) {
+            Some(literal) => (
+                parse_component_input_literal(declaration.input_type(), literal).map_err(
+                    |error| {
+                        component_error(
+                            error.kind(),
+                            owner,
+                            logical_source,
+                            format!(
+                                "component `{component}` input `{}`: {error}",
+                                declaration.name()
+                            ),
+                        )
+                    },
+                )?,
+                ComponentInputProvenance::Supplied,
+            ),
+            None => match declaration.default() {
+                Some(value) => (value.clone(), ComponentInputProvenance::Defaulted),
+                None => {
+                    return Err(component_error(
+                        PackageErrorKind::ComponentInputMissingRequired,
+                        owner,
+                        logical_source,
+                        format!(
+                            "component `{component}` is missing required input `{}`",
+                            declaration.name()
+                        ),
+                    ));
+                }
+            },
+        };
+        values.push(ResolvedComponentInput {
+            declaration: declaration.clone(),
+            value,
+            provenance,
+        });
+    }
+    Ok(ResolvedComponentInputs::new(values))
 }
 
 fn resolve_reference_key(
@@ -1319,8 +2356,8 @@ fn validate_prepared_expansion(
         depth: usize,
         path: &mut Vec<u32>,
     ) -> Result<(), PackageLoadError> {
-        for node in nodes {
-            state.expanded = state.expanded.checked_add(1).ok_or_else(|| {
+        fn add_expanded(state: &mut Expansion<'_>, count: usize) -> Result<(), PackageLoadError> {
+            state.expanded = state.expanded.checked_add(count).ok_or_else(|| {
                 PackageLoadError::new(
                     PackageErrorKind::ComponentExpandedNodeLimit,
                     "expanded component node count overflowed",
@@ -1332,14 +2369,25 @@ fn validate_prepared_expansion(
                     format!("expanded document exceeds {MAX_COMPONENT_EXPANDED_NODES} nodes"),
                 ));
             }
+            Ok(())
+        }
+
+        for node in nodes {
+            add_expanded(state, 1)?;
             match node {
                 ComponentTemplateNode::Element { children, .. } => {
+                    visit(children, state, depth, path)?;
+                }
+                ComponentTemplateNode::InputConsumer { children, .. } => {
+                    // Materialization always appends one canonical value text node.
+                    add_expanded(state, 1)?;
                     visit(children, state, depth, path)?;
                 }
                 ComponentTemplateNode::Host {
                     reference,
                     target,
                     source_ordinal,
+                    ..
                 } => {
                     let next_depth = depth.checked_add(1).ok_or_else(|| {
                         PackageLoadError::new(
@@ -1427,6 +2475,7 @@ fn instantiate_nodes(
     document: &mut HtmlDocument,
     nodes: &[ComponentTemplateNode],
     current_instance: Option<&ComponentInstanceId>,
+    current_inputs: Option<&ResolvedComponentInputs>,
     invocation_path: &[u32],
     state: &mut InstantiationState<'_>,
 ) -> Result<Vec<usize>, PackageLoadError> {
@@ -1460,15 +2509,73 @@ fn instantiate_nodes(
                     document,
                     children,
                     current_instance,
+                    current_inputs,
                     invocation_path,
                     state,
                 )?;
                 document.mutate().append_children(slot, &child_slots);
                 created.push(slot);
             }
+            ComponentTemplateNode::InputConsumer {
+                name,
+                attributes,
+                children,
+                consumer_kind,
+                input,
+                value_format,
+                source_ordinal,
+            } => {
+                let instance_id = current_instance.ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentInputNamespaceOutsideComponent,
+                        "component input consumer has no component instance",
+                    )
+                })?;
+                let inputs = current_inputs.ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentInputNamespaceOutsideComponent,
+                        "component input consumer has no input map",
+                    )
+                })?;
+                let value = inputs.get(input).ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentInputNamespaceUnknown,
+                        format!("component input `{input}` disappeared during instantiation"),
+                    )
+                })?;
+                let mut attributes = attributes.clone();
+                let (display, runtime_attribute) =
+                    materialize_component_input(*consumer_kind, value, *value_format)?;
+                if let Some((name, value)) = runtime_attribute {
+                    set_template_attribute(&mut attributes, name, &value);
+                }
+                let slot = document.mutate().create_element(name.clone(), attributes);
+                record_descendant(current_instance, *source_ordinal, slot, state);
+                let mut child_slots = instantiate_nodes(
+                    document,
+                    children,
+                    current_instance,
+                    current_inputs,
+                    invocation_path,
+                    state,
+                )?;
+                let text = document.mutate().create_text_node(&display);
+                record_descendant(current_instance, *source_ordinal, text, state);
+                child_slots.push(text);
+                document.mutate().append_children(slot, &child_slots);
+                state.input_consumers.push(ComponentInputConsumerRecord {
+                    instance_id: instance_id.clone(),
+                    node_slot: slot,
+                    template_source_ordinal: *source_ordinal,
+                    kind: *consumer_kind,
+                    input: input.clone(),
+                });
+                created.push(slot);
+            }
             ComponentTemplateNode::Host {
                 reference,
                 target,
+                inputs,
                 source_ordinal,
             } => {
                 let mut path = invocation_path.to_vec();
@@ -1485,6 +2592,7 @@ fn instantiate_nodes(
                         format!("component target `{target}` disappeared during instantiation"),
                     )
                 })?;
+                let instance_inputs = inputs.for_instance();
                 let record_index = state.instances.len();
                 state.instances.push(ComponentInstanceRecord {
                     id: instance_id.clone(),
@@ -1502,11 +2610,13 @@ fn instantiate_nodes(
                             .join(".")
                     ),
                     top_level_slots: Arc::from([]),
+                    inputs: instance_inputs.clone(),
                 });
                 let child_slots = instantiate_nodes(
                     document,
                     &definition.nodes,
                     Some(&instance_id),
+                    Some(&instance_inputs),
                     &path,
                     state,
                 )?;
@@ -1516,6 +2626,76 @@ fn instantiate_nodes(
         }
     }
     Ok(created)
+}
+
+type MaterializedComponentInput = (String, Option<(&'static str, String)>);
+
+fn materialize_component_input(
+    kind: ComponentInputConsumerKind,
+    value: &ComponentInputValue,
+    value_format: StateValueFormat,
+) -> Result<MaterializedComponentInput, PackageLoadError> {
+    match kind {
+        ComponentInputConsumerKind::StateText => Ok((value.canonical_string(), None)),
+        ComponentInputConsumerKind::StateToken => {
+            let token = match value {
+                ComponentInputValue::Token(value) => value.as_str(),
+                ComponentInputValue::Boolean(true) => "true",
+                ComponentInputValue::Boolean(false) => "false",
+                _ => {
+                    return Err(PackageLoadError::new(
+                        PackageErrorKind::ComponentInputConsumerTypeMismatch,
+                        "state-token received a non-token component input",
+                    ));
+                }
+            };
+            Ok((String::new(), Some((STATE_ATTRIBUTE, token.to_owned()))))
+        }
+        ComponentInputConsumerKind::StateValue => {
+            if value_format != StateValueFormat::Raw {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentInputConsumerTypeMismatch,
+                    "component state-value supports only raw numeric formatting",
+                ));
+            }
+            let ComponentInputValue::Number(number) = value else {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentInputConsumerTypeMismatch,
+                    "state-value received a non-number component input",
+                ));
+            };
+            let formatted = NumericValue::finite_decimal(number.get())
+                .format(value_format)
+                .map_err(|error| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentInputConsumerTypeMismatch,
+                        format!("component number formatting failed: {error}"),
+                    )
+                })?;
+            Ok((
+                formatted.display,
+                formatted.value.map(|value| ("value", value)),
+            ))
+        }
+    }
+}
+
+fn set_template_attribute(attributes: &mut Vec<Attribute>, name: &str, value: &str) {
+    if let Some(attribute) = attributes
+        .iter_mut()
+        .find(|attribute| attribute.name.local.as_ref() == name)
+    {
+        attribute.value = value.into();
+        return;
+    }
+    attributes.push(Attribute {
+        name: QualName {
+            prefix: None,
+            ns: ns!(),
+            local: LocalName::from(name),
+        },
+        value: value.into(),
+    });
 }
 
 fn record_descendant(
@@ -1556,6 +2736,31 @@ fn parser_config() -> DocumentConfig {
     }
 }
 
+fn validate_document_depth(
+    document: &HtmlDocument,
+    owner: &PackageId,
+    logical_source: &str,
+) -> Result<(), PackageLoadError> {
+    let mut stack = vec![(0usize, 0usize)];
+    while let Some((slot, depth)) = stack.pop() {
+        if depth > crate::adapter::MAX_DOM_DEPTH {
+            return Err(component_error(
+                PackageErrorKind::DocumentDepthLimit,
+                owner,
+                logical_source,
+                format!(
+                    "document nesting exceeds {} levels",
+                    crate::adapter::MAX_DOM_DEPTH
+                ),
+            ));
+        }
+        if let Some(node) = document.get_node(slot) {
+            stack.extend(node.children.iter().rev().map(|child| (*child, depth + 1)));
+        }
+    }
+    Ok(())
+}
+
 fn element_attr<'a>(element: &'a blitz_dom::ElementData, name: &str) -> Option<&'a str> {
     element
         .attrs()
@@ -1585,10 +2790,32 @@ fn reject_duplicate_control_attributes(
     source: &str,
     logical_source: &str,
 ) -> Result<(), PackageLoadError> {
-    fn attribute_count(fragment: &str, tag: &str, attribute: &str) -> usize {
+    fn tag_end(source: &str, start: usize) -> Option<usize> {
+        let mut quote = None;
+        for (relative, byte) in source.as_bytes()[start..].iter().copied().enumerate() {
+            match (quote, byte) {
+                (Some(active), byte) if byte == active => quote = None,
+                (Some(_), _) => {}
+                (None, b'\'' | b'"') => quote = Some(byte),
+                (None, b'>') => return Some(start + relative),
+                (None, _) => {}
+            }
+        }
+        None
+    }
+
+    if source.contains('\0') {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::InvalidComponentInputLiteral,
+            "component documents must not contain NUL",
+        )
+        .at(logical_source));
+    }
+
+    fn attribute_names(fragment: &str, tag: &str) -> Vec<String> {
         let bytes = fragment.as_bytes();
         let mut index = 1 + tag.len();
-        let mut count = 0usize;
+        let mut names = Vec::new();
         while index < bytes.len() {
             while index < bytes.len()
                 && (bytes[index].is_ascii_whitespace() || bytes[index] == b'/')
@@ -1605,8 +2832,8 @@ fn reject_duplicate_control_attributes(
             {
                 index += 1;
             }
-            if fragment[name_start..index].eq_ignore_ascii_case(attribute) {
-                count = count.saturating_add(1);
+            if name_start < index {
+                names.push(fragment[name_start..index].to_ascii_lowercase());
             }
             while index < bytes.len() && bytes[index].is_ascii_whitespace() {
                 index += 1;
@@ -1637,7 +2864,7 @@ fn reject_duplicate_control_attributes(
                 }
             }
         }
-        count
+        names
     }
 
     let lowercase = source.to_ascii_lowercase();
@@ -1653,21 +2880,24 @@ fn reject_duplicate_control_attributes(
                 offset = start.saturating_add(needle.len());
                 continue;
             }
-            let Some(end_relative) = source[start..].find('>') else {
+            let Some(end) = tag_end(source, start) else {
                 return Err(PackageLoadError::new(
                     PackageErrorKind::ComponentSourceParse,
                     format!("unterminated `<{tag}>` start tag"),
                 )
                 .at(logical_source));
             };
-            let end = start + end_relative;
             let fragment = &source[start..=end];
             let attribute = if tag == TEMPLATE_ELEMENT {
                 COMPONENT_ATTRIBUTE
             } else {
                 "component"
             };
-            let count = attribute_count(fragment, tag, attribute);
+            let attribute_names = attribute_names(fragment, tag);
+            let count = attribute_names
+                .iter()
+                .filter(|name| name.as_str() == attribute)
+                .count();
             if count > 1 {
                 return Err(PackageLoadError::new(
                     if tag == TEMPLATE_ELEMENT {
@@ -1678,6 +2908,32 @@ fn reject_duplicate_control_attributes(
                     format!("`<{tag}>` repeats the `{attribute}` attribute"),
                 )
                 .at(logical_source));
+            }
+            if tag == USE_ELEMENT {
+                let mut input_names = BTreeSet::new();
+                let mut input_count = 0usize;
+                for name in attribute_names
+                    .iter()
+                    .filter(|name| name.starts_with("input-"))
+                {
+                    input_count = input_count.saturating_add(1);
+                    if !input_names.insert(name) {
+                        return Err(PackageLoadError::new(
+                            PackageErrorKind::ComponentInputDuplicate,
+                            format!("`<htm-use>` repeats the `{name}` attribute"),
+                        )
+                        .at(logical_source));
+                    }
+                }
+                if input_count > MAX_COMPONENT_INPUT_ATTRIBUTES {
+                    return Err(PackageLoadError::new(
+                        PackageErrorKind::ComponentInputCountLimit,
+                        format!(
+                            "`<htm-use>` supplies {input_count} inputs; limit is {MAX_COMPONENT_INPUT_ATTRIBUTES}"
+                        ),
+                    )
+                    .at(logical_source));
+                }
             }
             offset = end.saturating_add(1);
         }

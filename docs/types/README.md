@@ -26,9 +26,10 @@ Local package identity, dependencies, and immutable graph snapshots.
 
 ## `HTMShell.Component`
 
-Static component definitions, references, and explicit uses.
+Component definitions, literal typed inputs, references, and explicit uses.
 
 - [`Component`](HTMShell.Component/README.md)
+- [`Component.Input`](HTMShell.Component/Input.md)
 
 ## `HTMShell.Elements`
 

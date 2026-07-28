@@ -1540,7 +1540,7 @@ fn unused_library_definitions_are_inert() {
 }
 
 #[test]
-fn package_graph_example_exercises_static_nested_components() {
+fn package_graph_example_exercises_nested_components_with_literal_inputs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -1558,7 +1558,14 @@ fn package_graph_example_exercises_static_nested_components() {
     )
     .unwrap();
     assert_eq!(run.package_snapshot.components().definitions().len(), 2);
-    assert_eq!(run.component_instances.len(), 2);
+    assert_eq!(run.component_instances.len(), 4);
+    assert_eq!(run.component_input_consumers.len(), 14);
+    assert_eq!(
+        run.component_instances[0].inputs().values()[0]
+            .value()
+            .canonical_string(),
+        "Defaulted package snapshot"
+    );
     assert!(
         run.component_instances.iter().all(
             |instance| instance.id().snapshot_generation() == run.package_snapshot.generation()

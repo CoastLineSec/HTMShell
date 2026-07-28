@@ -536,6 +536,7 @@ pub struct LiveDocument {
     package_snapshot: Option<Arc<crate::PackageSnapshot>>,
     component_instances: Vec<crate::ComponentInstanceRecord>,
     component_descendants: Vec<crate::ComponentDescendantProvenance>,
+    component_input_consumers: Vec<crate::ComponentInputConsumerRecord>,
     source: PathBuf,
     viewport: ViewportSpec,
     document_identity: ExperimentalDocumentIdentity,
@@ -998,7 +999,7 @@ impl LiveDocument {
             ..Default::default()
         };
         let parse_started = Instant::now();
-        let (mut document, component_instances, component_descendants) =
+        let (mut document, component_instances, component_descendants, component_input_consumers) =
             match (&package_snapshot, prepared_document) {
                 (Some(snapshot), Some(prepared)) => {
                     let instantiated = snapshot.instantiate_document(
@@ -1010,10 +1011,12 @@ impl LiveDocument {
                         instantiated.document,
                         instantiated.instances,
                         instantiated.descendants,
+                        instantiated.input_consumers,
                     )
                 }
                 _ => (
                     HtmlDocument::from_html(&html, config),
+                    Vec::new(),
                     Vec::new(),
                     Vec::new(),
                 ),
@@ -1035,12 +1038,17 @@ impl LiveDocument {
         ensure_registry_valid()?;
         let registry_initialization_ms = elapsed_ms(registry_started);
         let discovery_started = Instant::now();
+        let local_input_consumer_slots = component_input_consumers
+            .iter()
+            .map(crate::ComponentInputConsumerRecord::node_slot)
+            .collect();
         let builtins = BuiltInElementIndex::discover(
             &document,
             &identities,
             document_identity,
             kind.builtin_surface_kind(),
             &source.display().to_string(),
+            &local_input_consumer_slots,
         )?;
         let declaration_discovery_ms = elapsed_ms(discovery_started);
         let builtin_summary = builtins.summary();
@@ -1087,6 +1095,7 @@ impl LiveDocument {
             package_snapshot,
             component_instances,
             component_descendants,
+            component_input_consumers,
             source,
             viewport,
             document_identity,
@@ -1591,6 +1600,10 @@ impl LiveDocument {
 
     pub fn component_descendants(&self) -> &[crate::ComponentDescendantProvenance] {
         &self.component_descendants
+    }
+
+    pub fn component_input_consumers(&self) -> &[crate::ComponentInputConsumerRecord] {
+        &self.component_input_consumers
     }
 
     pub fn source(&self) -> &Path {

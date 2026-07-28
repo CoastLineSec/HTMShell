@@ -9,7 +9,19 @@
   "components": [
     {
       "name": "badge-label",
-      "source": "components/badge-label.html"
+      "source": "components/badge-label.html",
+      "inputs": [
+        {
+          "name": "label",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "tone",
+          "type": "token",
+          "default": "ready"
+        }
+      ]
     }
   ]
 }

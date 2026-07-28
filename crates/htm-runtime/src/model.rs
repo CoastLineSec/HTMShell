@@ -218,4 +218,5 @@ pub struct ExperimentRun {
     pub package_snapshot: Arc<crate::PackageSnapshot>,
     pub component_instances: Vec<crate::ComponentInstanceRecord>,
     pub component_descendants: Vec<crate::ComponentDescendantProvenance>,
+    pub component_input_consumers: Vec<crate::ComponentInputConsumerRecord>,
 }

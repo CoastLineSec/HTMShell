@@ -9,9 +9,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::component::{
-    ComponentCatalog, ComponentExport, ComponentName, ComponentValidationTotals,
-    MAX_COMPONENT_EXPORTS_PER_PACKAGE, MAX_COMPONENT_SOURCE_BYTES, PreparedDocument,
-    build_component_catalog, parse_component_source, prepare_root_document,
+    ComponentCatalog, ComponentExport, ComponentInputDeclaration, ComponentInputName,
+    ComponentInputType, ComponentName, ComponentValidationTotals,
+    MAX_COMPONENT_EXPORTS_PER_PACKAGE, MAX_COMPONENT_INPUTS, MAX_COMPONENT_SOURCE_BYTES,
+    PreparedDocument, build_component_catalog, parse_component_input_default,
+    parse_component_source, prepare_root_document,
 };
 
 pub const PACKAGE_MANIFEST_FILE: &str = "shell.json";
@@ -103,6 +105,29 @@ pub enum PackageErrorKind {
     ComponentResourceNotSupported,
     ComponentStateActionNotSupported,
     ComponentRepeatNotSupported,
+    InvalidComponentInputDeclaration,
+    DuplicateComponentInputDeclaration,
+    InvalidComponentInputName,
+    ReservedComponentInputName,
+    UnsupportedComponentInputType,
+    ComponentInputRequiredWithDefault,
+    ComponentInputOptionalWithoutDefault,
+    InvalidComponentInputDefault,
+    ComponentInputMissingRequired,
+    ComponentInputUnknown,
+    ComponentInputDuplicate,
+    InvalidComponentInputLiteral,
+    ComponentInputStringLimit,
+    ComponentInputLiteralByteLimit,
+    ComponentInputCountLimit,
+    ComponentInputNamespaceUnknown,
+    ComponentInputConsumerTypeMismatch,
+    ComponentInputNamespaceOutsideComponent,
+    ComponentInputBindingNotSupported,
+    ComponentStateReferenceInputNotSupported,
+    ComponentActionReferenceInputNotSupported,
+    ComponentResourceReferenceInputNotSupported,
+    DocumentDepthLimit,
     PermissionDenied,
     SpecialFile,
     Io,
@@ -863,6 +888,15 @@ struct DependencyDiagnostic<'a> {
 struct ComponentExportDiagnostic<'a> {
     name: &'a str,
     source: &'a str,
+    inputs: Vec<ComponentInputDeclarationDiagnostic>,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentInputDeclarationDiagnostic {
+    name: String,
+    input_type: &'static str,
+    required: bool,
+    default: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -870,6 +904,7 @@ struct ComponentDefinitionDiagnostic {
     identity: String,
     source: String,
     source_nodes: usize,
+    inputs: Vec<ComponentInputDeclarationDiagnostic>,
     resolved_references: Vec<ComponentReferenceDiagnostic>,
 }
 
@@ -887,6 +922,31 @@ struct PreparedDocumentDiagnostic<'a> {
     expanded_nodes: usize,
     maximum_nesting_depth: usize,
     instance_paths: &'a [String],
+    inputs: Vec<ComponentInstanceInputDiagnostic>,
+    consumers: Vec<ComponentInputConsumerDiagnostic>,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentInstanceInputDiagnostic {
+    instance_path: String,
+    semantic_version: String,
+    values: Vec<ComponentInputValueDiagnostic>,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentInputValueDiagnostic {
+    name: String,
+    input_type: &'static str,
+    value: String,
+    provenance: crate::ComponentInputProvenance,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentInputConsumerDiagnostic {
+    instance_path: String,
+    input: String,
+    kind: &'static str,
+    source_ordinal: u32,
 }
 
 impl<'a> PackageGraphDiagnostic<'a> {
@@ -896,6 +956,7 @@ impl<'a> PackageGraphDiagnostic<'a> {
             prepared_root_documents.extend(manifest.surfaces.iter().filter_map(|surface| {
                 surface.prepared_document().map(|prepared| {
                     let stats = prepared.stats();
+                    let (inputs, consumers) = prepared_input_diagnostics(snapshot, prepared);
                     PreparedDocumentDiagnostic {
                         logical_path: prepared.logical_path(),
                         component_instances: stats.component_instances,
@@ -903,6 +964,8 @@ impl<'a> PackageGraphDiagnostic<'a> {
                         expanded_nodes: stats.expanded_nodes,
                         maximum_nesting_depth: stats.maximum_nesting_depth,
                         instance_paths: prepared.logical_instance_paths(),
+                        inputs,
+                        consumers,
                     }
                 })
             }));
@@ -916,6 +979,7 @@ impl<'a> PackageGraphDiagnostic<'a> {
                 .iter()
                 .any(|entry| entry.logical_path == prepared.logical_path())
             {
+                let (inputs, consumers) = prepared_input_diagnostics(snapshot, prepared);
                 prepared_root_documents.push(PreparedDocumentDiagnostic {
                     logical_path: prepared.logical_path(),
                     component_instances: stats.component_instances,
@@ -923,6 +987,8 @@ impl<'a> PackageGraphDiagnostic<'a> {
                     expanded_nodes: stats.expanded_nodes,
                     maximum_nesting_depth: stats.maximum_nesting_depth,
                     instance_paths: prepared.logical_instance_paths(),
+                    inputs,
+                    consumers,
                 });
             }
         }
@@ -954,6 +1020,7 @@ impl<'a> PackageGraphDiagnostic<'a> {
                         .map(|export| ComponentExportDiagnostic {
                             name: export.name().as_str(),
                             source: export.source(),
+                            inputs: input_declaration_diagnostics(export.inputs()),
                         })
                         .collect(),
                 })
@@ -970,6 +1037,7 @@ impl<'a> PackageGraphDiagnostic<'a> {
                         identity: identity.deterministic_string(),
                         source: definition.logical_source().to_owned(),
                         source_nodes: definition.source_node_count(),
+                        inputs: input_declaration_diagnostics(definition.inputs()),
                         resolved_references: definition
                             .resolved_references()
                             .iter()
@@ -984,6 +1052,83 @@ impl<'a> PackageGraphDiagnostic<'a> {
             prepared_root_documents,
         }
     }
+}
+
+fn input_declaration_diagnostics(
+    declarations: &[ComponentInputDeclaration],
+) -> Vec<ComponentInputDeclarationDiagnostic> {
+    declarations
+        .iter()
+        .map(|declaration| ComponentInputDeclarationDiagnostic {
+            name: declaration.name().to_string(),
+            input_type: declaration.input_type().as_str(),
+            required: declaration.required(),
+            default: declaration
+                .default()
+                .map(crate::ComponentInputValue::canonical_string),
+        })
+        .collect()
+}
+
+fn prepared_input_diagnostics(
+    snapshot: &PackageSnapshot,
+    prepared: &PreparedDocument,
+) -> (
+    Vec<ComponentInstanceInputDiagnostic>,
+    Vec<ComponentInputConsumerDiagnostic>,
+) {
+    let Ok(instantiated) = snapshot.instantiate_document(
+        prepared,
+        0,
+        blitz_dom::DocumentConfig {
+            base_url: Some("htm-local://diagnostic/root.html".to_owned()),
+            ..Default::default()
+        },
+    ) else {
+        return (Vec::new(), Vec::new());
+    };
+    let instance_paths: BTreeMap<_, _> = instantiated
+        .instances
+        .iter()
+        .map(|instance| (instance.id().clone(), instance.logical_path().to_owned()))
+        .collect();
+    let inputs = instantiated
+        .instances
+        .iter()
+        .map(|instance| ComponentInstanceInputDiagnostic {
+            instance_path: instance.logical_path().to_owned(),
+            semantic_version: instance
+                .inputs()
+                .version()
+                .deterministic_string()
+                .to_owned(),
+            values: instance
+                .inputs()
+                .values()
+                .iter()
+                .map(|input| ComponentInputValueDiagnostic {
+                    name: input.declaration().name().to_string(),
+                    input_type: input.declaration().input_type().as_str(),
+                    value: input.value().canonical_string(),
+                    provenance: input.provenance(),
+                })
+                .collect(),
+        })
+        .collect();
+    let consumers = instantiated
+        .input_consumers
+        .iter()
+        .map(|consumer| ComponentInputConsumerDiagnostic {
+            instance_path: instance_paths
+                .get(consumer.instance_id())
+                .cloned()
+                .unwrap_or_else(|| "unknown-component-instance".to_owned()),
+            input: consumer.input().to_string(),
+            kind: consumer.kind().as_str(),
+            source_ordinal: consumer.template_source_ordinal(),
+        })
+        .collect();
+    (inputs, consumers)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1121,6 +1266,18 @@ struct RawDependency {
 struct RawComponentExport {
     name: String,
     source: String,
+    #[serde(default)]
+    inputs: Vec<RawComponentInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawComponentInput {
+    name: String,
+    #[serde(rename = "type")]
+    input_type: String,
+    required: Option<bool>,
+    default: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1647,7 +1804,10 @@ impl<'a> GraphBuilder<'a> {
         };
         for package in &packages {
             let mut source_order = Vec::new();
-            let mut expected_by_source: BTreeMap<String, BTreeSet<ComponentName>> = BTreeMap::new();
+            let mut expected_by_source: BTreeMap<
+                String,
+                BTreeMap<ComponentName, Arc<[ComponentInputDeclaration]>>,
+            > = BTreeMap::new();
             for export in package.components() {
                 if !expected_by_source.contains_key(export.source()) {
                     source_order.push(export.source().to_owned());
@@ -1655,7 +1815,7 @@ impl<'a> GraphBuilder<'a> {
                 expected_by_source
                     .entry(export.source().to_owned())
                     .or_default()
-                    .insert(export.name().clone());
+                    .insert(export.name().clone(), export.inputs().to_vec().into());
             }
             let mut parsed_by_source = BTreeMap::new();
             for source in source_order {
@@ -2090,6 +2250,7 @@ fn validate_component_exports(
             .map_err(|error| error.in_package(owner.to_string()))?;
         let source = validate_component_source_path(&raw_export.source)
             .map_err(|error| error.in_package(owner.to_string()))?;
+        let inputs = validate_component_inputs(raw_export.inputs, owner, &name)?;
         if !names.insert(name.clone()) {
             return Err(PackageLoadError::new(
                 PackageErrorKind::DuplicateComponentExport,
@@ -2097,9 +2258,76 @@ fn validate_component_exports(
             )
             .in_package(owner.to_string()));
         }
-        exports.push(ComponentExport::new(name, source));
+        exports.push(ComponentExport::new(name, source, inputs));
     }
     Ok(exports)
+}
+
+fn validate_component_inputs(
+    raw: Vec<RawComponentInput>,
+    owner: &PackageId,
+    component: &ComponentName,
+) -> Result<Vec<ComponentInputDeclaration>, PackageLoadError> {
+    if raw.len() > MAX_COMPONENT_INPUTS {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::ComponentInputCountLimit,
+            format!(
+                "component `{component}` declares {} inputs; limit is {MAX_COMPONENT_INPUTS}",
+                raw.len()
+            ),
+        )
+        .in_package(owner.to_string()));
+    }
+    let mut names = BTreeSet::new();
+    let mut declarations = Vec::with_capacity(raw.len());
+    for input in raw {
+        let name = ComponentInputName::parse(&input.name).map_err(|error| {
+            error
+                .in_package(owner.to_string())
+                .at(format!("component {component} input {}", input.name))
+        })?;
+        if !names.insert(name.clone()) {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::DuplicateComponentInputDeclaration,
+                format!("component `{component}` repeats input `{name}`"),
+            )
+            .in_package(owner.to_string()));
+        }
+        let input_type = ComponentInputType::parse(&input.input_type).map_err(|error| {
+            error
+                .in_package(owner.to_string())
+                .at(format!("component {component} input {name}"))
+        })?;
+        let required = input.required.unwrap_or(false);
+        if required && input.default.is_some() {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::ComponentInputRequiredWithDefault,
+                format!("required component input `{name}` cannot declare a default"),
+            )
+            .in_package(owner.to_string()));
+        }
+        if !required && input.default.is_none() {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::ComponentInputOptionalWithoutDefault,
+                format!("optional component input `{name}` requires a default"),
+            )
+            .in_package(owner.to_string()));
+        }
+        let default = input
+            .default
+            .as_ref()
+            .map(|value| parse_component_input_default(input_type, value))
+            .transpose()
+            .map_err(|error| {
+                error
+                    .in_package(owner.to_string())
+                    .at(format!("component {component} input {name}"))
+            })?;
+        declarations.push(ComponentInputDeclaration::new(
+            name, input_type, required, default,
+        ));
+    }
+    Ok(declarations)
 }
 
 fn validate_component_source_path(value: &str) -> Result<String, PackageLoadError> {
@@ -3018,7 +3246,7 @@ mod tests {
         fixture.write_root(
             &v2_shell("org.example.shell", None, "[]").replacen(
                 "\"dependencies\"",
-                "\"components\":[{\"name\":\"status-card\",\"source\":\"components/status-card.html\",\"inputs\":[]}],\"dependencies\"",
+                "\"components\":[{\"name\":\"status-card\",\"source\":\"components/status-card.html\",\"slots\":[]}],\"dependencies\"",
                 1,
             ),
         );
