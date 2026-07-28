@@ -147,7 +147,9 @@ impl ForegroundEffectCoverage {
                 || list.functions.iter().all(|effect| {
                     matches!(
                         effect,
-                        ForegroundEffect::Color(_) | ForegroundEffect::Blur(_)
+                        ForegroundEffect::Color(_)
+                            | ForegroundEffect::Blur(_)
+                            | ForegroundEffect::DropShadow(_)
                     )
                 }) {
                 ForegroundEffectBackendCoverage::Native
@@ -1179,7 +1181,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_marks_color_and_blur_gpu_native_and_drop_shadow_fallback() {
+    fn coverage_marks_all_bounded_foreground_functions_native() {
         let identity = list(vec![scalar(ColorEffectKind::Brightness, 1.0)]);
         let color = list(vec![scalar(ColorEffectKind::Invert, 1.0)]);
         let blur = list(vec![
@@ -1228,7 +1230,7 @@ mod tests {
             ForegroundEffectCoverage {
                 model_ready: true,
                 cpu: ForegroundEffectBackendCoverage::Native,
-                gpu: ForegroundEffectBackendCoverage::CpuFrameFallbackRequired,
+                gpu: ForegroundEffectBackendCoverage::Native,
             }
         );
     }

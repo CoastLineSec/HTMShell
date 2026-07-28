@@ -40,6 +40,6 @@ The optional experimental Vello path executes blur natively with finite separabl
 
 Damage-limited Vello rendering expands replay tiles by the cumulative physical blur reach plus two antialias pixels, then copies only the authoritative tile core into persistent backing. Excessive guarded area, unsafe spatial transforms, initialization, resize, scale changes, and recovery use a complete GPU render. The complete backing is still converted to every acquired surface image.
 
-Any list containing `drop-shadow()` remains indivisible and uses complete CPU-frame fallback. `backdrop-filter`, filter animation, and transitions are unsupported.
+Drop shadow also executes natively and reuses the same GPU blur parameters for its alpha mask. Ordered blur and shadow stages remain separate. GPU failure falls back to complete CPU rendering of the list. `backdrop-filter`, filter animation, and transitions are unsupported.
 
 Blur can reduce readability and obscure visual focus indicators. Keep essential labels and focus feedback clear.

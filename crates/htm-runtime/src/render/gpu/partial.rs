@@ -268,7 +268,24 @@ fn spatial_replay_guard(plan: &FramePlan) -> SpatialReplayGuard {
                             local = local.saturating_add(reach as u32);
                         }
                     }
-                    ForegroundEffect::DropShadow(_) => partial_safe = false,
+                    ForegroundEffect::DropShadow(shadow) if shadow.color.alpha.get() > 0.0 => {
+                        let blur_reach = (3.0 * f64::from(shadow.sigma.get()) * scale).ceil();
+                        let offset_reach = (f64::from(shadow.offset_x.get()).abs() * scale)
+                            .max(f64::from(shadow.offset_y.get()).abs() * scale)
+                            .ceil();
+                        if !blur_reach.is_finite()
+                            || !offset_reach.is_finite()
+                            || blur_reach > f64::from(u32::MAX)
+                            || offset_reach > f64::from(u32::MAX)
+                        {
+                            partial_safe = false;
+                        } else {
+                            local = local
+                                .saturating_add(blur_reach as u32)
+                                .saturating_add(offset_reach as u32);
+                        }
+                    }
+                    ForegroundEffect::DropShadow(_) => {}
                     ForegroundEffect::Color(_) | ForegroundEffect::Blur(_) => {}
                 }
             }
@@ -740,6 +757,79 @@ mod tests {
         }
         assert!(matches!(
             select_damage_work(&blurred, true, false),
+            DamageRenderDecision::FullGpu {
+                reason: FullRenderReason::SpatialGuard,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn drop_shadow_replay_guard_covers_blur_offset_and_transparent_identity() {
+        let (mut shadowed, _) = super::super::tests::color_filter_document_proof(
+            "drop-shadow(8px -4px 2px black)",
+            None,
+            91_002,
+            150,
+        );
+        shadowed.logical_width = 256;
+        shadowed.logical_height = 192;
+        shadowed.physical_width = 320;
+        shadowed.physical_height = 240;
+        shadowed.prior_scene_revision = Some(SceneRevision(1));
+        shadowed.damage = DamageRegion::Rects(vec![rect(120.0, 120.0, 4.0, 4.0)]);
+        shadowed.full_repaint = false;
+        let DamageRenderDecision::Partial { tiles, .. } =
+            select_damage_work(&shadowed, true, false)
+        else {
+            panic!("bounded drop shadow should remain partial");
+        };
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].source_x, 20);
+        assert_eq!(tiles[0].source_y, 20);
+        assert_eq!(tiles[0].scratch_width, DAMAGE_TILE_SIZE + 40);
+        assert_eq!(tiles[0].scratch_height, DAMAGE_TILE_SIZE + 40);
+
+        let (mut transparent, _) = super::super::tests::color_filter_document_proof(
+            "drop-shadow(8px -4px 2px transparent)",
+            None,
+            91_003,
+            150,
+        );
+        transparent.logical_width = 256;
+        transparent.logical_height = 192;
+        transparent.physical_width = 320;
+        transparent.physical_height = 240;
+        transparent.prior_scene_revision = Some(SceneRevision(1));
+        transparent.damage = DamageRegion::Rects(vec![rect(120.0, 120.0, 4.0, 4.0)]);
+        transparent.full_repaint = false;
+        let DamageRenderDecision::Partial { tiles, .. } =
+            select_damage_work(&transparent, true, false)
+        else {
+            panic!("transparent drop shadow should remain a pointwise replay");
+        };
+        assert_eq!(tiles[0].source_x, DAMAGE_TILE_GUARD);
+        assert_eq!(
+            tiles[0].scratch_width,
+            DAMAGE_TILE_SIZE + 2 * DAMAGE_TILE_GUARD
+        );
+
+        let scene = Arc::make_mut(&mut shadowed.scene);
+        scene
+            .nodes
+            .iter_mut()
+            .find(|node| {
+                node.effects
+                    .iter()
+                    .any(|effect| matches!(effect, SceneEffect::ForegroundFilter { .. }))
+            })
+            .expect("filtered node")
+            .effects
+            .push(SceneEffect::Transform {
+                coefficients: [1.5, 0.0, 0.0, 1.5, 0.0, 0.0],
+            });
+        assert!(matches!(
+            select_damage_work(&shadowed, true, false),
             DamageRenderDecision::FullGpu {
                 reason: FullRenderReason::SpatialGuard,
                 ..

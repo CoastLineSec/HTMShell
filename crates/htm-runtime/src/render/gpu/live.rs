@@ -8,8 +8,7 @@ use super::{
 };
 use crate::LiveGpuPreparedFrame;
 use crate::render::{
-    DamageRegion, ForegroundEffect, PhysicalDamageRect, PixelFormat, RenderSurfaceId, SceneEffect,
-    SceneRevision,
+    DamageRegion, PhysicalDamageRect, PixelFormat, RenderSurfaceId, SceneRevision,
 };
 use kurbo::Affine;
 use std::collections::BTreeMap;
@@ -354,6 +353,25 @@ pub struct LiveGpuStatistics {
     pub gpu_blur_allocation_failures: u64,
     pub gpu_blur_pipeline_failures: u64,
     pub gpu_blur_device_resets: u64,
+    pub gpu_shadow_layer_creations: u64,
+    pub gpu_shadow_layer_reuses: u64,
+    pub gpu_shadow_mask_extractions: u64,
+    pub gpu_shadow_mask_allocations: u64,
+    pub gpu_shadow_mask_blur_passes: u64,
+    pub gpu_shadow_fractional_offset_samples: u64,
+    pub gpu_shadow_colorization_passes: u64,
+    pub gpu_shadow_composition_passes: u64,
+    pub gpu_shadow_identity_suppressions: u64,
+    pub gpu_shadow_partial_frames: u64,
+    pub gpu_shadow_full_frames: u64,
+    pub gpu_shadow_cpu_fallbacks: u64,
+    pub gpu_shadow_parameter_uploads: u64,
+    pub gpu_shadow_cache_hits: u64,
+    pub gpu_shadow_allocation_failures: u64,
+    pub gpu_shadow_pipeline_failures: u64,
+    pub gpu_shadow_device_resets: u64,
+    pub gpu_shadow_guarded_replay_pixels: u64,
+    pub gpu_shadow_output_pixels: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -873,25 +891,6 @@ impl LiveGpuPresenter {
                 .statistics
                 .gpu_color_filter_fallback_requests
                 .saturating_add(1);
-            if plan.scene.nodes.iter().any(|node| {
-                node.effects.iter().any(|effect| {
-                    matches!(
-                        effect,
-                        SceneEffect::ForegroundFilter { list, .. }
-                            if list.functions.iter().any(
-                                |function| matches!(function, ForegroundEffect::DropShadow(_))
-                            )
-                    )
-                })
-            }) {
-                self.backend.statistics.gpu_spatial_cpu_fallbacks = self
-                    .backend
-                    .statistics
-                    .gpu_spatial_cpu_fallbacks
-                    .saturating_add(1);
-                self.statistics.gpu_spatial_cpu_fallbacks =
-                    self.statistics.gpu_spatial_cpu_fallbacks.saturating_add(1);
-            }
             let eligibility = LiveGpuFrameMode::CpuFallback;
             debug_assert_eq!(eligibility, LiveGpuFrameMode::CpuFallback);
             return Err(LiveGpuError::new(
@@ -1171,6 +1170,10 @@ impl LiveGpuPresenter {
                     self.statistics.gpu_blur_partial_frames =
                         self.statistics.gpu_blur_partial_frames.saturating_add(1);
                 }
+                if update.shadow_passes > 0 {
+                    self.statistics.gpu_shadow_partial_frames =
+                        self.statistics.gpu_shadow_partial_frames.saturating_add(1);
+                }
             }
             LiveGpuFrameMode::FullGpu => {
                 self.statistics.full_target_renders =
@@ -1188,6 +1191,10 @@ impl LiveGpuPresenter {
                 if update.blur_passes > 0 {
                     self.statistics.gpu_blur_full_frames =
                         self.statistics.gpu_blur_full_frames.saturating_add(1);
+                }
+                if update.shadow_passes > 0 {
+                    self.statistics.gpu_shadow_full_frames =
+                        self.statistics.gpu_shadow_full_frames.saturating_add(1);
                 }
                 if matches!(
                     decision,
@@ -1254,6 +1261,34 @@ impl LiveGpuPresenter {
             backend_statistics.gpu_blur_allocation_failures;
         self.statistics.gpu_blur_pipeline_failures = backend_statistics.gpu_blur_pipeline_failures;
         self.statistics.gpu_blur_device_resets = backend_statistics.gpu_blur_device_resets;
+        self.statistics.gpu_shadow_layer_creations = backend_statistics.gpu_shadow_layer_creations;
+        self.statistics.gpu_shadow_layer_reuses = backend_statistics.gpu_shadow_layer_reuses;
+        self.statistics.gpu_shadow_mask_extractions =
+            backend_statistics.gpu_shadow_mask_extractions;
+        self.statistics.gpu_shadow_mask_allocations =
+            backend_statistics.gpu_shadow_mask_allocations;
+        self.statistics.gpu_shadow_mask_blur_passes =
+            backend_statistics.gpu_shadow_mask_blur_passes;
+        self.statistics.gpu_shadow_fractional_offset_samples =
+            backend_statistics.gpu_shadow_fractional_offset_samples;
+        self.statistics.gpu_shadow_colorization_passes =
+            backend_statistics.gpu_shadow_colorization_passes;
+        self.statistics.gpu_shadow_composition_passes =
+            backend_statistics.gpu_shadow_composition_passes;
+        self.statistics.gpu_shadow_identity_suppressions =
+            backend_statistics.gpu_shadow_identity_suppressions;
+        self.statistics.gpu_shadow_cpu_fallbacks = backend_statistics.gpu_shadow_cpu_fallbacks;
+        self.statistics.gpu_shadow_parameter_uploads =
+            backend_statistics.gpu_shadow_parameter_uploads;
+        self.statistics.gpu_shadow_cache_hits = backend_statistics.gpu_shadow_cache_hits;
+        self.statistics.gpu_shadow_allocation_failures =
+            backend_statistics.gpu_shadow_allocation_failures;
+        self.statistics.gpu_shadow_pipeline_failures =
+            backend_statistics.gpu_shadow_pipeline_failures;
+        self.statistics.gpu_shadow_device_resets = backend_statistics.gpu_shadow_device_resets;
+        self.statistics.gpu_shadow_guarded_replay_pixels =
+            backend_statistics.gpu_shadow_guarded_replay_pixels;
+        self.statistics.gpu_shadow_output_pixels = backend_statistics.gpu_shadow_output_pixels;
         Ok(PendingLiveGpuFrame {
             surface: plan.surface,
             scene_revision: plan.scene_revision,
@@ -1351,6 +1386,7 @@ impl LiveGpuPresenter {
             DeviceGeneration(self.backend.device_generation.0.saturating_add(1));
         self.backend.color_effect_pipeline = None;
         self.backend.blur_effect_pipelines = None;
+        self.backend.shadow_effect_pipelines = None;
         self.backend.statistics.gpu_color_filter_device_resets = self
             .backend
             .statistics
@@ -1367,6 +1403,13 @@ impl LiveGpuPresenter {
             .saturating_add(1);
         self.statistics.gpu_blur_device_resets =
             self.statistics.gpu_blur_device_resets.saturating_add(1);
+        self.backend.statistics.gpu_shadow_device_resets = self
+            .backend
+            .statistics
+            .gpu_shadow_device_resets
+            .saturating_add(1);
+        self.statistics.gpu_shadow_device_resets =
+            self.statistics.gpu_shadow_device_resets.saturating_add(1);
         self.statistics.device_losses = self.statistics.device_losses.saturating_add(1);
     }
 
@@ -1444,6 +1487,7 @@ struct BackingUpdate {
     scratch_reused: usize,
     color_filter_passes: u64,
     blur_passes: u64,
+    shadow_passes: u64,
 }
 
 fn update_persistent_backing(
@@ -1476,6 +1520,7 @@ fn update_persistent_backing(
             let before = backend.statistics.gpu_color_filter_passes;
             let gaussian_before = backend.statistics.gpu_blur_gaussian_passes;
             let box_before = backend.statistics.gpu_blur_box_passes;
+            let shadow_before = backend.statistics.gpu_shadow_composition_passes;
             render_prepared_target(
                 backend,
                 prepared,
@@ -1521,6 +1566,14 @@ fn update_persistent_backing(
                 backend.statistics.gpu_blur_full_frames =
                     backend.statistics.gpu_blur_full_frames.saturating_add(1);
             }
+            let shadow_passes = backend
+                .statistics
+                .gpu_shadow_composition_passes
+                .saturating_sub(shadow_before);
+            if shadow_passes > 0 {
+                backend.statistics.gpu_shadow_full_frames =
+                    backend.statistics.gpu_shadow_full_frames.saturating_add(1);
+            }
             std::mem::swap(&mut backing.current, &mut backing.transaction);
             Ok(BackingUpdate {
                 selected_tiles: 0,
@@ -1532,6 +1585,7 @@ fn update_persistent_backing(
                 scratch_reused: 0,
                 color_filter_passes,
                 blur_passes,
+                shadow_passes,
             })
         }
         DamageRenderDecision::Partial {
@@ -1583,6 +1637,7 @@ fn update_persistent_backing(
             let before = backend.statistics.gpu_color_filter_passes;
             let gaussian_before = backend.statistics.gpu_blur_gaussian_passes;
             let box_before = backend.statistics.gpu_blur_box_passes;
+            let shadow_before = backend.statistics.gpu_shadow_composition_passes;
             for (index, tile) in tiles.iter().enumerate() {
                 render_prepared_target(
                     backend,
@@ -1672,6 +1727,20 @@ fn update_persistent_backing(
                     .gpu_blur_guarded_replay_pixels
                     .saturating_add(*guarded_pixels);
             }
+            let shadow_passes = backend
+                .statistics
+                .gpu_shadow_composition_passes
+                .saturating_sub(shadow_before);
+            if shadow_passes > 0 {
+                backend.statistics.gpu_shadow_partial_frames = backend
+                    .statistics
+                    .gpu_shadow_partial_frames
+                    .saturating_add(1);
+                backend.statistics.gpu_shadow_guarded_replay_pixels = backend
+                    .statistics
+                    .gpu_shadow_guarded_replay_pixels
+                    .saturating_add(*guarded_pixels);
+            }
             Ok(BackingUpdate {
                 selected_tiles: tiles.len(),
                 rasterized_pixels: *guarded_pixels,
@@ -1682,6 +1751,7 @@ fn update_persistent_backing(
                 scratch_reused,
                 color_filter_passes,
                 blur_passes,
+                shadow_passes,
             })
         }
     }
@@ -1708,6 +1778,7 @@ fn render_prepared_target(
         &mut backend.renderer,
         &mut backend.color_effect_pipeline,
         &mut backend.blur_effect_pipelines,
+        &mut backend.shadow_effect_pipelines,
         prepared,
         transform,
         scale,
@@ -2729,6 +2800,136 @@ mod tests {
         )
         .unwrap();
         assert!(update.blur_passes > 0);
+        assert!(update.guard_pixels > 0);
+        assert!(update.backing_pixels < u64::from(width) * u64::from(height));
+
+        let actual = read_texture(
+            &backend.device,
+            &backend.queue,
+            &partial.current.texture,
+            width,
+            height,
+        );
+        let mut fresh = persistent_backing_for_size(&backend, &layout, width, height);
+        let full = DamageRenderDecision::FullGpu {
+            damage: vec![crate::render::PhysicalDamageRect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            }],
+            reason: super::super::partial::FullRenderReason::Initial,
+        };
+        update_persistent_backing(
+            &mut backend,
+            &mut fresh,
+            &updated_prepared,
+            &updated_plan,
+            &full,
+        )
+        .unwrap();
+        let expected = read_texture(
+            &backend.device,
+            &backend.queue,
+            &fresh.current.texture,
+            width,
+            height,
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn native_drop_shadow_guarded_partial_backing_matches_fresh_full_render() {
+        let mut backend =
+            VelloOffscreenRenderer::new(false).expect("compatible offscreen GPU adapter");
+        let layout = proof_layout(&backend.device);
+        let width = 256;
+        let height = 192;
+        let (mut initial_plan, initial_cpu) = super::super::tests::color_filter_document_proof(
+            "drop-shadow(4px 2px 1px black)",
+            None,
+            40_201,
+            120,
+        );
+        initial_plan.logical_width = width;
+        initial_plan.logical_height = height;
+        initial_plan.physical_width = width;
+        initial_plan.physical_height = height;
+        let initial_scene = Arc::make_mut(&mut initial_plan.scene);
+        initial_scene.viewport.logical_width = width;
+        initial_scene.viewport.logical_height = height;
+        let initial_prepared = GpuPreparedScene::from_cpu(
+            initial_plan.document,
+            initial_cpu,
+            initial_plan.scene.live_resources(),
+            collect_effect_plans(&initial_plan.scene),
+        );
+        let mut partial = persistent_backing_for_size(&backend, &layout, width, height);
+        let initial_decision = select_damage_work(&initial_plan, false, true);
+        update_persistent_backing(
+            &mut backend,
+            &mut partial,
+            &initial_prepared,
+            &initial_plan,
+            &initial_decision,
+        )
+        .unwrap();
+        partial.initialized = true;
+        partial.revision = Some(SceneRevision(1));
+        partial.force_full_repaint = false;
+
+        let (mut updated_plan, mut updated_cpu) = super::super::tests::color_filter_document_proof(
+            "drop-shadow(6.5px -2.5px 2px rgb(255 0 0 / 50%))",
+            None,
+            40_201,
+            120,
+        );
+        updated_plan.scene_revision = SceneRevision(2);
+        updated_plan.prior_scene_revision = Some(SceneRevision(1));
+        updated_plan.logical_width = width;
+        updated_plan.logical_height = height;
+        updated_plan.physical_width = width;
+        updated_plan.physical_height = height;
+        updated_plan.damage = DamageRegion::Rects(vec![crate::model::LogicalRect {
+            x: 0.0,
+            y: 0.0,
+            width: 48.0,
+            height: 44.0,
+        }]);
+        updated_plan.full_repaint = false;
+        updated_plan.delta.from_revision = Some(SceneRevision(1));
+        updated_plan.delta.to_revision = SceneRevision(2);
+        updated_plan.delta.full_scene_replacement = false;
+        let scene = Arc::make_mut(&mut updated_plan.scene);
+        scene.revision = SceneRevision(2);
+        scene.viewport.logical_width = width;
+        scene.viewport.logical_height = height;
+        updated_cpu.revision = SceneRevision(2);
+        let updated_prepared = GpuPreparedScene::from_cpu(
+            updated_plan.document,
+            updated_cpu,
+            updated_plan.scene.live_resources(),
+            collect_effect_plans(&updated_plan.scene),
+        );
+        let decision = select_damage_work(&updated_plan, true, false);
+        let DamageRenderDecision::Partial { tiles, .. } = &decision else {
+            panic!("bounded drop-shadow update should use guarded partial replay");
+        };
+        assert!(
+            tiles
+                .iter()
+                .all(|tile| tile.scratch_width > 68 && tile.scratch_height > 68)
+        );
+        let update = update_persistent_backing(
+            &mut backend,
+            &mut partial,
+            &updated_prepared,
+            &updated_plan,
+            &decision,
+        )
+        .unwrap();
+        assert!(update.shadow_passes > 0);
         assert!(update.guard_pixels > 0);
         assert!(update.backing_pixels < u64::from(width) * u64::from(height));
 

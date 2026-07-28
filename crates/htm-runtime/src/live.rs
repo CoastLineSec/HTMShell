@@ -6729,7 +6729,7 @@ mod tests {
 
     #[cfg(feature = "gpu-renderer")]
     #[test]
-    fn live_gpu_drop_shadow_fallback_matches_the_complete_cpu_reference_frame() {
+    fn forced_live_gpu_drop_shadow_cpu_recovery_matches_the_complete_reference_frame() {
         fn set_shadow(live: &mut LiveDocument) {
             let card = live
                 .document
@@ -6758,7 +6758,7 @@ mod tests {
         let prepared = live
             .prepare_gpu_pending_for(request, 71, 17)
             .unwrap()
-            .expect("drop-shadow fallback plan");
+            .expect("drop-shadow recovery plan");
         let actual = live.render_gpu_frame_on_cpu(prepared).unwrap();
         assert_eq!(actual.premultiplied_rgba, expected.premultiplied_rgba);
         assert_eq!(actual.generation, 1);

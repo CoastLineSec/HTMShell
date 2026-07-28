@@ -246,13 +246,15 @@ fn foreground_filter_docs_and_example_cover_cpu_and_native_vello_boundaries() {
         "transparent black",
         "premultiplied",
         "64 logical pixels",
-        "eight nonspatial color functions",
+        "all ten functions with bounded native GPU effect layers",
         "experimental native Vello execution",
         "complete CPU-frame fallback",
         "executes blur natively",
         "cumulative physical blur reach",
         "Backing-to-surface conversion remains full target",
-        "does not execute drop shadow natively",
+        "native Vello drop shadow",
+        "current-stage alpha",
+        "Fractional physical offsets",
         "Vello remains optional and experimental",
     ] {
         assert!(
@@ -261,7 +263,6 @@ fn foreground_filter_docs_and_example_cover_cpu_and_native_vello_boundaries() {
         );
     }
     for forbidden in [
-        "native Vello drop shadow",
         "native GPU backdrop",
         "renderer selector",
         "HTMSHELL_RENDERER",

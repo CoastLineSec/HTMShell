@@ -31,31 +31,37 @@ rasterization, GPU readback, nor shared-memory presentation.
 
 Vello renders solid and rounded geometry, text, SVG, opacity, clips, affine
 transforms, background layers, and box shadows. Raster images are decoded by
-the existing bounded resource path and composed by the GPU. Color and blur
-foreground filter lists isolate the complete SourceGraphic into bounded
-`Rgba8Unorm` textures. One fixed color shader consumes ordered semantic color
-runs and clamps after every operation. Finite conversion passes premultiply
-before spatial processing and safely restore straight alpha before a later
-color run or Vello composition. Direct Gaussian and three-box render passes use
-the CPU reference renderer's derived parameters and transparent-black exterior
-sampling. Nested filters resolve inside-out, and the filtered texture returns
-to Vello without CPU rasterization or readback. Identity-only lists skip the
-layer and shaders.
+the existing bounded resource path and composed by the GPU. Foreground filter
+lists isolate the complete SourceGraphic into bounded `Rgba8Unorm` textures.
+One fixed color shader consumes ordered semantic color runs and clamps after
+every operation. Finite conversion passes premultiply before spatial processing
+and safely restore straight alpha before a later color run or Vello
+composition. Direct Gaussian and three-box render passes use the CPU reference
+renderer's derived parameters and transparent-black exterior sampling.
 
-Lists containing drop shadow remain indivisible and request complete CPU
-fallback; color and blur prefixes and suffixes are not split across backends.
-Backdrop filters also request complete CPU fallback so content is never
-silently omitted. GPU effect textures, parameter buffers, and
-device-generation-scoped pipelines obey the renderer's bounded effect limits.
+Native drop shadow extracts current-stage alpha into an `Rgba8Unorm`
+alpha-carrier mask, reuses the native blur passes, translates the mask with
+manual transparent-zero bilinear sampling, colors it in encoded sRGB, and
+composites the current premultiplied source above it. Later color and blur
+stages consume the combined result. Nested filters resolve inside-out, and the
+filtered texture returns to Vello without CPU rasterization or readback.
+Identity-only lists skip unnecessary layers and shaders.
+
+Backdrop filters remain unsupported. GPU execution failures request complete
+CPU fallback so an accepted foreground list is never presented without its
+effects. GPU effect textures, parameter buffers, and device-generation-scoped
+pipelines obey the renderer's bounded effect limits.
 
 ## Damage and presentation
 
 Each live GPU presenter owns a complete persistent backing image. Small logical
 damage is converted conservatively to physical coordinates and replayed through
 bounded 64 by 64 pixel tiles. Pointwise content uses a 2 pixel antialias guard.
-Blur adds its cumulative physical support to that guard. Only the authoritative
-tile core is copied into persistent backing, and the guarded replay area drives
-the 30 percent threshold. Partial work is limited to 16 tile replays; larger,
+Blur adds its cumulative physical support to that guard. Drop shadow also adds
+its translated mask dependency, including blur support, absolute physical
+offset, and fractional sampling reach. Only the authoritative tile core is
+copied into persistent backing, and the guarded replay area drives the 30
+percent threshold. Partial work is limited to 16 tile replays; larger,
 transformed spatial, or uncertain changes use a complete GPU render. A partial
 transaction becomes current only after all selected tiles have rendered and
 copied successfully.

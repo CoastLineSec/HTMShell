@@ -22,9 +22,9 @@ The input includes the element background, border, content, descendants, text, i
 
 Color runs process straight RGBA in encoded sRGB and clamp after every function. Blur processes canonical premultiplied RGBA with transparent-black edge samples. Drop shadow uses the current stage alpha, applies the shared blur, offset, and encoded-sRGB color, then composites the source above the shadow. The compositor returns to canonical premultiplied RGBA at every color or spatial boundary. External clipping, element opacity, and the element transform follow filtering.
 
-The CPU renderer is authoritative. The experimental Vello backend executes color and blur lists natively over an isolated SourceGraphic. Color runs use the bounded ordered shader. Blur uses bounded direct Gaussian or three-box passes with explicit straight-to-premultiplied representation transitions. Function order, repeated functions, encoded-sRGB processing, transparent-black blur edges, and color-stage clamping match the CPU reference. Identity-only lists skip the effect pass.
+The CPU renderer is authoritative. The experimental Vello backend executes all ten functions natively over an isolated SourceGraphic. Color runs use the bounded ordered shader. Blur uses bounded direct Gaussian or three-box passes. Drop shadow extracts current-stage alpha, reuses the blur parameters, fractionally translates and colors the mask, and composites source above shadow. Explicit straight-to-premultiplied transitions preserve the representation required by each stage. Function order, repeated functions, encoded-sRGB processing, transparent-black spatial edges, and color-stage clamping match the CPU reference. Identity-only lists skip unnecessary effect work.
 
-A list containing `drop-shadow()` remains indivisible and uses complete CPU-frame fallback in Vello mode. No color or blur prefix or suffix is split onto the GPU around a shadow. Backdrop filtering remains unsupported.
+GPU failure falls back to complete CPU rendering of the ordered list; one list is not split across backends. Backdrop filtering remains unsupported.
 
 Invalid or excessive syntax invalidates the complete declaration. An accepted executable filter that exceeds a runtime layer allocation limit reports a bounded render failure rather than becoming visually unfiltered.
 

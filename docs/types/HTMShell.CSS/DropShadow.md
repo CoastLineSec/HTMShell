@@ -27,9 +27,9 @@ One `drop-shadow()` occurrence is allowed in a filter list. A second occurrence 
 
 ## Rendering
 
-The input is the complete image produced by earlier functions in the list. The CPU reference compositor copies only that image's alpha into an exact 8-bit scalar mask. Source RGB does not affect the silhouette. A nonzero sigma blurs the mask with transparent-zero edge samples and the same direct Gaussian or deterministic three-box implementation used by `blur()`.
+The input is the complete image produced by earlier functions in the list. The CPU reference compositor copies only that image's alpha into an exact 8-bit scalar mask. The experimental Vello path uses an `Rgba8Unorm` alpha carrier with zeroed RGB channels. Source RGB does not affect either silhouette. A nonzero sigma blurs the mask with transparent-zero edge samples and the same direct Gaussian or deterministic three-box parameters used by `blur()`.
 
-The blurred mask is translated by the logical offsets and multiplied by the encoded-sRGB shadow color and its alpha. The result is canonical premultiplied RGBA. The current stage source is then composited above the shadow with premultiplied source-over. Later filter functions consume the combined source and shadow.
+The blurred mask is translated by the logical offsets and multiplied by the encoded-sRGB shadow color and its alpha. Integer offsets remain exact. Fractional physical offsets use deterministic bilinear sampling with transparent-zero exterior samples. The result is canonical premultiplied RGBA. The current stage source is then composited above the shadow with premultiplied source-over. Later filter functions consume the combined source and shadow.
 
 Drop shadow follows actual rendered alpha. Text glyphs, SVG silhouettes, transparent raster-image holes, rounded geometry, descendants, completed child effects, and existing box shadows shape the result. `box-shadow` remains separate and follows box geometry.
 
@@ -45,6 +45,6 @@ Transparent shadow color and a fully transparent SourceGraphic are visual identi
 
 Effect images are limited to 4,096 physical pixels per dimension and 64 MiB each. All effect images and scratch for one surface share a 256 MiB budget. Filter nesting is limited to eight.
 
-The CPU headless and live renderers share this implementation. The optional experimental Vello path does not execute drop shadow natively. Any list containing drop shadow uses one complete CPU-rendered fallback frame, including lists that also contain GPU-native color or blur functions. No prefix or suffix executes separately on the GPU. `backdrop-filter`, filter animation, and transitions are unsupported.
+The CPU headless and live renderers share one reference implementation. The optional experimental native Vello drop shadow executes without CPU frame rasterization, live readback, or shared-memory presentation. It reuses the same blur parameters and preserves ordered color and blur stages before and after the shadow. Guarded partial replay includes mask blur, signed offset, and fractional sampling dependencies; larger or transformed cases use a complete GPU render. GPU failure falls back to complete CPU rendering of the list. `backdrop-filter`, filter animation, and transitions are unsupported.
 
 Drop shadows can reduce contrast or obscure focus indicators. Keep essential text and focus feedback readable.

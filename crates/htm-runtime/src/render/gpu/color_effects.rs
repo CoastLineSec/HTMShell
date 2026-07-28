@@ -1,4 +1,5 @@
 use super::blur_effects::{AlphaConversion, BlurEffectPipelines};
+use super::shadow_effects::{SHADOW_PARAMETER_BYTES, ShadowEffectPipelines, create_mask_texture};
 use super::{BackendError, BackendErrorKind, GPU_WAIT_TIMEOUT, GpuPreparedScene, GpuStatistics};
 use crate::render::cpu_blur::derive_blur_parameters;
 use crate::render::cpu_effects::{
@@ -330,6 +331,7 @@ pub(super) fn render_prepared_scene(
     renderer: &mut vello::Renderer,
     color_pipeline: &mut Option<ColorEffectPipeline>,
     blur_pipelines: &mut Option<BlurEffectPipelines>,
+    shadow_pipelines: &mut Option<ShadowEffectPipelines>,
     prepared: &GpuPreparedScene,
     root_transform: Affine,
     physical_scale: f64,
@@ -344,10 +346,28 @@ pub(super) fn render_prepared_scene(
             &plan.execution,
             CpuEffectExecution::Ready(list)
                 if !list.is_visual_identity()
-                    && list
-                        .functions
-                        .iter()
-                        .all(|effect| matches!(effect, ForegroundEffect::Color(_) | ForegroundEffect::Blur(_)))
+                    && list.functions.iter().all(|effect| {
+                        matches!(
+                            effect,
+                            ForegroundEffect::Color(_)
+                                | ForegroundEffect::Blur(_)
+                                | ForegroundEffect::DropShadow(_)
+                        )
+                    })
+        )
+    });
+    let has_native_shadow = prepared.effect_plans.iter().any(|plan| {
+        matches!(
+            &plan.execution,
+            CpuEffectExecution::Ready(list)
+                if !list.is_visual_identity()
+                    && list.functions.iter().any(
+                        |effect| matches!(
+                            effect,
+                            ForegroundEffect::DropShadow(shadow)
+                                if shadow.color.alpha.get() > 0.0
+                        )
+                    )
         )
     });
     let mut transformed = Scene::with_tolerance(prepared.recording.tolerance);
@@ -369,6 +389,7 @@ pub(super) fn render_prepared_scene(
         renderer,
         color_pipeline,
         blur_pipelines,
+        shadow_pipelines,
         physical_scale,
         &mut registered_images,
         &mut allocated_bytes,
@@ -428,6 +449,11 @@ pub(super) fn render_prepared_scene(
             .gpu_color_filter_fallback_requests
             .saturating_add(1);
     }
+    if result.is_err() && has_native_shadow {
+        statistics.gpu_shadow_cpu_fallbacks = statistics.gpu_shadow_cpu_fallbacks.saturating_add(1);
+        statistics.gpu_spatial_cpu_fallbacks =
+            statistics.gpu_spatial_cpu_fallbacks.saturating_add(1);
+    }
     result
 }
 
@@ -444,6 +470,7 @@ fn transform_nodes(
     renderer: &mut vello::Renderer,
     color_pipeline: &mut Option<ColorEffectPipeline>,
     blur_pipelines: &mut Option<BlurEffectPipelines>,
+    shadow_pipelines: &mut Option<ShadowEffectPipelines>,
     physical_scale: f64,
     registered_images: &mut Vec<ImageData>,
     allocated_bytes: &mut usize,
@@ -480,6 +507,7 @@ fn transform_nodes(
             renderer,
             color_pipeline,
             blur_pipelines,
+            shadow_pipelines,
             physical_scale,
             registered_images,
             allocated_bytes,
@@ -507,22 +535,6 @@ fn transform_nodes(
                 ));
             }
             CpuEffectExecution::Ready(list) => {
-                if list
-                    .functions
-                    .iter()
-                    .any(|effect| matches!(effect, ForegroundEffect::DropShadow(_)))
-                {
-                    statistics.gpu_color_filter_fallback_requests = statistics
-                        .gpu_color_filter_fallback_requests
-                        .saturating_add(1);
-                    statistics.gpu_spatial_cpu_fallbacks =
-                        statistics.gpu_spatial_cpu_fallbacks.saturating_add(1);
-                    return Err(effect_error(
-                        BackendErrorKind::FallbackRequired,
-                        "drop-shadow foreground filters require complete CPU fallback",
-                        true,
-                    ));
-                }
                 let (to_filter_space, from_filter_space) =
                     filter_space_transforms(push, plan.element_transform)?;
                 let filtered_bounds = plan.filtered_bounds.as_ref().ok_or_else(|| {
@@ -550,16 +562,40 @@ fn transform_nodes(
                     .functions
                     .iter()
                     .any(|effect| matches!(effect, ForegroundEffect::Blur(blur) if blur.sigma.get() > 0.0));
+                let active_shadow = list.functions.iter().find_map(|effect| {
+                    let ForegroundEffect::DropShadow(shadow) = effect else {
+                        return None;
+                    };
+                    (shadow.color.alpha.get() > 0.0).then_some(*shadow)
+                });
+                let shadow_mask_count =
+                    active_shadow.map_or(
+                        0usize,
+                        |shadow| {
+                            if shadow.sigma.get() > 0.0 { 2 } else { 1 }
+                        },
+                    );
                 let image_bytes = checked_effect_image_bytes(bounds.width, bounds.height)
                     .inspect_err(|_| {
                         if has_blur {
                             statistics.gpu_blur_allocation_failures =
                                 statistics.gpu_blur_allocation_failures.saturating_add(1);
                         }
+                        if active_shadow.is_some() {
+                            statistics.gpu_shadow_allocation_failures =
+                                statistics.gpu_shadow_allocation_failures.saturating_add(1);
+                        }
                     })?;
                 let layer_bytes = image_bytes
-                    .checked_mul(2)
+                    .checked_mul(2usize.saturating_add(shadow_mask_count))
                     .and_then(|bytes| bytes.checked_add(PACKED_OPERATION_BUFFER_BYTES))
+                    .and_then(|bytes| {
+                        bytes.checked_add(
+                            active_shadow
+                                .map(|_| SHADOW_PARAMETER_BYTES)
+                                .unwrap_or_default(),
+                        )
+                    })
                     .ok_or_else(|| {
                         effect_error(
                             BackendErrorKind::TargetAllocation,
@@ -581,6 +617,10 @@ fn transform_nodes(
                     if has_blur {
                         statistics.gpu_blur_allocation_failures =
                             statistics.gpu_blur_allocation_failures.saturating_add(1);
+                    }
+                    if active_shadow.is_some() {
+                        statistics.gpu_shadow_allocation_failures =
+                            statistics.gpu_shadow_allocation_failures.saturating_add(1);
                     }
                     return Err(effect_error(
                         BackendErrorKind::TargetAllocation,
@@ -651,8 +691,11 @@ fn transform_nodes(
                     queue,
                     color_pipeline,
                     blur_pipelines,
+                    shadow_pipelines,
                     &list,
                     physical_scale,
+                    bounds.width,
+                    bounds.height,
                     &views,
                     statistics,
                 )?;
@@ -688,6 +731,11 @@ fn transform_nodes(
                         .gpu_blur_output_pixels
                         .saturating_add(u64::from(bounds.width) * u64::from(bounds.height));
                 }
+                if active_shadow.is_some() {
+                    statistics.gpu_shadow_output_pixels = statistics
+                        .gpu_shadow_output_pixels
+                        .saturating_add(u64::from(bounds.width) * u64::from(bounds.height));
+                }
                 statistics.gpu_color_filter_pixels = statistics
                     .gpu_color_filter_pixels
                     .saturating_add(u64::from(bounds.width) * u64::from(bounds.height));
@@ -709,8 +757,11 @@ fn apply_ordered_gpu_effects(
     queue: &wgpu::Queue,
     color_pipeline: &mut Option<ColorEffectPipeline>,
     blur_pipelines: &mut Option<BlurEffectPipelines>,
+    shadow_pipelines: &mut Option<ShadowEffectPipelines>,
     list: &ForegroundEffectList,
     physical_scale: f64,
+    width: u32,
+    height: u32,
     views: &[wgpu::TextureView; 2],
     statistics: &mut GpuStatistics,
 ) -> Result<usize, BackendError> {
@@ -797,12 +848,115 @@ fn apply_ordered_gpu_effects(
                     statistics,
                 )?;
             }
-            ForegroundEffect::DropShadow(_) => {
-                return Err(effect_error(
-                    BackendErrorKind::FallbackRequired,
-                    "drop-shadow requires complete CPU fallback",
-                    true,
-                ));
+            ForegroundEffect::DropShadow(shadow) => {
+                index += 1;
+                if shadow.color.alpha.get() == 0.0 {
+                    statistics.gpu_shadow_identity_suppressions = statistics
+                        .gpu_shadow_identity_suppressions
+                        .saturating_add(1);
+                    continue;
+                }
+                if representation == EffectAlphaRepresentation::Straight {
+                    ensure_blur_pipelines(device, blur_pipelines, statistics)?.apply_conversion(
+                        device,
+                        queue,
+                        &views[source_index],
+                        &views[1 - source_index],
+                        AlphaConversion::Premultiply,
+                        statistics,
+                    )?;
+                    source_index = 1 - source_index;
+                    representation = EffectAlphaRepresentation::Premultiplied;
+                }
+
+                let mask_source_texture = create_mask_texture(
+                    device,
+                    width,
+                    height,
+                    "HTMShell Vello drop shadow alpha mask",
+                );
+                let mask_source_view =
+                    mask_source_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                ensure_shadow_pipelines(device, shadow_pipelines, statistics)?.extract_mask(
+                    device,
+                    queue,
+                    &views[source_index],
+                    &mask_source_view,
+                    statistics,
+                )?;
+                statistics.gpu_shadow_mask_allocations =
+                    statistics.gpu_shadow_mask_allocations.saturating_add(1);
+
+                let physical_sigma = f64::from(shadow.sigma.get()) * physical_scale;
+                let parameters = derive_blur_parameters(physical_sigma)?;
+                match parameters {
+                    crate::render::cpu_blur::BlurParameters::Identity => {
+                        shadow_pipelines
+                            .as_ref()
+                            .expect("GPU drop shadow pipelines were initialized")
+                            .composite(
+                                device,
+                                queue,
+                                &views[source_index],
+                                &mask_source_view,
+                                &views[1 - source_index],
+                                *shadow,
+                                physical_scale,
+                                statistics,
+                            )?;
+                    }
+                    parameters => {
+                        let mask_output_texture = create_mask_texture(
+                            device,
+                            width,
+                            height,
+                            "HTMShell Vello blurred drop shadow mask",
+                        );
+                        let mask_output_view = mask_output_texture
+                            .create_view(&wgpu::TextureViewDescriptor::default());
+                        let mask_views = [mask_source_view, mask_output_view];
+                        let mut mask_index = 0usize;
+                        let gaussian_before = statistics.gpu_blur_gaussian_passes;
+                        let box_before = statistics.gpu_blur_box_passes;
+                        ensure_blur_pipelines(device, blur_pipelines, statistics)?.apply_blur(
+                            device,
+                            queue,
+                            &mut mask_index,
+                            &mask_views,
+                            &parameters,
+                            statistics,
+                        )?;
+                        let mask_passes = statistics
+                            .gpu_blur_gaussian_passes
+                            .saturating_sub(gaussian_before)
+                            .saturating_add(
+                                statistics.gpu_blur_box_passes.saturating_sub(box_before),
+                            );
+                        statistics.gpu_shadow_mask_blur_passes = statistics
+                            .gpu_shadow_mask_blur_passes
+                            .saturating_add(mask_passes);
+                        statistics.gpu_shadow_mask_allocations =
+                            statistics.gpu_shadow_mask_allocations.saturating_add(1);
+                        shadow_pipelines
+                            .as_ref()
+                            .expect("GPU drop shadow pipelines were initialized")
+                            .composite(
+                                device,
+                                queue,
+                                &views[source_index],
+                                &mask_views[mask_index],
+                                &views[1 - source_index],
+                                *shadow,
+                                physical_scale,
+                                statistics,
+                            )?;
+                        mask_output_texture.destroy();
+                    }
+                }
+                mask_source_texture.destroy();
+                source_index = 1 - source_index;
+                statistics.gpu_shadow_layer_creations =
+                    statistics.gpu_shadow_layer_creations.saturating_add(1);
             }
         }
     }
@@ -831,6 +985,21 @@ fn ensure_blur_pipelines<'a>(
     Ok(pipelines
         .as_mut()
         .expect("GPU blur pipelines were initialized"))
+}
+
+fn ensure_shadow_pipelines<'a>(
+    device: &wgpu::Device,
+    pipelines: &'a mut Option<ShadowEffectPipelines>,
+    statistics: &mut GpuStatistics,
+) -> Result<&'a mut ShadowEffectPipelines, BackendError> {
+    if pipelines.is_none() {
+        *pipelines = Some(ShadowEffectPipelines::new(device, statistics)?);
+    } else {
+        statistics.gpu_shadow_cache_hits = statistics.gpu_shadow_cache_hits.saturating_add(1);
+    }
+    Ok(pipelines
+        .as_mut()
+        .expect("GPU drop shadow pipelines were initialized"))
 }
 
 fn create_effect_texture(
