@@ -7,6 +7,7 @@ HTMShell is an experimental native shell runtime authored with local HTML, CSS, 
 - [Introduction](guide/introduction.md)
 - [Running from source](guide/running-from-source.md)
 - [Create the first shell](guide/first-shell.md)
+- [Local packages](guide/packages.md)
 - [Surfaces](guide/surfaces.md)
 - [State and actions](guide/state-and-actions.md)
 - [Native state](guide/native-state.md)
@@ -18,6 +19,7 @@ HTMShell is an experimental native shell runtime authored with local HTML, CSS, 
 ## HTMShell API
 
 - [`HTMShell`](types/HTMShell/README.md)
+- [`HTMShell.Package`](types/HTMShell.Package/README.md)
 - [`HTMShell.Elements`](types/HTMShell.Elements/README.md)
 - [`HTMShell.State`](types/HTMShell.State/README.md)
 - [`HTMShell.Actions`](types/HTMShell.Actions/README.md)

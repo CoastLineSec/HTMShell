@@ -27,7 +27,6 @@ use std::time::Instant;
 use stylo::color::ColorSpace;
 use stylo::values::computed::CSSPixelLength;
 
-const MAX_HTML_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_DOM_NODES: usize = 10_000;
 const MAX_DOM_DEPTH: usize = 256;
 const MAX_RESOURCE_RESOLVE_PASSES: usize = 8;
@@ -68,27 +67,17 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
     validate_viewport(&options)?;
     let total_started = Instant::now();
     let read_started = Instant::now();
-    let root = package
-        .canonicalize()
-        .map_err(|error| RuntimeError::io("resolve package directory", package, error))?;
-    if !root.is_dir() {
-        return Err(RuntimeError::InvalidPackage(format!(
-            "{} is not a directory",
-            root.display()
-        )));
-    }
-    let source = root.join("index.html");
-    let metadata = source
-        .metadata()
-        .map_err(|error| RuntimeError::io("inspect index.html", &source, error))?;
-    if metadata.len() > MAX_HTML_BYTES {
-        return Err(RuntimeError::LimitExceeded(format!(
-            "index.html is {} bytes; the spike limit is {MAX_HTML_BYTES}",
-            metadata.len()
-        )));
-    }
-    let html = std::fs::read_to_string(&source)
-        .map_err(|error| RuntimeError::io("read index.html as UTF-8", &source, error))?;
+    let mut package_loader = crate::PackageSnapshotLoader::new();
+    let package_snapshot = package_loader.load_headless(package)?;
+    let root = package_snapshot
+        .root_package()
+        .canonical_root()
+        .to_path_buf();
+    let entry = package_snapshot.headless_entry().ok_or_else(|| {
+        RuntimeError::InvalidPackage("headless package snapshot has no index.html entry".into())
+    })?;
+    let source = entry.canonical_path().to_path_buf();
+    let html = entry.html();
     let package_read_ms = elapsed_ms(read_started);
 
     let audit = Arc::new(ResourceAudit::default());
@@ -103,7 +92,7 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
 
     let parse_started = Instant::now();
     let mut document = HtmlDocument::from_html(
-        &html,
+        html,
         DocumentConfig {
             viewport: Some(Viewport::new(
                 physical_width,
@@ -301,6 +290,7 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
         artifacts,
         measurements,
         package_root: root,
+        package_snapshot,
     })
 }
 

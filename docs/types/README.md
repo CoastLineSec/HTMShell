@@ -18,6 +18,12 @@ Manifest and surface types.
 - [`PanelSurface`](HTMShell/PanelSurface.md)
 - [`OverlaySurface`](HTMShell/OverlaySurface.md)
 
+## `HTMShell.Package`
+
+Local package identity, dependencies, and immutable graph snapshots.
+
+- [`Package`](HTMShell.Package/README.md)
+
 ## `HTMShell.Elements`
 
 Validated behavior declarations on ordinary HTML.

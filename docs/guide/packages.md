@@ -1,0 +1,141 @@
+# Local packages
+
+HTMShell loads a shell from a local, read-only package graph. A graph contains one root `shell` package and zero or more `library` packages. The complete graph is validated before any root surface document is instantiated.
+
+Package loading is offline. Manifests cannot select network locations, global package search roots, registries, environment expansions, or renderer backends.
+
+## Package kinds
+
+A `shell` package owns the graph root, entry documents, and surface topology. It may depend on libraries. A shell cannot be imported.
+
+A `library` package may depend on other libraries. Loading a library validates only its package manifest and dependencies. A library cannot declare surfaces, load visual documents, create service demand, or affect root topology. Reusable component exports are not available yet.
+
+## Schema version 2
+
+The `shell.json` manifest uses a `package` object and an ordered `dependencies` array:
+
+```json
+{
+  "version": 2,
+  "package": {
+    "id": "org.example.shell",
+    "kind": "shell",
+    "version": "0.1.0"
+  },
+  "dependencies": [
+    {
+      "alias": "controls",
+      "id": "org.example.controls",
+      "path": "packages/controls"
+    }
+  ],
+  "surfaces": [
+    {
+      "id": "panel",
+      "kind": "panel",
+      "document": "panel.html",
+      "outputs": "all",
+      "edge": "top",
+      "thickness": 52,
+      "reserveSpace": true
+    },
+    {
+      "id": "overlay",
+      "kind": "overlay",
+      "document": "overlay.html",
+      "outputs": "all",
+      "initiallyOpen": false
+    }
+  ]
+}
+```
+
+The corresponding library manifest is:
+
+```json
+{
+  "version": 2,
+  "package": {
+    "id": "org.example.controls",
+    "kind": "library",
+    "version": "0.1.0"
+  },
+  "dependencies": []
+}
+```
+
+Package versions are optional SemVer 2.0.0 metadata. HTMShell records a declared version but does not solve ranges or select among versions.
+
+Unknown fields are rejected. Library manifests must omit `surfaces`.
+
+## Package IDs and aliases
+
+A package ID is a lowercase ASCII reverse-DNS name:
+
+- Total length is at most 255 bytes.
+- At least two dot-separated segments are required.
+- Each segment contains 1 through 63 bytes.
+- A segment starts with `a` through `z`.
+- Remaining characters are lowercase letters, digits, or interior hyphens.
+- The `local.` prefix is reserved for compatibility packages.
+
+Each dependency has an alias, expected package ID, and local path. Aliases contain 1 through 64 lowercase ASCII letters, digits, or interior hyphens, start with a letter, contain no dots, and are unique within the declaring package. These aliases are reserved:
+
+```text
+self root input state action service surface slot htm
+```
+
+The resolved library must declare the exact expected package ID. Dependency versions and aliases do not change logical package identity.
+
+## Local resolution
+
+The root shell directory is the composition root. A dependency path is interpreted relative to the package that declares it, while every resolved directory must remain beneath the composition root.
+
+Dependency paths must be normalized, relative UTF-8 paths. Absolute paths, empty components, parent traversal, backslashes, URL syntax, special files, and containment escapes are rejected. Symbolic links are rejected for the composition root, dependency directories, traversed dependency components, and package manifest files.
+
+Search directories and network retrieval are not consulted. A manifest names the exact local directory to validate.
+
+## Graph behavior
+
+Dependencies retain declaration order. The validated graph uses deterministic dependency-first order, with the root shell last. A shared dependency at the same canonical directory, with the same package ID and version, appears once even when multiple parents reference it.
+
+Package dependency cycles are rejected. The complete graph is also rejected when:
+
+- one package ID is claimed by different directories;
+- one package ID is associated with conflicting versions;
+- one directory is associated with conflicting package IDs;
+- a dependency resolves to a shell package;
+- a library declares surface topology.
+
+No partial graph is used. Candidate construction finishes before an immutable snapshot generation becomes current. A failed replacement leaves the last successfully published snapshot unchanged. Headless and live loading use this same graph boundary.
+
+## Compatibility
+
+Schema version 1 manifests remain valid without edits. A schema version 1 shell ID is represented internally as `local.<shell-id>`, with no version or dependencies. Its panel, overlay, namespaces, resources, and multi-output behavior remain unchanged.
+
+A manifestless headless directory containing `index.html` remains valid and uses the reserved compatibility identity `local.headless-root`. A manifest-backed headless package validates the same schema version 2 graph as live loading and still renders its root `index.html`.
+
+## Limits
+
+| Resource | Limit |
+| --- | ---: |
+| Packages per graph | 64 |
+| Direct dependencies per package | 32 |
+| Dependency depth | 16 |
+| Package ID | 255 bytes |
+| Dependency alias | 64 bytes |
+| Package manifest | 256 KiB |
+| Total candidate bytes read | 256 MiB |
+
+Manifest and graph errors reject the candidate rather than truncating it. Library packages do not yet export components, HTML, CSS, or assets for use by another package. Component definitions, component inputs, slots, component-scoped CSS, and hot reload are not implemented.
+
+See the [package graph example](../../examples/package-graph/shell.json) and the [`HTMShell.Package`](../types/HTMShell.Package/README.md) reference.
+
+Validate that example without creating Wayland surfaces:
+
+```sh
+cargo run -p htmshell-live --locked --offline -- \
+  manifest examples/package-graph/shell.json --validate-only
+```
+
+The diagnostic lists the immutable snapshot generation and dependency-first package order. Its JSON is intended for development and deterministic testing, not as a stable package interchange format.

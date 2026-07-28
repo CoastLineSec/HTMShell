@@ -40,6 +40,12 @@ fn run_headless(package: PathBuf) {
                 run.artifacts.len()
             );
             println!(
+                "package_snapshot={} package_id={} packages={}",
+                run.package_snapshot.generation().get(),
+                run.package_snapshot.root_package().id(),
+                run.package_snapshot.packages().len()
+            );
+            println!(
                 "timings: read={:.2}ms parse={:.2}ms resolve={:.2}ms paint={:.2}ms total={:.2}ms",
                 measurements.package_read_ms,
                 measurements.html_parse_ms,
@@ -83,6 +89,12 @@ fn run_mutation(package: PathBuf) {
                 run.document_identity_preserved,
                 run.artifacts.len(),
                 run.total_ms
+            );
+            println!(
+                "package_snapshot={} package_id={} packages={}",
+                run.package_snapshot.generation().get(),
+                run.package_snapshot.root_package().id(),
+                run.package_snapshot.packages().len()
             );
             for artifact in &run.artifacts {
                 let summary = artifact

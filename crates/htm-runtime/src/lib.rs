@@ -10,6 +10,7 @@ mod incremental;
 mod live;
 mod model;
 mod mutation;
+mod package;
 // R1 intentionally defines recovery and backend-neutral states that the CPU
 // reference backend does not exercise in every production path.
 #[allow(dead_code, unused_imports)]
@@ -86,6 +87,16 @@ pub use model::{
     InteractionEvidence, Phase, ResourceRecord, RunMeasurements, ViewportSpec,
 };
 pub use mutation::run_incremental_experiment;
+pub use package::{
+    MAX_CANDIDATE_BYTES, MAX_DEPENDENCY_DEPTH, MAX_DIRECT_DEPENDENCIES, MAX_PACKAGE_ALIAS_BYTES,
+    MAX_PACKAGE_ID_BYTES, MAX_PACKAGE_MANIFEST_BYTES, MAX_PACKAGE_PATH_BYTES,
+    MAX_PACKAGE_VERSION_BYTES, MAX_PACKAGES_PER_GRAPH, ManifestMeasurements, OutputScope,
+    OverlayTemplate, PackageAlias, PackageDependency, PackageEntryDocument, PackageErrorKind,
+    PackageId, PackageKind, PackageLoadError, PackageNodeIdentity, PackageSchemaSource,
+    PackageSnapshot, PackageSnapshotCandidate, PackageSnapshotGeneration, PackageSnapshotLoader,
+    PackageVersion, PanelEdge, PanelTemplate, ResolvedPackage, ResolvedPackageDependency,
+    ShellManifest, SurfaceKind, SurfacePreset, SurfaceTemplate, ValidatedManifest,
+};
 #[cfg(feature = "gpu-renderer")]
 pub use render::{
     LiveGpuBackendInfo, LiveGpuConfiguration, LiveGpuError, LiveGpuErrorKind, LiveGpuPresenter,

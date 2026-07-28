@@ -48,3 +48,8 @@ HTMShell includes direct native PipeWire integration for nodes, application
 streams, actual and configured defaults, volume, mute, ordered channels,
 read-only routing links and groups, and explicit scalar peak monitoring. The
 integration uses no subprocess wrapper, browser, or WebView.
+
+Local schema version 2 packages provide validated reverse-DNS identities,
+optional SemVer metadata, and bounded offline library dependency graphs.
+Only the root shell package creates panel and overlay surfaces. Reusable
+library component exports and hot reload are not yet available.

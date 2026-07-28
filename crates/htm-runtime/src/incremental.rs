@@ -1,6 +1,7 @@
 use crate::model::{CornerRadii, ImageDiagnostic, LogicalRect, OverflowDiagnostic, ViewportSpec};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -265,4 +266,5 @@ pub struct IncrementalExperimentRun {
     pub scale_baselines: Vec<ScaleBaseline>,
     pub total_ms: f64,
     pub package_root: PathBuf,
+    pub package_snapshot: Arc<crate::PackageSnapshot>,
 }

@@ -187,6 +187,25 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
         println!("manifest_id={}", manifest.manifest().id);
         println!("manifest_version={}", manifest.manifest().version);
         println!("manifest_parse_count={}", manifest.parse_count());
+        println!(
+            "package_snapshot_generation={}",
+            manifest.snapshot().generation().get()
+        );
+        println!("package_id={}", manifest.snapshot().root_package().id());
+        println!(
+            "package_kind={:?}",
+            manifest.snapshot().root_package().kind()
+        );
+        println!(
+            "package_version={}",
+            manifest
+                .snapshot()
+                .root_package()
+                .version()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "absent".into())
+        );
+        println!("package_count={}", manifest.snapshot().packages().len());
         println!("surface_templates={}", manifest.manifest().surfaces.len());
         for surface in &manifest.manifest().surfaces {
             println!(
@@ -197,6 +216,7 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
                 surface.namespace()
             );
         }
+        print!("{}", manifest.deterministic_package_graph_json()?);
         return Ok(());
     }
     let summary = run_manifest_shell(ManifestHostOptions {
@@ -213,6 +233,11 @@ fn run_manifest(arguments: Vec<String>) -> Result<(), Box<dyn Error>> {
     println!("manifest_parse_count={}", summary.manifest_parse_count);
     println!("manifest_parse_us={}", summary.manifest_parse_us);
     println!("manifest_validation_us={}", summary.manifest_validation_us);
+    println!(
+        "package_snapshot_generation={}",
+        summary.package_snapshot_generation
+    );
+    println!("package_count={}", summary.package_count);
     println!("layer_shell_version={}", summary.layer_shell_version);
     println!("viewporter_advertised={}", summary.viewporter_advertised);
     println!(

@@ -533,6 +533,7 @@ pub struct LiveDocument {
     render_session: CpuRenderSession,
     audit: Arc<ResourceAudit>,
     package_root: PathBuf,
+    package_snapshot: Option<Arc<crate::PackageSnapshot>>,
     source: PathBuf,
     viewport: ViewportSpec,
     document_identity: ExperimentalDocumentIdentity,
@@ -867,6 +868,28 @@ impl LiveDocument {
         )
     }
 
+    pub fn load_surface_snapshot(
+        snapshot: Arc<crate::PackageSnapshot>,
+        surface: &crate::SurfaceTemplate,
+        kind: LiveDocumentKind,
+        logical_width: u32,
+        logical_height: u32,
+    ) -> Result<Self, RuntimeError> {
+        let package_root = snapshot.root_package().canonical_root().to_path_buf();
+        let source = surface.canonical_document().to_path_buf();
+        let html = surface.html().to_owned();
+        Self::load_prepared(
+            package_root,
+            source,
+            html,
+            Some(snapshot),
+            kind,
+            logical_width,
+            logical_height,
+            0.0,
+        )
+    }
+
     fn load_inner(
         package: &Path,
         document: &Path,
@@ -921,6 +944,30 @@ impl LiveDocument {
             .map_err(|error| RuntimeError::io("read live document as UTF-8", &source, error))?;
         let package_read_ms = elapsed_ms(read_started);
 
+        Self::load_prepared(
+            package_root,
+            source,
+            html,
+            None,
+            kind,
+            logical_width,
+            logical_height,
+            package_read_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_prepared(
+        package_root: PathBuf,
+        source: PathBuf,
+        html: String,
+        package_snapshot: Option<Arc<crate::PackageSnapshot>>,
+        kind: LiveDocumentKind,
+        logical_width: u32,
+        logical_height: u32,
+        package_read_ms: f64,
+    ) -> Result<Self, RuntimeError> {
+        validate_dimensions(logical_width, logical_height)?;
         let viewport = ViewportSpec {
             logical_width,
             logical_height,
@@ -1014,6 +1061,7 @@ impl LiveDocument {
             render_session: CpuRenderSession::default(),
             audit,
             package_root,
+            package_snapshot,
             source,
             viewport,
             document_identity,
@@ -1504,6 +1552,12 @@ impl LiveDocument {
 
     pub fn package_root(&self) -> &Path {
         &self.package_root
+    }
+
+    pub fn package_snapshot_generation(&self) -> Option<crate::PackageSnapshotGeneration> {
+        self.package_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.generation())
     }
 
     pub fn source(&self) -> &Path {
@@ -6899,6 +6953,41 @@ mod tests {
     #[test]
     fn invalid_package_path_is_contained_as_an_error() {
         assert!(LiveDocument::load(fixture().join("does-not-exist"), 800, 600).is_err());
+    }
+
+    #[test]
+    fn manifest_surfaces_share_snapshot_generation_but_not_document_identity() {
+        let manifest =
+            crate::ValidatedManifest::load(static_panel_fixture().join("shell.json")).unwrap();
+        let panel = manifest.surface("panel").unwrap();
+        let first = LiveDocument::load_surface_snapshot(
+            Arc::clone(manifest.snapshot()),
+            panel,
+            LiveDocumentKind::Panel,
+            800,
+            62,
+        )
+        .unwrap();
+        let second = LiveDocument::load_surface_snapshot(
+            Arc::clone(manifest.snapshot()),
+            panel,
+            LiveDocumentKind::Panel,
+            800,
+            62,
+        )
+        .unwrap();
+        assert_eq!(
+            first.package_snapshot_generation(),
+            Some(manifest.snapshot().generation())
+        );
+        assert_eq!(
+            second.package_snapshot_generation(),
+            first.package_snapshot_generation()
+        );
+        assert_ne!(
+            first.snapshot().unwrap().document_identity,
+            second.snapshot().unwrap().document_identity
+        );
     }
 
     #[test]

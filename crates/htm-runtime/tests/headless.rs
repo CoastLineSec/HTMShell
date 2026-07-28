@@ -30,6 +30,62 @@ impl TempFixture {
         }
         std::fs::write(path, bytes).expect("write temporary asset");
     }
+
+    fn write_text(&self, relative: &str, text: &str) {
+        self.write_asset(relative, text.as_bytes());
+    }
+}
+
+#[test]
+fn manifest_backed_headless_loading_uses_the_shared_package_snapshot() {
+    let fixture = TempFixture::new("<main>headless root</main>", None);
+    fixture.write_text("panel.html", "<main>panel</main>");
+    fixture.write_text("overlay.html", "<main>overlay</main>");
+    fixture.write_text(
+        "shell.json",
+        r#"{
+          "version": 2,
+          "package": {
+            "id": "org.example.headless",
+            "kind": "shell",
+            "version": "1.0.0"
+          },
+          "dependencies": [
+            {
+              "alias": "library",
+              "id": "org.example.library",
+              "path": "packages/library"
+            }
+          ],
+          "surfaces": [
+            {"id":"panel","kind":"panel","document":"panel.html","outputs":"all","edge":"top","thickness":52,"reserveSpace":true},
+            {"id":"overlay","kind":"overlay","document":"overlay.html","outputs":"all","initiallyOpen":false}
+          ]
+        }"#,
+    );
+    fixture.write_text(
+        "packages/library/shell.json",
+        r#"{
+          "version": 2,
+          "package": {
+            "id": "org.example.library",
+            "kind": "library"
+          },
+          "dependencies": []
+        }"#,
+    );
+
+    let run = run_package_with_options(&fixture.root, options(false, false)).unwrap();
+    assert_eq!(
+        run.package_snapshot.root_package().id().as_str(),
+        "org.example.headless"
+    );
+    assert_eq!(run.package_snapshot.packages().len(), 2);
+    assert_eq!(run.package_snapshot.generation().get(), 1);
+    assert_eq!(
+        run.package_snapshot.headless_entry().unwrap().html(),
+        "<main>headless root</main>"
+    );
 }
 
 impl Drop for TempFixture {

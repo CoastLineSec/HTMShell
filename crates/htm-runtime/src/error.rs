@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum RuntimeError {
+    Package(crate::PackageLoadError),
     InvalidPackage(String),
     LimitExceeded(String),
     Io {
@@ -38,6 +39,7 @@ impl RuntimeError {
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Package(error) => error.fmt(f),
             Self::InvalidPackage(message) => write!(f, "invalid shell package: {message}"),
             Self::LimitExceeded(message) => write!(f, "fixture limit exceeded: {message}"),
             Self::Io {
@@ -63,10 +65,17 @@ impl fmt::Display for RuntimeError {
 impl std::error::Error for RuntimeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Package(error) => Some(error),
             Self::Io { source, .. } => Some(source),
             Self::Serialization(source) => Some(source),
             _ => None,
         }
+    }
+}
+
+impl From<crate::PackageLoadError> for RuntimeError {
+    fn from(value: crate::PackageLoadError) -> Self {
+        Self::Package(value)
     }
 }
 

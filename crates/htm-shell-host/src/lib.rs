@@ -23,6 +23,13 @@ mod session_model;
 
 pub use clock::ClockServiceSummary;
 pub use error::ShellHostError;
+pub use htm_runtime::{
+    MAX_CANDIDATE_BYTES, MAX_DEPENDENCY_DEPTH, MAX_DIRECT_DEPENDENCIES, MAX_PACKAGE_ALIAS_BYTES,
+    MAX_PACKAGE_ID_BYTES, MAX_PACKAGE_MANIFEST_BYTES, MAX_PACKAGE_PATH_BYTES,
+    MAX_PACKAGES_PER_GRAPH, PackageAlias, PackageErrorKind, PackageId, PackageKind,
+    PackageLoadError, PackageSchemaSource, PackageSnapshot, PackageSnapshotGeneration,
+    PackageSnapshotLoader, PackageVersion,
+};
 pub use manifest::{
     ManifestMeasurements, OutputScope, OverlayTemplate, PanelEdge, PanelTemplate, ShellManifest,
     SurfaceKind, SurfacePreset, SurfaceTemplate, ValidatedManifest,

@@ -1,9 +1,12 @@
 use htm_runtime::{
     CLOCK_FORMAT_CONVERSIONS, CLOCK_FORMAT_FLAGS, CLOCK_PUBLIC_ATTRIBUTES, ClockFormat,
     ContextualRepeatSource, ItemBindingKey, LiveDocument, LiveDocumentKind, LiveRenderRequest,
-    MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT, MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
+    MAX_CANDIDATE_BYTES, MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT,
+    MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
     MAX_CONTEXTUAL_LINK_REPEATS_PER_GROUP_TEMPLATE, MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT,
-    MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE, MAX_PIPEWIRE_ACTIVE_PEAK_STREAMS,
+    MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE, MAX_DEPENDENCY_DEPTH, MAX_DIRECT_DEPENDENCIES,
+    MAX_PACKAGE_ALIAS_BYTES, MAX_PACKAGE_ID_BYTES, MAX_PACKAGE_MANIFEST_BYTES,
+    MAX_PACKAGES_PER_GRAPH, MAX_PIPEWIRE_ACTIVE_PEAK_STREAMS,
     MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM,
     MAX_PIPEWIRE_BINDINGS_PER_ITEM, MAX_PIPEWIRE_CHANNEL_BINDINGS_PER_ITEM,
     MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_DOCUMENT, MAX_PIPEWIRE_CHANNEL_RANGE_CONTROLS_PER_ITEM,
@@ -166,12 +169,100 @@ fn public_documentation_links_and_example_paths_resolve() {
         "examples/color-filters/style.css",
         "examples/color-filters/assets/palette.svg",
         "examples/color-filters/assets/alpha-grid.png",
+        "examples/package-graph/shell.json",
+        "examples/package-graph/index.html",
+        "examples/package-graph/panel.html",
+        "examples/package-graph/overlay.html",
+        "examples/package-graph/style.css",
+        "examples/package-graph/packages/controls/shell.json",
+        "examples/package-graph/packages/controls/shared/shell.json",
     ] {
         assert!(
             root.join(path).is_file(),
             "documented path is missing: {path}"
         );
     }
+}
+
+#[test]
+fn local_package_documentation_matches_the_loader_contract() {
+    let root = workspace_root();
+    let guide = fs::read_to_string(root.join("docs/guide/packages.md")).unwrap();
+    let reference = fs::read_to_string(root.join("docs/types/HTMShell.Package/README.md")).unwrap();
+    let manifest_reference =
+        fs::read_to_string(root.join("docs/types/HTMShell/ShellManifest.md")).unwrap();
+    let public = format!("{guide}\n{reference}\n{manifest_reference}");
+
+    for statement in [
+        "`shell` package",
+        "`library` package",
+        "Only that package may declare",
+        "reverse-DNS",
+        "`local.`",
+        "SemVer 2.0.0",
+        "dependency-first",
+        "Symbolic links are rejected",
+        "network",
+        "global package search",
+        "cycles",
+        "immutable generation",
+        "last successfully published snapshot",
+        "Headless and live",
+        "Component definitions",
+        "hot reload",
+    ] {
+        assert!(
+            public.contains(statement),
+            "missing local package contract: {statement}"
+        );
+    }
+    for (value, unit) in [
+        (MAX_PACKAGES_PER_GRAPH as u64, "Packages per graph"),
+        (
+            MAX_DIRECT_DEPENDENCIES as u64,
+            "Direct dependencies per package",
+        ),
+        (MAX_DEPENDENCY_DEPTH as u64, "Dependency depth"),
+        (MAX_PACKAGE_ID_BYTES as u64, "Package ID"),
+        (MAX_PACKAGE_ALIAS_BYTES as u64, "Dependency alias"),
+    ] {
+        assert!(
+            guide.contains(&format!("| {unit} | {value}")),
+            "package guide does not match source limit {unit}={value}"
+        );
+    }
+    assert!(guide.contains(&format!(
+        "| Package manifest | {} KiB |",
+        MAX_PACKAGE_MANIFEST_BYTES / 1024
+    )));
+    assert!(guide.contains(&format!(
+        "| Total candidate bytes read | {} MiB |",
+        MAX_CANDIDATE_BYTES / (1024 * 1024)
+    )));
+
+    let manifest = ValidatedManifest::load(root.join("examples/package-graph/shell.json")).unwrap();
+    let package_ids = manifest
+        .snapshot()
+        .packages()
+        .iter()
+        .map(|package| package.id().as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        package_ids,
+        [
+            "dev.coastlinesec.htmshell.shared",
+            "dev.coastlinesec.htmshell.controls",
+            "dev.coastlinesec.htmshell.package-graph",
+        ]
+    );
+    assert_eq!(manifest.manifest().surfaces.len(), 2);
+    assert_eq!(manifest.snapshot().root_package().dependencies().len(), 2);
+    assert!(
+        !manifest
+            .deterministic_package_graph_json()
+            .unwrap()
+            .contains(root.to_str().unwrap())
+    );
 }
 
 #[test]

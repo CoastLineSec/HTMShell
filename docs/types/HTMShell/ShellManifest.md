@@ -2,7 +2,7 @@
 
 **Module:** `HTMShell` | **Kind:** JSON manifest | **Status:** Experimental
 
-`ShellManifest` defines the local documents used for portable shell surfaces.
+`ShellManifest` defines the root local package and the documents used for portable shell surfaces. Schema version 1 remains supported. Schema version 2 adds package identity, optional version metadata, and local library dependencies without changing the supported surface topology.
 
 ## Usage
 
@@ -41,6 +41,40 @@ Root fields:
 | `id` | Lowercase ASCII letters, digits, and interior hyphens. Maximum 64 bytes. |
 | `surfaces` | Exactly one `panel` and one `overlay`. IDs must be unique. |
 
+Schema version 2 replaces the root `id` with:
+
+```json
+{
+  "version": 2,
+  "package": {
+    "id": "org.example.shell",
+    "kind": "shell",
+    "version": "1.0.0"
+  },
+  "dependencies": [],
+  "surfaces": [
+    {
+      "id": "panel",
+      "kind": "panel",
+      "document": "panel.html",
+      "outputs": "all",
+      "edge": "top",
+      "thickness": 52,
+      "reserveSpace": true
+    },
+    {
+      "id": "overlay",
+      "kind": "overlay",
+      "document": "overlay.html",
+      "outputs": "all",
+      "initiallyOpen": false
+    }
+  ]
+}
+```
+
+The `package.id` uses the bounded reverse-DNS syntax, `package.kind` must be `shell` at the root, and `package.version` is optional SemVer 2.0.0 metadata. The existing surface fields and constraints are identical. See [`HTMShell.Package`](../HTMShell.Package/README.md) for dependency fields and graph rules.
+
 Shared surface fields:
 
 | Field | Requirement |
@@ -58,6 +92,6 @@ The manifest is limited to 256 KiB. Document paths cannot be absolute, remote, o
 
 Dimensions are logical pixels. Scale is compositor-provided and cannot be selected by the manifest. Output names are not manifest selectors.
 
-Manifest hot reload, persistent output selection, scale overrides, additional surface kinds, and more than one panel or overlay template are unavailable.
+Manifest hot reload, component exports, persistent output selection, scale overrides, additional surface kinds, and more than one panel or overlay template are unavailable.
 
 See the tracked [static panel manifest](../../../examples/static-panel/shell.json), [`PanelSurface`](PanelSurface.md), and [`OverlaySurface`](OverlaySurface.md).

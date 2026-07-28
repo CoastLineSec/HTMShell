@@ -27,6 +27,7 @@ use rustix::fd::BorrowedFd;
 use std::path::PathBuf;
 #[cfg(feature = "gpu-renderer")]
 use std::ptr::NonNull;
+use std::sync::Arc;
 use std::time::Instant;
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
@@ -399,6 +400,8 @@ pub struct ManifestHostSummary {
     pub manifest_parse_count: u32,
     pub manifest_parse_us: u64,
     pub manifest_validation_us: u64,
+    pub package_snapshot_generation: u64,
+    pub package_count: usize,
     pub layer_shell_version: u32,
     pub viewporter_advertised: bool,
     pub fractional_scale_advertised: bool,
@@ -627,6 +630,7 @@ struct ShellSurfaceState {
     template_id: String,
     instance_generation: u64,
     document: Option<PathBuf>,
+    package_snapshot: Option<Arc<htm_runtime::PackageSnapshot>>,
     instance_context: Option<(String, String)>,
     kind: SurfaceKind,
     package: PathBuf,
@@ -966,6 +970,7 @@ impl State {
             template_id: template_id.into(),
             instance_generation: self.next_instance_generation,
             document,
+            package_snapshot: None,
             instance_context,
             kind,
             package,
@@ -1583,9 +1588,9 @@ impl State {
         let panel_preset = panel
             .panel()
             .ok_or_else(|| ShellHostError::Manifest("panel preset is invalid".into()))?;
-        let mut panel_runtime = LiveDocument::load_surface_document(
-            options.manifest.package_root(),
-            panel.document(),
+        let mut panel_runtime = LiveDocument::load_surface_snapshot(
+            Arc::clone(options.manifest.snapshot()),
+            &panel,
             LiveDocumentKind::Panel,
             1,
             panel_preset.thickness,
@@ -1604,9 +1609,9 @@ impl State {
         )?;
         self.next_instance_generation = self.next_instance_generation.saturating_add(1);
         let overlay_generation = self.next_instance_generation;
-        let mut overlay_runtime = LiveDocument::load_surface_document(
-            options.manifest.package_root(),
-            overlay.document(),
+        let mut overlay_runtime = LiveDocument::load_surface_snapshot(
+            Arc::clone(options.manifest.snapshot()),
+            &overlay,
             LiveDocumentKind::TransientOverlay,
             1,
             1,
@@ -1640,6 +1645,7 @@ impl State {
         if let Some(index) = self.surface_index_by_owner(panel_owner) {
             self.surfaces[index].instance_generation = panel_generation;
             self.surfaces[index].runtime = Some(panel_runtime);
+            self.surfaces[index].package_snapshot = Some(Arc::clone(options.manifest.snapshot()));
         }
         if let Err(error) = self.create_surface_for_output(
             qh,
@@ -1661,6 +1667,7 @@ impl State {
         if let Some(index) = self.surface_index_by_owner(overlay_owner) {
             self.surfaces[index].instance_generation = overlay_generation;
             self.surfaces[index].runtime = Some(overlay_runtime);
+            self.surfaces[index].package_snapshot = Some(Arc::clone(options.manifest.snapshot()));
         }
         self.output_instances.push(OutputShellInstance {
             key,
@@ -2646,13 +2653,40 @@ impl State {
         }
         if surface_state.runtime.is_none() {
             let mut runtime = match &surface_state.document {
-                Some(document) => LiveDocument::load_surface_document(
-                    &surface_state.package,
-                    document,
-                    surface_state.kind.document_kind(),
-                    logical_width,
-                    logical_height,
-                )?,
+                Some(document) => {
+                    if let Some(snapshot) = &surface_state.package_snapshot {
+                        let template = snapshot
+                            .root_manifest()
+                            .and_then(|manifest| {
+                                manifest
+                                    .surfaces
+                                    .iter()
+                                    .find(|template| template.id() == surface_state.template_id)
+                            })
+                            .ok_or_else(|| {
+                                ShellHostError::Manifest(format!(
+                                    "surface template `{}` is absent from package snapshot {}",
+                                    surface_state.template_id,
+                                    snapshot.generation().get()
+                                ))
+                            })?;
+                        LiveDocument::load_surface_snapshot(
+                            Arc::clone(snapshot),
+                            template,
+                            surface_state.kind.document_kind(),
+                            logical_width,
+                            logical_height,
+                        )?
+                    } else {
+                        LiveDocument::load_surface_document(
+                            &surface_state.package,
+                            document,
+                            surface_state.kind.document_kind(),
+                            logical_width,
+                            logical_height,
+                        )?
+                    }
+                }
                 None => LiveDocument::load_surface(
                     &surface_state.package,
                     surface_state.kind.document_kind(),
@@ -4306,6 +4340,8 @@ impl State {
             manifest_parse_count: options.manifest.parse_count(),
             manifest_parse_us: measurements.parse_us,
             manifest_validation_us: measurements.validation_us,
+            package_snapshot_generation: options.manifest.snapshot().generation().get(),
+            package_count: options.manifest.snapshot().packages().len(),
             layer_shell_version: self.layer_shell_version,
             viewporter_advertised: self.viewporter_advertised,
             fractional_scale_advertised: self.fractional_scale_advertised,

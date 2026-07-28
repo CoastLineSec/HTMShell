@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "package": {
+    "id": "dev.coastlinesec.htmshell.shared",
+    "kind": "library",
+    "version": "1.0.0"
+  },
+  "dependencies": []
+}

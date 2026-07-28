@@ -1,0 +1,38 @@
+{
+  "version": 2,
+  "package": {
+    "id": "dev.coastlinesec.htmshell.package-graph",
+    "kind": "shell",
+    "version": "1.0.0"
+  },
+  "dependencies": [
+    {
+      "alias": "controls",
+      "id": "dev.coastlinesec.htmshell.controls",
+      "path": "packages/controls"
+    },
+    {
+      "alias": "shared",
+      "id": "dev.coastlinesec.htmshell.shared",
+      "path": "packages/controls/shared"
+    }
+  ],
+  "surfaces": [
+    {
+      "id": "panel",
+      "kind": "panel",
+      "document": "panel.html",
+      "outputs": "all",
+      "edge": "top",
+      "thickness": 52,
+      "reserveSpace": true
+    },
+    {
+      "id": "overlay",
+      "kind": "overlay",
+      "document": "overlay.html",
+      "outputs": "all",
+      "initiallyOpen": false
+    }
+  ]
+}

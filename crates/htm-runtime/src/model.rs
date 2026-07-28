@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct ViewportSpec {
@@ -214,4 +215,5 @@ pub struct ExperimentRun {
     pub artifacts: Vec<Artifact>,
     pub measurements: RunMeasurements,
     pub package_root: PathBuf,
+    pub package_snapshot: Arc<crate::PackageSnapshot>,
 }

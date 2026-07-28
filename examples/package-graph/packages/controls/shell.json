@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "package": {
+    "id": "dev.coastlinesec.htmshell.controls",
+    "kind": "library",
+    "version": "1.0.0"
+  },
+  "dependencies": [
+    {
+      "alias": "shared",
+      "id": "dev.coastlinesec.htmshell.shared",
+      "path": "shared"
+    }
+  ]
+}

@@ -143,4 +143,4 @@ cargo run -p htmshell-live --release --locked -- \
 
 Each eligible output receives an independent panel and overlay document. The panel reserves its configured height. Clicking its button opens only the overlay on that output.
 
-See [`ShellManifest`](../types/HTMShell/ShellManifest.md), [`PanelSurface`](../types/HTMShell/PanelSurface.md), [`OverlaySurface`](../types/HTMShell/OverlaySurface.md), [`state-text`](../types/HTMShell.Elements/state-text.md), and [`action-button`](../types/HTMShell.Elements/action-button.md).
+See [local packages](packages.md), [`ShellManifest`](../types/HTMShell/ShellManifest.md), [`PanelSurface`](../types/HTMShell/PanelSurface.md), [`OverlaySurface`](../types/HTMShell/OverlaySurface.md), [`state-text`](../types/HTMShell.Elements/state-text.md), and [`action-button`](../types/HTMShell.Elements/action-button.md).
