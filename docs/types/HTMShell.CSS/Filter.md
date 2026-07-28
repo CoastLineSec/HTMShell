@@ -12,7 +12,9 @@ filter: drop-shadow(4px 6px 3px rgb(0 0 0 / 60%));
 filter: grayscale(100%) contrast(1.1);
 ```
 
-`none` is an empty list. Functions run left to right and may repeat. A list contains at most 16 functions and at most one `drop-shadow()`. The normalized declaration limit is 1,024 UTF-8 bytes.
+`none` is an empty list. Functions run left to right and may repeat. A list contains at most 16 functions and at most one `drop-shadow()`. The canonical normalized semantic limit is 1,024 UTF-8 bytes.
+
+One document may contain at most 256 distinct normalized foreground-filter declarations. One surface may contain at most 256 active filtered elements, with at most eight filtered ancestors. Ordered spatial expansion is limited to 512 logical pixels on each side. Effect images are limited to 4,096 physical pixels per dimension and 64 MiB each, with a 256 MiB effect-image budget per surface. The Vello backend uses at most 32 finite effect-pipeline variants.
 
 HTMShell renders `blur()`, `brightness()`, `contrast()`, `drop-shadow()`, `grayscale()`, `hue-rotate()`, `invert()`, `opacity()`, `saturate()`, and `sepia()` through the CPU reference compositor. URL filters, a second drop shadow, spread, inset shadows, and `backdrop-filter` are unsupported.
 

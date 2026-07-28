@@ -29,7 +29,7 @@ Brightness, contrast, and saturation accept nonnegative numbers or percentages u
 
 Blur accepts a nonnegative CSS length in `px`, `in`, `cm`, `mm`, `q`, `pt`, `pc`, `em`, `rem`, `ex`, `ch`, `vw`, `vh`, `vmin`, or `vmax`. Stylo resolves the computed value to logical pixels before rendering. Percentages are invalid. The value is a Gaussian standard deviation with a maximum of 64 logical pixels. `blur(0)` is an identity, and repeated blur functions execute as separate stages.
 
-A filter list may contain at most 16 functions. Its normalized declaration may contain at most 1,024 UTF-8 bytes. An unknown function, URL filter, unsupported unit, second drop shadow, excessive value, or excessive list invalidates the complete declaration. No valid prefix is applied by itself.
+A filter list may contain at most 16 functions. Its canonical normalized semantics may contain at most 1,024 UTF-8 bytes. One document may contain at most 256 distinct normalized foreground-filter declarations, one surface may contain at most 256 active filtered elements, and filtered ancestry is limited to eight levels. Ordered spatial expansion is limited to 512 logical pixels on each side. An unknown function, URL filter, unsupported unit, second drop shadow, excessive value, or excessive list invalidates the complete declaration. No valid prefix is applied by itself.
 
 ## Rendering model
 
@@ -59,7 +59,7 @@ All ten functions in this bounded foreground profile render through the CPU refe
 
 Foreground filters are static. Animation and transitions are not implemented.
 
-Filter layers are bounded to 4,096 physical pixels per dimension and 64 MiB per image, with at most 256 MiB of effect images for one surface. An executable filter that cannot obtain its bounded layer reports a rendering error rather than silently drawing unfiltered content.
+Filter layers are bounded to 4,096 physical pixels per dimension and 64 MiB per image, with at most 256 MiB of effect images for one surface. The Vello effect implementation uses no more than 32 finite pipeline variants. An executable filter that cannot obtain its bounded layer reports a rendering error rather than silently drawing unfiltered content.
 
 Filters can reduce contrast, obscure focus indicators, or make text difficult to read. Keep labels readable outside decorative filtered regions and preserve sufficient contrast.
 

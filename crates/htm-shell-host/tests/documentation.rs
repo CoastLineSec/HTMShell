@@ -61,7 +61,7 @@ fn markdown_files(root: &Path) -> Vec<PathBuf> {
 
 fn public_reference_files(root: &Path) -> Vec<PathBuf> {
     let docs = root.join("docs");
-    let mut files = vec![docs.join("README.md")];
+    let mut files = vec![root.join("README.md"), docs.join("README.md")];
     files.extend(markdown_files(&docs.join("architecture")));
     files.extend(markdown_files(&docs.join("guide")));
     files.extend(markdown_files(&docs.join("types")));
@@ -207,12 +207,16 @@ fn public_documentation_style_is_safe_and_page_shape_is_stable() {
 #[test]
 fn foreground_filter_docs_and_example_cover_cpu_and_native_vello_boundaries() {
     let root = workspace_root();
+    let readme = fs::read_to_string(root.join("README.md")).unwrap();
+    let guide_index = fs::read_to_string(root.join("docs/guide/README.md")).unwrap();
     let guide = fs::read_to_string(root.join("docs/guide/visual-effects.md")).unwrap();
+    let architecture = fs::read_to_string(root.join("docs/architecture/renderer.md")).unwrap();
     let reference = read_joined(&markdown_files(&root.join("docs/types/HTMShell.CSS")));
     let html = fs::read_to_string(root.join("examples/color-filters/index.html")).unwrap();
     let css = fs::read_to_string(root.join("examples/color-filters/style.css")).unwrap();
     let svg = fs::read_to_string(root.join("examples/color-filters/assets/palette.svg")).unwrap();
-    let public = format!("{guide}\n{reference}\n{html}\n{css}");
+    let public =
+        format!("{readme}\n{guide_index}\n{guide}\n{architecture}\n{reference}\n{html}\n{css}");
 
     for function in [
         "blur()",
@@ -256,6 +260,11 @@ fn foreground_filter_docs_and_example_cover_cpu_and_native_vello_boundaries() {
         "current-stage alpha",
         "Fractional physical offsets",
         "Vello remains optional and experimental",
+        "256 distinct normalized foreground-filter declarations",
+        "256 active filtered elements",
+        "eight filtered ancestors",
+        "512 logical pixels on each side",
+        "32 finite",
     ] {
         assert!(
             public.contains(statement),
@@ -266,6 +275,11 @@ fn foreground_filter_docs_and_example_cover_cpu_and_native_vello_boundaries() {
         "native GPU backdrop",
         "renderer selector",
         "HTMSHELL_RENDERER",
+        "foreground and\nbackdrop filters currently use CPU fallback",
+        "color and blur subset",
+        "blur pending on GPU",
+        "drop shadow pending on GPU",
+        "foreground filters always use CPU fallback",
     ] {
         assert!(
             !public.contains(forbidden),
@@ -312,6 +326,30 @@ fn foreground_filter_docs_and_example_cover_cpu_and_native_vello_boundaries() {
     assert!(svg.contains("<svg"));
     for forbidden in ["backdrop-filter", "<script"] {
         assert!(!format!("{html}\n{css}").contains(forbidden));
+    }
+
+    let effect_source =
+        fs::read_to_string(root.join("crates/htm-runtime/src/render/effects.rs")).unwrap();
+    for constant in [
+        "MAX_FOREGROUND_EFFECT_FUNCTIONS: usize = 16",
+        "MAX_FOREGROUND_EFFECT_SERIALIZED_BYTES: usize = 1_024",
+        "MAX_FILTER_DECLARATIONS_PER_DOCUMENT: usize = 256",
+        "MAX_ACTIVE_FILTERED_ELEMENTS_PER_SURFACE: usize = 256",
+        "MAX_FILTER_NESTING_DEPTH: usize = 8",
+        "MAX_FOREGROUND_EFFECT_FACTOR: f32 = 8.0",
+        "MAX_HUE_ROTATION_TURNS: f32 = 100.0",
+        "MAX_FOREGROUND_BLUR_SIGMA: f32 = 64.0",
+        "MAX_FOREGROUND_SHADOW_OFFSET: f32 = 256.0",
+        "MAX_FOREGROUND_EFFECT_EXPANSION: f32 = 512.0",
+        "MAX_EFFECT_LAYER_DIMENSION: u32 = 4_096",
+        "MAX_EFFECT_IMAGE_BYTES: usize = 64 * 1024 * 1024",
+        "MAX_EFFECT_SURFACE_BYTES: usize = 256 * 1024 * 1024",
+        "MAX_EFFECT_PIPELINE_VARIANTS: usize = 32",
+    ] {
+        assert!(
+            effect_source.contains(constant),
+            "foreground documentation validation is stale relative to {constant}"
+        );
     }
 
     htm_runtime::run_package_with_options(

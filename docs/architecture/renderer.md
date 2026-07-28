@@ -50,7 +50,10 @@ Identity-only lists skip unnecessary layers and shaders.
 Backdrop filters remain unsupported. GPU execution failures request complete
 CPU fallback so an accepted foreground list is never presented without its
 effects. GPU effect textures, parameter buffers, and device-generation-scoped
-pipelines obey the renderer's bounded effect limits.
+pipelines obey the renderer's bounded effect limits: 256 active filtered
+elements per surface, eight filtered ancestors, 4,096 physical pixels per
+effect-layer dimension, 64 MiB per image, 256 MiB per surface, and 32 finite
+pipeline variants.
 
 ## Damage and presentation
 
