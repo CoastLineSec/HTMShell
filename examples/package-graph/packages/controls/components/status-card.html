@@ -24,5 +24,25 @@
       component="shared.badge-label"
       input-label="Nested through a direct library alias"
       input-tone="active"></htm-use>
+    <p class="slot-before">Projected content:</p>
+    <slot>
+      <p class="slot-fallback">No caller content was supplied.</p>
+    </slot>
+    <p class="slot-after">End projected content.</p>
   </article>
+</template>
+
+<template data-htm-component="required-frame">
+  <section class="required-frame">
+    <strong>Required content</strong>
+    <slot></slot>
+  </section>
+</template>
+
+<template data-htm-component="projected-label">
+  <htm-use component="status-card" input-label="Nested caller scope">
+    <p class="projected-label">
+      <span data-htm-element="state-text" data-htm-bind="input.label"></span>
+    </p>
+  </htm-use>
 </template>

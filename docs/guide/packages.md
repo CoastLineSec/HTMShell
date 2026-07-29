@@ -39,6 +39,12 @@ The `shell.json` manifest uses a `package` object and an ordered `dependencies` 
           "type": "string",
           "required": true
         }
+      ],
+      "slots": [
+        {
+          "name": "default",
+          "required": false
+        }
       ]
     }
   ],
@@ -87,7 +93,7 @@ Package versions are optional SemVer 2.0.0 metadata. HTMShell records a declared
 
 Unknown fields are rejected. Library manifests must omit `surfaces`.
 
-The optional ordered `components` array is accepted only by schema version 2. Each entry has a `name`, a package-relative `source`, and an optional ordered `inputs` array. The manifest export and input tables are authoritative: every exported name must match exactly one inert template declaration, and every declaration must be exported. Inputs are finite typed literals resolved before publication. See [components](components.md).
+The optional ordered `components` array is accepted only by schema version 2. Each entry has a `name`, a package-relative `source`, an optional ordered `inputs` array, and an optional one-entry default `slots` array. The manifest export, input, and slot tables are authoritative: every exported name must match exactly one inert template declaration, and every declaration must be exported. Inputs and default-slot projections resolve before publication. See [components](components.md).
 
 ## Package IDs and aliases
 
@@ -159,8 +165,9 @@ A manifestless headless directory containing `index.html` remains valid and uses
 | Supplied inputs per invocation | 64 |
 | String input | 4,096 UTF-8 bytes |
 | Supplied literal bytes per invocation | 16 KiB |
+| Default slots per component | 1 |
 
-Manifest, package, component, input, and graph errors reject the candidate rather than truncating it. Component definitions and literal typed inputs are supported, but slots, component-local IDs, component-scoped CSS, dynamic state or action bindings, repeat integration, component-owned external resources, and hot reload are not implemented.
+Manifest, package, component, input, slot, and graph errors reject the candidate rather than truncating it. Component definitions, literal typed inputs, and one caller-owned default slot are supported. Named slots, component-local IDs, component-scoped CSS, dynamic state or action bindings, repeat integration, component-owned external resources, and hot reload are not implemented.
 
 See the [package graph example](../../examples/package-graph/shell.json), the [`HTMShell.Package`](../types/HTMShell.Package/README.md) reference, and the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference.
 

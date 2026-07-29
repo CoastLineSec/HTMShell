@@ -2,7 +2,7 @@
 
 **Kind:** Declarative composition | **Status:** Experimental
 
-`HTMShell.Component` describes manifest-owned inert templates, literal typed inputs, explicit references, and deterministic component uses in schema version 2 packages.
+`HTMShell.Component` describes manifest-owned inert templates, literal typed inputs, one default content slot, explicit references, and deterministic component uses in schema version 2 packages.
 
 ## Component definition
 
@@ -20,13 +20,19 @@ A package exports a definition from its ordered manifest `components` table:
           "type": "string",
           "required": true
         }
+      ],
+      "slots": [
+        {
+          "name": "default",
+          "required": false
+        }
       ]
     }
   ]
 }
 ```
 
-The entry has `name`, `source`, and an optional ordered `inputs` array. Shell and library packages may export definitions. Schema version 1 and manifestless headless packages cannot.
+The entry has `name`, `source`, an optional ordered `inputs` array, and an optional one-entry `slots` array. Shell and library packages may export definitions. Schema version 1 and manifestless headless packages cannot.
 
 The source declares the exported definition exactly once:
 
@@ -34,6 +40,7 @@ The source declares the exported definition exactly once:
 <template data-htm-component="status-card">
   <article class="status-card">
     <strong>Ready</strong>
+    <slot><p>No content</p></slot>
   </article>
 </template>
 ```
@@ -78,7 +85,7 @@ References are resolved before publication. Unknown aliases, unknown exports, di
 </htm-use>
 ```
 
-It requires one `component` attribute. Its only additional attributes are `input-<declared-name>` literals, and it permits only whitespace and comments as children. Unprefixed inputs, undeclared inputs, host attributes, and slots are invalid. Invalid uses reject the complete package candidate before rendering.
+It requires one `component` attribute. Its only additional attributes are `input-<declared-name>` literals. Renderable children are accepted only for a target that declares the default slot. Unprefixed inputs, undeclared inputs, host attributes, named slot attributes, and content for a component without a slot are invalid. Invalid uses reject the complete package candidate before rendering.
 
 Each use creates an internal `ComponentInstance` host with one resolved definition and cloned normalized template children. The source is not reparsed and no string substitution occurs.
 
@@ -88,7 +95,7 @@ The host has no visual box, paint, input region, accessibility node, or public C
 
 A definition belongs to one immutable package snapshot. Its logical identity contains the package snapshot generation, owning package ID, and component name. Its source path is diagnostic ownership metadata, not identity.
 
-An instance identity additionally contains its document generation, parent component instance when nested, invocation position, and finite host role. Descendant provenance contains the instance identity, template source-node ordinal, and fresh DOM slot generation. Separate uses and separate outputs cannot alias identities. Input values have a separate deterministic semantic version and never define instance or descendant identity.
+An instance identity additionally contains its document generation, parent component instance when nested, invocation position, and finite host role. Descendant provenance contains the instance identity, template source-node ordinal, and fresh DOM slot generation. Separate uses and separate outputs cannot alias identities. Input and slot content have separate deterministic semantic versions and never define instance or descendant identity.
 
 Library definitions do not own or create surfaces. Loading or instantiating this static profile creates no native-service demand, state subscription, action lookup, stylesheet load, asset load, external resource, renderer object, or Wayland object.
 
@@ -100,14 +107,16 @@ Definitions cannot contain:
 
 - action, clock, repeat, range, peak, or contextual-repeat declarations;
 - arbitrary state, action, service, or resource-reference behavior;
-- slots or invocation children;
+- named slots, caller `slot` attributes, undeclared or duplicate slots, and invocation children for a component without a slot;
 - component-local IDs or local-reference attributes;
 - scripts, component style elements, stylesheet links, `@import`, or `url()`;
 - external images, SVG references, fonts, media, or other component-owned resources.
 
 The existing `state-text`, `state-token`, and `state-value` declarations may consume compatible values from the nearest `input.*` host namespace. They do not create process-global state subscriptions or native-service demand. See [component inputs](Input.md).
 
-Component-scoped CSS, `:host`, Shadow DOM, slots, dynamic bindings, local state, action exports, repeat integration, external component resources, and hot reload are unavailable.
+One standard `slot` insertion point is available when the manifest declares the default slot. Caller children retain caller input, state, action, ID, resource, and CSS ownership. Fallback children belong to the callee. The internal slot boundary creates no box or paint. See [default slot](Slot.md).
+
+Component-scoped CSS, `:host`, Shadow DOM, named slots, dynamic bindings, local state, action exports, repeat integration, external component resources, and hot reload are unavailable.
 
 ## Limits and errors
 
@@ -123,9 +132,10 @@ Component-scoped CSS, `:host`, Shadow DOM, slots, dynamic bindings, local state,
 | Supplied inputs per use | 64 |
 | String input | 4,096 UTF-8 bytes |
 | Supplied literal bytes per use | 16 KiB |
+| Default slots per component | 1 |
 
 All definitions, dependencies, and root invocations validate in the package-candidate transaction. Missing or duplicate declarations, invalid names, invalid sources, unknown references, cycles, forbidden content, and limit failures reject the candidate. No partial definition table or subtree is published, and a failed replacement retains the last successfully published snapshot.
 
 Headless and live loading use the same immutable definitions and prepared root documents. Multi-output live loading shares definition data but creates output-local document, instance, descendant, scene, and surface identities.
 
-See [components](../../guide/components.md), [component inputs](Input.md), [local packages](../../guide/packages.md), and [`HTMShell.Package`](../HTMShell.Package/README.md).
+See [components](../../guide/components.md), [component inputs](Input.md), [default slot](Slot.md), [local packages](../../guide/packages.md), and [`HTMShell.Package`](../HTMShell.Package/README.md).

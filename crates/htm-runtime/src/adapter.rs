@@ -115,6 +115,9 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
     let component_instances = instantiated.instances;
     let component_descendants = instantiated.descendants;
     let component_input_consumers = instantiated.input_consumers;
+    let component_slot_projections = instantiated.slot_projections;
+    let projected_component_nodes = instantiated.projected_nodes;
+    let component_fallback_nodes = instantiated.fallback_nodes;
     document.set_incremental_layout(true);
     validate_document_limits(&document)?;
     let html_parse_ms = elapsed_ms(parse_started);
@@ -301,6 +304,9 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
         component_instances,
         component_descendants,
         component_input_consumers,
+        component_slot_projections,
+        projected_component_nodes,
+        component_fallback_nodes,
     })
 }
 

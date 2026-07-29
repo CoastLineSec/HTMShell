@@ -10,10 +10,11 @@ use std::time::Instant;
 
 use crate::component::{
     ComponentCatalog, ComponentExport, ComponentInputDeclaration, ComponentInputName,
-    ComponentInputType, ComponentName, ComponentValidationTotals,
-    MAX_COMPONENT_EXPORTS_PER_PACKAGE, MAX_COMPONENT_INPUTS, MAX_COMPONENT_SOURCE_BYTES,
-    PreparedDocument, build_component_catalog, parse_component_input_default,
-    parse_component_source, prepare_root_document,
+    ComponentInputType, ComponentName, ComponentSlotDeclaration, ComponentSlotName,
+    ComponentValidationTotals, ExpectedComponentDefinition, MAX_COMPONENT_EXPORTS_PER_PACKAGE,
+    MAX_COMPONENT_INPUTS, MAX_COMPONENT_SLOTS, MAX_COMPONENT_SOURCE_BYTES, PreparedDocument,
+    build_component_catalog, parse_component_input_default, parse_component_source,
+    prepare_root_document,
 };
 
 pub const PACKAGE_MANIFEST_FILE: &str = "shell.json";
@@ -127,6 +128,26 @@ pub enum PackageErrorKind {
     ComponentStateReferenceInputNotSupported,
     ComponentActionReferenceInputNotSupported,
     ComponentResourceReferenceInputNotSupported,
+    InvalidComponentSlotDeclaration,
+    UnsupportedNamedComponentSlot,
+    DuplicateDefaultComponentSlot,
+    ComponentSlotDeclarationLimit,
+    ComponentSlotDefinitionMissing,
+    ComponentSlotDefinitionDuplicate,
+    ComponentSlotDefinitionUndeclared,
+    ComponentSlotAttributesUnsupported,
+    ComponentSlotNestedFallback,
+    ComponentSlotOutsideDefinition,
+    ComponentRequiredSlotFallback,
+    ComponentRequiredSlotContentMissing,
+    ComponentInvocationContentWithoutSlot,
+    ComponentNamedSlotAttributeUnsupported,
+    ComponentProjectedRepeatNotSupported,
+    ComponentSlotAssignmentDuplicate,
+    ComponentSlotProjectionReentry,
+    ComponentSlotProjectionLimit,
+    ComponentSlotCallerScopeInvalid,
+    ComponentSlotProjectionUnresolved,
     DocumentDepthLimit,
     PermissionDenied,
     SpecialFile,
@@ -889,6 +910,7 @@ struct ComponentExportDiagnostic<'a> {
     name: &'a str,
     source: &'a str,
     inputs: Vec<ComponentInputDeclarationDiagnostic>,
+    default_slot: Option<ComponentSlotDeclarationDiagnostic>,
 }
 
 #[derive(Debug, Serialize)]
@@ -905,7 +927,23 @@ struct ComponentDefinitionDiagnostic {
     source: String,
     source_nodes: usize,
     inputs: Vec<ComponentInputDeclarationDiagnostic>,
+    default_slot: Option<ComponentSlotDefinitionDiagnostic>,
     resolved_references: Vec<ComponentReferenceDiagnostic>,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentSlotDeclarationDiagnostic {
+    name: &'static str,
+    required: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentSlotDefinitionDiagnostic {
+    name: &'static str,
+    required: bool,
+    source_ordinal: u32,
+    fallback_nodes: usize,
+    fallback_version: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -924,6 +962,39 @@ struct PreparedDocumentDiagnostic<'a> {
     instance_paths: &'a [String],
     inputs: Vec<ComponentInstanceInputDiagnostic>,
     consumers: Vec<ComponentInputConsumerDiagnostic>,
+    projections: Vec<ComponentSlotProjectionDiagnostic>,
+    projected_nodes: Vec<ProjectedNodeDiagnostic>,
+    fallback_nodes: Vec<FallbackNodeDiagnostic>,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentSlotProjectionDiagnostic {
+    identity: String,
+    slot_definition: String,
+    outcome: &'static str,
+    caller: String,
+    assigned_nodes: usize,
+    fallback_nodes: usize,
+    semantic_version: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectedNodeDiagnostic {
+    projection: String,
+    caller: String,
+    caller_source_ordinal: u32,
+    projected_node_ordinal: u32,
+    dom_slot: usize,
+    dom_slot_generation: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct FallbackNodeDiagnostic {
+    projection: String,
+    instance: String,
+    fallback_source_ordinal: u32,
+    dom_slot: usize,
+    dom_slot_generation: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -956,7 +1027,7 @@ impl<'a> PackageGraphDiagnostic<'a> {
             prepared_root_documents.extend(manifest.surfaces.iter().filter_map(|surface| {
                 surface.prepared_document().map(|prepared| {
                     let stats = prepared.stats();
-                    let (inputs, consumers) = prepared_input_diagnostics(snapshot, prepared);
+                    let diagnostics = prepared_component_diagnostics(snapshot, prepared);
                     PreparedDocumentDiagnostic {
                         logical_path: prepared.logical_path(),
                         component_instances: stats.component_instances,
@@ -964,8 +1035,11 @@ impl<'a> PackageGraphDiagnostic<'a> {
                         expanded_nodes: stats.expanded_nodes,
                         maximum_nesting_depth: stats.maximum_nesting_depth,
                         instance_paths: prepared.logical_instance_paths(),
-                        inputs,
-                        consumers,
+                        inputs: diagnostics.inputs,
+                        consumers: diagnostics.consumers,
+                        projections: diagnostics.projections,
+                        projected_nodes: diagnostics.projected_nodes,
+                        fallback_nodes: diagnostics.fallback_nodes,
                     }
                 })
             }));
@@ -979,7 +1053,7 @@ impl<'a> PackageGraphDiagnostic<'a> {
                 .iter()
                 .any(|entry| entry.logical_path == prepared.logical_path())
             {
-                let (inputs, consumers) = prepared_input_diagnostics(snapshot, prepared);
+                let diagnostics = prepared_component_diagnostics(snapshot, prepared);
                 prepared_root_documents.push(PreparedDocumentDiagnostic {
                     logical_path: prepared.logical_path(),
                     component_instances: stats.component_instances,
@@ -987,8 +1061,11 @@ impl<'a> PackageGraphDiagnostic<'a> {
                     expanded_nodes: stats.expanded_nodes,
                     maximum_nesting_depth: stats.maximum_nesting_depth,
                     instance_paths: prepared.logical_instance_paths(),
-                    inputs,
-                    consumers,
+                    inputs: diagnostics.inputs,
+                    consumers: diagnostics.consumers,
+                    projections: diagnostics.projections,
+                    projected_nodes: diagnostics.projected_nodes,
+                    fallback_nodes: diagnostics.fallback_nodes,
                 });
             }
         }
@@ -1021,6 +1098,12 @@ impl<'a> PackageGraphDiagnostic<'a> {
                             name: export.name().as_str(),
                             source: export.source(),
                             inputs: input_declaration_diagnostics(export.inputs()),
+                            default_slot: export.default_slot().map(|slot| {
+                                ComponentSlotDeclarationDiagnostic {
+                                    name: slot.name().as_str(),
+                                    required: slot.required(),
+                                }
+                            }),
                         })
                         .collect(),
                 })
@@ -1038,6 +1121,15 @@ impl<'a> PackageGraphDiagnostic<'a> {
                         source: definition.logical_source().to_owned(),
                         source_nodes: definition.source_node_count(),
                         inputs: input_declaration_diagnostics(definition.inputs()),
+                        default_slot: definition.default_slot().map(|slot| {
+                            ComponentSlotDefinitionDiagnostic {
+                                name: slot.declaration().name().as_str(),
+                                required: slot.declaration().required(),
+                                source_ordinal: slot.source_ordinal(),
+                                fallback_nodes: slot.fallback_node_count(),
+                                fallback_version: slot.fallback_version().to_owned(),
+                            }
+                        }),
                         resolved_references: definition
                             .resolved_references()
                             .iter()
@@ -1070,13 +1162,18 @@ fn input_declaration_diagnostics(
         .collect()
 }
 
-fn prepared_input_diagnostics(
+struct PreparedComponentDiagnostics {
+    inputs: Vec<ComponentInstanceInputDiagnostic>,
+    consumers: Vec<ComponentInputConsumerDiagnostic>,
+    projections: Vec<ComponentSlotProjectionDiagnostic>,
+    projected_nodes: Vec<ProjectedNodeDiagnostic>,
+    fallback_nodes: Vec<FallbackNodeDiagnostic>,
+}
+
+fn prepared_component_diagnostics(
     snapshot: &PackageSnapshot,
     prepared: &PreparedDocument,
-) -> (
-    Vec<ComponentInstanceInputDiagnostic>,
-    Vec<ComponentInputConsumerDiagnostic>,
-) {
+) -> PreparedComponentDiagnostics {
     let Ok(instantiated) = snapshot.instantiate_document(
         prepared,
         0,
@@ -1085,7 +1182,13 @@ fn prepared_input_diagnostics(
             ..Default::default()
         },
     ) else {
-        return (Vec::new(), Vec::new());
+        return PreparedComponentDiagnostics {
+            inputs: Vec::new(),
+            consumers: Vec::new(),
+            projections: Vec::new(),
+            projected_nodes: Vec::new(),
+            fallback_nodes: Vec::new(),
+        };
     };
     let instance_paths: BTreeMap<_, _> = instantiated
         .instances
@@ -1128,7 +1231,49 @@ fn prepared_input_diagnostics(
             source_ordinal: consumer.template_source_ordinal(),
         })
         .collect();
-    (inputs, consumers)
+    let projections = instantiated
+        .slot_projections
+        .iter()
+        .map(|projection| ComponentSlotProjectionDiagnostic {
+            identity: projection.id().deterministic_string(),
+            slot_definition: projection.id().slot_definition().deterministic_string(),
+            outcome: projection.outcome().as_str(),
+            caller: projection.source().deterministic_string(),
+            assigned_nodes: projection.assigned_node_count(),
+            fallback_nodes: projection.fallback_node_count(),
+            semantic_version: projection.version().deterministic_string().to_owned(),
+        })
+        .collect();
+    let projected_nodes = instantiated
+        .projected_nodes
+        .iter()
+        .map(|node| ProjectedNodeDiagnostic {
+            projection: node.projection_id().deterministic_string(),
+            caller: node.caller().deterministic_string(),
+            caller_source_ordinal: node.caller_source_ordinal(),
+            projected_node_ordinal: node.projected_node_ordinal(),
+            dom_slot: node.dom_slot(),
+            dom_slot_generation: node.dom_slot_generation(),
+        })
+        .collect();
+    let fallback_nodes = instantiated
+        .fallback_nodes
+        .iter()
+        .map(|node| FallbackNodeDiagnostic {
+            projection: node.projection_id().deterministic_string(),
+            instance: node.instance_id().deterministic_string(),
+            fallback_source_ordinal: node.fallback_source_ordinal(),
+            dom_slot: node.dom_slot(),
+            dom_slot_generation: node.dom_slot_generation(),
+        })
+        .collect();
+    PreparedComponentDiagnostics {
+        inputs,
+        consumers,
+        projections,
+        projected_nodes,
+        fallback_nodes,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1268,6 +1413,8 @@ struct RawComponentExport {
     source: String,
     #[serde(default)]
     inputs: Vec<RawComponentInput>,
+    #[serde(default)]
+    slots: Vec<RawComponentSlot>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1278,6 +1425,13 @@ struct RawComponentInput {
     input_type: String,
     required: Option<bool>,
     default: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawComponentSlot {
+    name: String,
+    required: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1806,7 +1960,7 @@ impl<'a> GraphBuilder<'a> {
             let mut source_order = Vec::new();
             let mut expected_by_source: BTreeMap<
                 String,
-                BTreeMap<ComponentName, Arc<[ComponentInputDeclaration]>>,
+                BTreeMap<ComponentName, ExpectedComponentDefinition>,
             > = BTreeMap::new();
             for export in package.components() {
                 if !expected_by_source.contains_key(export.source()) {
@@ -1815,7 +1969,13 @@ impl<'a> GraphBuilder<'a> {
                 expected_by_source
                     .entry(export.source().to_owned())
                     .or_default()
-                    .insert(export.name().clone(), export.inputs().to_vec().into());
+                    .insert(
+                        export.name().clone(),
+                        ExpectedComponentDefinition {
+                            inputs: export.inputs().to_vec().into(),
+                            default_slot: export.default_slot().cloned(),
+                        },
+                    );
             }
             let mut parsed_by_source = BTreeMap::new();
             for source in source_order {
@@ -2251,6 +2411,7 @@ fn validate_component_exports(
         let source = validate_component_source_path(&raw_export.source)
             .map_err(|error| error.in_package(owner.to_string()))?;
         let inputs = validate_component_inputs(raw_export.inputs, owner, &name)?;
+        let default_slot = validate_component_slots(raw_export.slots, owner, &name)?;
         if !names.insert(name.clone()) {
             return Err(PackageLoadError::new(
                 PackageErrorKind::DuplicateComponentExport,
@@ -2258,9 +2419,43 @@ fn validate_component_exports(
             )
             .in_package(owner.to_string()));
         }
-        exports.push(ComponentExport::new(name, source, inputs));
+        exports.push(ComponentExport::new(name, source, inputs, default_slot));
     }
     Ok(exports)
+}
+
+fn validate_component_slots(
+    raw: Vec<RawComponentSlot>,
+    owner: &PackageId,
+    component: &ComponentName,
+) -> Result<Option<ComponentSlotDeclaration>, PackageLoadError> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    for slot in &raw {
+        ComponentSlotName::parse(&slot.name)
+            .map_err(|error| error.in_package(owner.to_string()))?;
+    }
+    if raw.len() > MAX_COMPONENT_SLOTS {
+        return Err(PackageLoadError::new(
+            if raw.iter().all(|slot| slot.name == "default") {
+                PackageErrorKind::DuplicateDefaultComponentSlot
+            } else {
+                PackageErrorKind::ComponentSlotDeclarationLimit
+            },
+            format!(
+                "component `{component}` declares {} slots; limit is {}",
+                raw.len(),
+                MAX_COMPONENT_SLOTS
+            ),
+        )
+        .in_package(owner.to_string()));
+    }
+    let slot = raw.into_iter().next().expect("nonempty slot list");
+    let name = ComponentSlotName::parse(&slot.name)
+        .map_err(|error| error.in_package(owner.to_string()))?;
+    debug_assert_eq!(name, ComponentSlotName::Default);
+    Ok(Some(ComponentSlotDeclaration::new(slot.required)))
 }
 
 fn validate_component_inputs(
@@ -3246,7 +3441,7 @@ mod tests {
         fixture.write_root(
             &v2_shell("org.example.shell", None, "[]").replacen(
                 "\"dependencies\"",
-                "\"components\":[{\"name\":\"status-card\",\"source\":\"components/status-card.html\",\"slots\":[]}],\"dependencies\"",
+                "\"components\":[{\"name\":\"status-card\",\"source\":\"components/status-card.html\",\"styles\":[]}],\"dependencies\"",
                 1,
             ),
         );

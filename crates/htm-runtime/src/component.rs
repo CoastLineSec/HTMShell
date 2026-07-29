@@ -32,11 +32,13 @@ pub const MAX_COMPONENT_INPUT_NAME_BYTES: usize = 64;
 pub const MAX_COMPONENT_INPUT_STRING_BYTES: usize = 4_096;
 pub const MAX_COMPONENT_INPUT_LITERAL_BYTES: usize = 16 * 1_024;
 pub const MAX_COMPONENT_INPUT_ATTRIBUTES: usize = 64;
+pub const MAX_COMPONENT_SLOTS: usize = 1;
 
 const COMPONENT_ATTRIBUTE: &str = "data-htm-component";
 const BUILTIN_ATTRIBUTE: &str = "data-htm-element";
 const USE_ELEMENT: &str = "htm-use";
 const TEMPLATE_ELEMENT: &str = "template";
+const SLOT_ELEMENT: &str = "slot";
 const BIND_ATTRIBUTE: &str = "data-htm-bind";
 const FORMAT_ATTRIBUTE: &str = "data-htm-format";
 const STATE_ATTRIBUTE: &str = "data-htm-state";
@@ -612,6 +614,60 @@ impl fmt::Display for ComponentName {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComponentSlotName {
+    Default,
+}
+
+impl ComponentSlotName {
+    pub fn parse(value: &str) -> Result<Self, PackageLoadError> {
+        if value == "default" {
+            Ok(Self::Default)
+        } else {
+            Err(PackageLoadError::new(
+                PackageErrorKind::UnsupportedNamedComponentSlot,
+                format!(
+                    "component slot name `{value}` is not supported; only `default` is accepted"
+                ),
+            ))
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        "default"
+    }
+}
+
+impl fmt::Display for ComponentSlotName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentSlotDeclaration {
+    name: ComponentSlotName,
+    required: bool,
+}
+
+impl ComponentSlotDeclaration {
+    pub(crate) const fn new(required: bool) -> Self {
+        Self {
+            name: ComponentSlotName::Default,
+            required,
+        }
+    }
+
+    pub const fn name(&self) -> ComponentSlotName {
+        self.name
+    }
+
+    pub const fn required(&self) -> bool {
+        self.required
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ComponentReference {
     alias: Option<PackageAlias>,
@@ -679,6 +735,7 @@ pub struct ComponentExport {
     name: ComponentName,
     source: String,
     inputs: Arc<[ComponentInputDeclaration]>,
+    default_slot: Option<ComponentSlotDeclaration>,
 }
 
 impl ComponentExport {
@@ -686,11 +743,13 @@ impl ComponentExport {
         name: ComponentName,
         source: String,
         inputs: Vec<ComponentInputDeclaration>,
+        default_slot: Option<ComponentSlotDeclaration>,
     ) -> Self {
         Self {
             name,
             source,
             inputs: inputs.into(),
+            default_slot,
         }
     }
 
@@ -704,6 +763,10 @@ impl ComponentExport {
 
     pub fn inputs(&self) -> &[ComponentInputDeclaration] {
         &self.inputs
+    }
+
+    pub fn default_slot(&self) -> Option<&ComponentSlotDeclaration> {
+        self.default_slot.as_ref()
     }
 }
 
@@ -784,6 +847,90 @@ impl ComponentDefinitionId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentSlotDefinition {
+    declaration: ComponentSlotDeclaration,
+    source_ordinal: u32,
+    fallback_node_count: usize,
+    fallback_version: Arc<str>,
+}
+
+impl ComponentSlotDefinition {
+    pub fn declaration(&self) -> &ComponentSlotDeclaration {
+        &self.declaration
+    }
+
+    pub fn source_ordinal(&self) -> u32 {
+        self.source_ordinal
+    }
+
+    pub fn fallback_node_count(&self) -> usize {
+        self.fallback_node_count
+    }
+
+    pub fn fallback_version(&self) -> &str {
+        &self.fallback_version
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComponentSlotDefinitionId {
+    generation: PackageSnapshotGeneration,
+    definition: ComponentDefinitionKey,
+}
+
+impl ComponentSlotDefinitionId {
+    pub fn generation(&self) -> PackageSnapshotGeneration {
+        self.generation
+    }
+
+    pub fn definition(&self) -> &ComponentDefinitionKey {
+        &self.definition
+    }
+
+    pub const fn name(&self) -> ComponentSlotName {
+        ComponentSlotName::Default
+    }
+
+    pub fn deterministic_string(&self) -> String {
+        format!("{}@{}:slot.default", self.definition, self.generation.get())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ComponentSlotProjectionOutcome {
+    Assigned,
+    Fallback,
+    EmptyOptional,
+}
+
+impl ComponentSlotProjectionOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Assigned => "assigned",
+            Self::Fallback => "fallback",
+            Self::EmptyOptional => "empty-optional",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComponentSlotProjectionVersion(Arc<str>);
+
+impl ComponentSlotProjectionVersion {
+    pub fn deterministic_string(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ComponentProjectionPlan {
+    outcome: ComponentSlotProjectionOutcome,
+    assigned: Arc<[ComponentTemplateNode]>,
+    version: ComponentSlotProjectionVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ComponentTemplateNode {
     Element {
         name: QualName,
@@ -802,6 +949,11 @@ pub(crate) enum ComponentTemplateNode {
         reference: ComponentReference,
         target: ComponentDefinitionKey,
         inputs: ResolvedComponentInputs,
+        projection: Option<ComponentProjectionPlan>,
+        source_ordinal: u32,
+    },
+    Slot {
+        fallback: Arc<[ComponentTemplateNode]>,
         source_ordinal: u32,
     },
     InputConsumer {
@@ -824,6 +976,7 @@ pub struct ComponentDefinition {
     dependencies: Arc<[ComponentDefinitionKey]>,
     resolved_references: Arc<[(ComponentReference, ComponentDefinitionKey)]>,
     inputs: Arc<[ComponentInputDeclaration]>,
+    default_slot: Option<ComponentSlotDefinition>,
 }
 
 impl ComponentDefinition {
@@ -849,6 +1002,10 @@ impl ComponentDefinition {
 
     pub fn inputs(&self) -> &[ComponentInputDeclaration] {
         &self.inputs
+    }
+
+    pub fn default_slot(&self) -> Option<&ComponentSlotDefinition> {
+        self.default_slot.as_ref()
     }
 }
 
@@ -905,6 +1062,7 @@ pub(crate) struct UnresolvedComponentDefinition {
     pub nodes: Vec<UnresolvedTemplateNode>,
     pub source_node_count: usize,
     pub inputs: Arc<[ComponentInputDeclaration]>,
+    pub default_slot: Option<ComponentSlotDeclaration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -925,6 +1083,11 @@ pub(crate) enum UnresolvedTemplateNode {
     Use {
         reference: ComponentReference,
         supplied_inputs: Vec<(ComponentInputName, String)>,
+        children: Vec<UnresolvedTemplateNode>,
+        source_ordinal: u32,
+    },
+    Slot {
+        fallback: Vec<UnresolvedTemplateNode>,
         source_ordinal: u32,
     },
     InputConsumer {
@@ -975,14 +1138,32 @@ impl PreparedDocument {
             instances: Vec::with_capacity(self.stats.component_instances),
             descendants: Vec::new(),
             input_consumers: Vec::new(),
+            slot_projections: Vec::new(),
+            projected_nodes: Vec::new(),
+            fallback_nodes: Vec::new(),
+            projection_node_ordinals: BTreeMap::new(),
         };
-        let children = instantiate_nodes(&mut document, &self.nodes, None, None, &[], &mut state)?;
+        let children = instantiate_nodes(
+            &mut document,
+            &self.nodes,
+            ComponentInstantiationContext {
+                instance: None,
+                inputs: None,
+            },
+            None,
+            None,
+            &[],
+            &mut state,
+        )?;
         document.mutate().append_children(0, &children);
         Ok(InstantiatedDocument {
             document,
             instances: state.instances,
             descendants: state.descendants,
             input_consumers: state.input_consumers,
+            slot_projections: state.slot_projections,
+            projected_nodes: state.projected_nodes,
+            fallback_nodes: state.fallback_nodes,
         })
     }
 }
@@ -1033,6 +1214,156 @@ impl ComponentInstanceId {
             self.snapshot_generation.get(),
             self.document_serial
         )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComponentSlotProjectionId {
+    instance: ComponentInstanceId,
+    slot_definition: ComponentSlotDefinitionId,
+    invocation_source_ordinal: u32,
+}
+
+impl ComponentSlotProjectionId {
+    pub fn instance(&self) -> &ComponentInstanceId {
+        &self.instance
+    }
+
+    pub fn slot_definition(&self) -> &ComponentSlotDefinitionId {
+        &self.slot_definition
+    }
+
+    pub fn invocation_source_ordinal(&self) -> u32 {
+        self.invocation_source_ordinal
+    }
+
+    pub fn deterministic_string(&self) -> String {
+        format!(
+            "{}:{}:projection@{}",
+            self.instance.deterministic_string(),
+            self.slot_definition.deterministic_string(),
+            self.invocation_source_ordinal
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotProjectionSource {
+    RootDocument { document_serial: u64 },
+    ComponentInstance(ComponentInstanceId),
+}
+
+impl SlotProjectionSource {
+    pub fn deterministic_string(&self) -> String {
+        match self {
+            Self::RootDocument { document_serial } => {
+                format!("root-document#{document_serial}")
+            }
+            Self::ComponentInstance(instance) => instance.deterministic_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentSlotProjectionRecord {
+    id: ComponentSlotProjectionId,
+    outcome: ComponentSlotProjectionOutcome,
+    source: SlotProjectionSource,
+    assigned_node_count: usize,
+    fallback_node_count: usize,
+    version: ComponentSlotProjectionVersion,
+}
+
+impl ComponentSlotProjectionRecord {
+    pub fn id(&self) -> &ComponentSlotProjectionId {
+        &self.id
+    }
+
+    pub fn outcome(&self) -> ComponentSlotProjectionOutcome {
+        self.outcome
+    }
+
+    pub fn source(&self) -> &SlotProjectionSource {
+        &self.source
+    }
+
+    pub fn assigned_node_count(&self) -> usize {
+        self.assigned_node_count
+    }
+
+    pub fn fallback_node_count(&self) -> usize {
+        self.fallback_node_count
+    }
+
+    pub fn version(&self) -> &ComponentSlotProjectionVersion {
+        &self.version
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectedNodeProvenance {
+    projection_id: ComponentSlotProjectionId,
+    caller: SlotProjectionSource,
+    caller_source_ordinal: u32,
+    projected_node_ordinal: u32,
+    dom_slot: usize,
+    dom_slot_generation: u64,
+}
+
+impl ProjectedNodeProvenance {
+    pub fn projection_id(&self) -> &ComponentSlotProjectionId {
+        &self.projection_id
+    }
+
+    pub fn caller(&self) -> &SlotProjectionSource {
+        &self.caller
+    }
+
+    pub fn caller_source_ordinal(&self) -> u32 {
+        self.caller_source_ordinal
+    }
+
+    pub fn projected_node_ordinal(&self) -> u32 {
+        self.projected_node_ordinal
+    }
+
+    pub fn dom_slot(&self) -> usize {
+        self.dom_slot
+    }
+
+    pub fn dom_slot_generation(&self) -> u64 {
+        self.dom_slot_generation
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentFallbackNodeProvenance {
+    projection_id: ComponentSlotProjectionId,
+    instance_id: ComponentInstanceId,
+    fallback_source_ordinal: u32,
+    dom_slot: usize,
+    dom_slot_generation: u64,
+}
+
+impl ComponentFallbackNodeProvenance {
+    pub fn projection_id(&self) -> &ComponentSlotProjectionId {
+        &self.projection_id
+    }
+
+    pub fn instance_id(&self) -> &ComponentInstanceId {
+        &self.instance_id
+    }
+
+    pub fn fallback_source_ordinal(&self) -> u32 {
+        self.fallback_source_ordinal
+    }
+
+    pub fn dom_slot(&self) -> usize {
+        self.dom_slot
+    }
+
+    pub fn dom_slot_generation(&self) -> u64 {
+        self.dom_slot_generation
     }
 }
 
@@ -1134,6 +1465,9 @@ pub(crate) struct InstantiatedDocument {
     pub instances: Vec<ComponentInstanceRecord>,
     pub descendants: Vec<ComponentDescendantProvenance>,
     pub input_consumers: Vec<ComponentInputConsumerRecord>,
+    pub slot_projections: Vec<ComponentSlotProjectionRecord>,
+    pub projected_nodes: Vec<ProjectedNodeProvenance>,
+    pub fallback_nodes: Vec<ComponentFallbackNodeProvenance>,
 }
 
 struct InstantiationState<'a> {
@@ -1143,13 +1477,23 @@ struct InstantiationState<'a> {
     instances: Vec<ComponentInstanceRecord>,
     descendants: Vec<ComponentDescendantProvenance>,
     input_consumers: Vec<ComponentInputConsumerRecord>,
+    slot_projections: Vec<ComponentSlotProjectionRecord>,
+    projected_nodes: Vec<ProjectedNodeProvenance>,
+    fallback_nodes: Vec<ComponentFallbackNodeProvenance>,
+    projection_node_ordinals: BTreeMap<ComponentSlotProjectionId, u32>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExpectedComponentDefinition {
+    pub inputs: Arc<[ComponentInputDeclaration]>,
+    pub default_slot: Option<ComponentSlotDeclaration>,
 }
 
 pub(crate) fn parse_component_source(
     html: &str,
     owner: &PackageId,
     logical_source: &str,
-    expected: &BTreeMap<ComponentName, Arc<[ComponentInputDeclaration]>>,
+    expected: &BTreeMap<ComponentName, ExpectedComponentDefinition>,
 ) -> Result<BTreeMap<ComponentName, UnresolvedComponentDefinition>, PackageLoadError> {
     reject_duplicate_control_attributes(html, logical_source)?;
     let document = HtmlDocument::from_html(html, parser_config());
@@ -1231,14 +1575,17 @@ pub(crate) fn parse_component_source(
                 }
                 let mut ordinal = 0u32;
                 let mut source_node_count = 0usize;
+                let expected_definition = expected
+                    .get(&name)
+                    .expect("validated component export interface exists");
                 let context = ComponentNormalizationContext {
                     owner,
                     logical_source,
                     definition_name: &name,
-                    inputs: expected
-                        .get(&name)
-                        .expect("validated component export inputs exist"),
+                    inputs: &expected_definition.inputs,
+                    default_slot: expected_definition.default_slot.as_ref(),
                 };
+                let mut slot_count = 0usize;
                 let children = node
                     .children
                     .iter()
@@ -1249,9 +1596,19 @@ pub(crate) fn parse_component_source(
                             context,
                             &mut ordinal,
                             &mut source_node_count,
+                            &mut slot_count,
+                            ComponentContentMode::Definition,
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                if expected_definition.default_slot.is_some() && slot_count == 0 {
+                    return Err(component_error(
+                        PackageErrorKind::ComponentSlotDefinitionMissing,
+                        owner,
+                        logical_source,
+                        format!("component `{name}` declares default slot but has no `<slot>`"),
+                    ));
+                }
                 if source_node_count > MAX_COMPONENT_SOURCE_NODES {
                     return Err(component_error(
                         PackageErrorKind::ComponentSourceNodeLimit,
@@ -1269,11 +1626,8 @@ pub(crate) fn parse_component_source(
                         logical_source: logical_source.to_owned(),
                         nodes: children,
                         source_node_count,
-                        inputs: Arc::clone(
-                            expected
-                                .get(&name)
-                                .expect("validated component export inputs exist"),
-                        ),
+                        inputs: Arc::clone(&expected_definition.inputs),
+                        default_slot: expected_definition.default_slot.clone(),
                     },
                 );
             }
@@ -1326,6 +1680,23 @@ pub(crate) fn build_component_catalog(
         .iter()
         .map(|definition| (definition.key.clone(), Arc::clone(&definition.inputs)))
         .collect();
+    let slot_definitions: BTreeMap<_, _> = unresolved
+        .iter()
+        .map(|definition| {
+            let slot = definition.default_slot.clone().map(|declaration| {
+                let (source_ordinal, fallback_node_count) =
+                    locate_unresolved_default_slot(&definition.nodes)
+                        .expect("declared slot was validated during parsing");
+                ComponentSlotDefinition {
+                    declaration,
+                    source_ordinal,
+                    fallback_node_count,
+                    fallback_version: unresolved_slot_version(&definition.nodes).into(),
+                }
+            });
+            (definition.key.clone(), slot)
+        })
+        .collect();
     let mut definitions = Vec::with_capacity(unresolved.len());
     let mut indices = BTreeMap::new();
     for unresolved in unresolved {
@@ -1336,6 +1707,7 @@ pub(crate) fn build_component_catalog(
             packages: &package_by_id,
             available: &available,
             input_declarations: &input_declarations,
+            slot_definitions: &slot_definitions,
             dependencies: &mut dependencies,
             dependency_set: &mut dependency_set,
             references: &mut references,
@@ -1345,6 +1717,7 @@ pub(crate) fn build_component_catalog(
             &unresolved.key.package_id,
             &mut resolution,
         )?;
+        let default_slot = slot_definitions.get(&unresolved.key).cloned().flatten();
         let index = definitions.len();
         indices.insert(unresolved.key.clone(), index);
         definitions.push(Arc::new(ComponentDefinition {
@@ -1355,6 +1728,7 @@ pub(crate) fn build_component_catalog(
             dependencies: dependencies.into(),
             resolved_references: references.into(),
             inputs: unresolved.inputs,
+            default_slot,
         }));
     }
     let order = component_dependency_order(&definitions, &indices)?;
@@ -1375,8 +1749,10 @@ pub(crate) fn prepare_root_document(
     reject_duplicate_control_attributes(html, logical_path)?;
     let document = HtmlDocument::from_html(html, parser_config());
     validate_document_depth(&document, owner.id(), logical_path)?;
-    let mut ordinal = 0u32;
-    let mut inside_template = false;
+    let mut state = RootNormalizationState {
+        ordinal: 0,
+        inside_template: false,
+    };
     let nodes = document
         .get_node(0)
         .expect("Blitz document root exists")
@@ -1389,8 +1765,8 @@ pub(crate) fn prepare_root_document(
                 logical_path,
                 owner,
                 catalog,
-                &mut ordinal,
-                &mut inside_template,
+                &mut state,
+                false,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1404,12 +1780,25 @@ pub(crate) fn prepare_root_document(
     })
 }
 
+struct RootNormalizationState {
+    ordinal: u32,
+    inside_template: bool,
+}
+
 #[derive(Clone, Copy)]
 struct ComponentNormalizationContext<'a> {
     owner: &'a PackageId,
     logical_source: &'a str,
     definition_name: &'a ComponentName,
     inputs: &'a [ComponentInputDeclaration],
+    default_slot: Option<&'a ComponentSlotDeclaration>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComponentContentMode {
+    Definition,
+    Invocation,
+    Fallback,
 }
 
 fn normalize_component_node(
@@ -1418,12 +1807,15 @@ fn normalize_component_node(
     context: ComponentNormalizationContext<'_>,
     ordinal: &mut u32,
     count: &mut usize,
+    slot_count: &mut usize,
+    mode: ComponentContentMode,
 ) -> Result<UnresolvedTemplateNode, PackageLoadError> {
     let ComponentNormalizationContext {
         owner,
         logical_source,
         definition_name,
         inputs,
+        default_slot,
     } = context;
     *count = count.checked_add(1).ok_or_else(|| {
         component_error(
@@ -1451,6 +1843,18 @@ fn normalize_component_node(
         )),
         NodeData::Element(element) => {
             let tag = element.name.local.as_ref();
+            if mode == ComponentContentMode::Invocation
+                && (element_attr(element, BUILTIN_ATTRIBUTE) == Some("repeat")
+                    || (tag == TEMPLATE_ELEMENT
+                        && element_attr(element, "data-htm-source").is_some()))
+            {
+                return Err(component_error(
+                    PackageErrorKind::ComponentProjectedRepeatNotSupported,
+                    owner,
+                    logical_source,
+                    "repeat declarations are not supported in projected component content",
+                ));
+            }
             if tag == TEMPLATE_ELEMENT {
                 return Err(component_error(
                     PackageErrorKind::ComponentFeatureNotSupported,
@@ -1459,23 +1863,122 @@ fn normalize_component_node(
                     format!("component `{definition_name}` contains a nested template"),
                 ));
             }
+            if tag == SLOT_ELEMENT {
+                if mode != ComponentContentMode::Definition {
+                    return Err(component_error(
+                        if mode == ComponentContentMode::Fallback {
+                            PackageErrorKind::ComponentSlotNestedFallback
+                        } else {
+                            PackageErrorKind::ComponentSlotOutsideDefinition
+                        },
+                        owner,
+                        logical_source,
+                        format!(
+                            "component `{definition_name}` contains `<slot>` outside its definition tree"
+                        ),
+                    ));
+                }
+                let declaration = default_slot.ok_or_else(|| {
+                    component_error(
+                        PackageErrorKind::ComponentSlotDefinitionUndeclared,
+                        owner,
+                        logical_source,
+                        format!(
+                            "component `{definition_name}` contains an undeclared default slot"
+                        ),
+                    )
+                })?;
+                if !element.attrs().is_empty() {
+                    return Err(component_error(
+                        PackageErrorKind::ComponentSlotAttributesUnsupported,
+                        owner,
+                        logical_source,
+                        "`slot` accepts no attributes in the default-slot profile",
+                    ));
+                }
+                *slot_count = slot_count.checked_add(1).ok_or_else(|| {
+                    component_error(
+                        PackageErrorKind::ComponentSlotDefinitionDuplicate,
+                        owner,
+                        logical_source,
+                        "component slot count overflowed",
+                    )
+                })?;
+                if *slot_count > MAX_COMPONENT_SLOTS {
+                    return Err(component_error(
+                        PackageErrorKind::ComponentSlotDefinitionDuplicate,
+                        owner,
+                        logical_source,
+                        "component contains more than one `<slot>`",
+                    ));
+                }
+                let fallback = node
+                    .children
+                    .iter()
+                    .map(|child| {
+                        normalize_component_node(
+                            document,
+                            *child,
+                            context,
+                            ordinal,
+                            count,
+                            slot_count,
+                            ComponentContentMode::Fallback,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let fallback = retain_assignable_nodes(fallback);
+                if declaration.required() && !fallback.is_empty() {
+                    return Err(component_error(
+                        PackageErrorKind::ComponentRequiredSlotFallback,
+                        owner,
+                        logical_source,
+                        format!(
+                            "required slot in component `{definition_name}` cannot contain fallback content"
+                        ),
+                    ));
+                }
+                return Ok(UnresolvedTemplateNode::Slot {
+                    fallback,
+                    source_ordinal,
+                });
+            }
             if tag == USE_ELEMENT {
-                let supplied_inputs =
-                    validate_use_element(element, &node.children, document, owner, logical_source)?;
+                let supplied_inputs = validate_use_element(element, owner, logical_source)?;
                 let value = element_attr(element, "component")
                     .expect("validated htm-use has component attribute");
                 let reference = ComponentReference::parse(value)
                     .map_err(|error| error.in_package(owner.to_string()).at(logical_source))?;
+                let children = node
+                    .children
+                    .iter()
+                    .map(|child| {
+                        normalize_component_node(
+                            document,
+                            *child,
+                            context,
+                            ordinal,
+                            count,
+                            slot_count,
+                            ComponentContentMode::Invocation,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 return Ok(UnresolvedTemplateNode::Use {
                     reference,
                     supplied_inputs,
+                    children,
                     source_ordinal,
                 });
             }
             let children = node
                 .children
                 .iter()
-                .map(|child| normalize_component_node(document, *child, context, ordinal, count))
+                .map(|child| {
+                    normalize_component_node(
+                        document, *child, context, ordinal, count, slot_count, mode,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             if let Some((consumer_kind, input, value_format)) = validate_component_input_consumer(
                 element,
@@ -1514,10 +2017,10 @@ fn normalize_root_node(
     logical_path: &str,
     owner: &ResolvedPackage,
     catalog: &ComponentCatalog,
-    ordinal: &mut u32,
-    inside_template: &mut bool,
+    state: &mut RootNormalizationState,
+    projected_content: bool,
 ) -> Result<ComponentTemplateNode, PackageLoadError> {
-    let source_ordinal = next_ordinal(ordinal, owner.id(), logical_path)?;
+    let source_ordinal = next_ordinal(&mut state.ordinal, owner.id(), logical_path)?;
     let node = document
         .get_node(slot)
         .expect("root source slot remains live");
@@ -1535,6 +2038,34 @@ fn normalize_root_node(
         )),
         NodeData::Element(element) => {
             let tag = element.name.local.as_ref();
+            if tag == SLOT_ELEMENT {
+                return Err(component_error(
+                    PackageErrorKind::ComponentSlotOutsideDefinition,
+                    owner.id(),
+                    logical_path,
+                    "`slot` is valid only inside a manifest-declared component template",
+                ));
+            }
+            if projected_content && element_attr(element, "slot").is_some() {
+                return Err(component_error(
+                    PackageErrorKind::ComponentNamedSlotAttributeUnsupported,
+                    owner.id(),
+                    logical_path,
+                    "caller `slot` attributes are not supported by the default-slot profile",
+                ));
+            }
+            if projected_content
+                && (element_attr(element, BUILTIN_ATTRIBUTE) == Some("repeat")
+                    || (tag == TEMPLATE_ELEMENT
+                        && element_attr(element, "data-htm-source").is_some()))
+            {
+                return Err(component_error(
+                    PackageErrorKind::ComponentProjectedRepeatNotSupported,
+                    owner.id(),
+                    logical_path,
+                    "repeat declarations are not supported in projected component content",
+                ));
+            }
             if element_attr(element, COMPONENT_ATTRIBUTE).is_some() {
                 return Err(component_error(
                     PackageErrorKind::ComponentFeatureNotSupported,
@@ -1552,7 +2083,7 @@ fn normalize_root_node(
                         "`htm-use` requires a schema-v2 shell package",
                     ));
                 }
-                if *inside_template {
+                if state.inside_template {
                     return Err(component_error(
                         PackageErrorKind::ComponentRepeatNotSupported,
                         owner.id(),
@@ -1560,13 +2091,7 @@ fn normalize_root_node(
                         "`htm-use` is not supported inside root document templates or repeats",
                     ));
                 }
-                let supplied_inputs = validate_use_element(
-                    element,
-                    &node.children,
-                    document,
-                    owner.id(),
-                    logical_path,
-                )?;
+                let supplied_inputs = validate_use_element(element, owner.id(), logical_path)?;
                 let reference = ComponentReference::parse(
                     element_attr(element, "component")
                         .expect("validated htm-use has component attribute"),
@@ -1583,10 +2108,33 @@ fn normalize_root_node(
                     &target.name,
                     logical_path,
                 )?;
+                let children = node
+                    .children
+                    .iter()
+                    .map(|child| {
+                        normalize_root_node(
+                            document,
+                            *child,
+                            logical_path,
+                            owner,
+                            catalog,
+                            state,
+                            true,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let projection = build_projection_plan(
+                    definition.default_slot(),
+                    children,
+                    owner.id(),
+                    definition.key().name(),
+                    logical_path,
+                )?;
                 return Ok(ComponentTemplateNode::Host {
                     reference,
                     target,
                     inputs,
+                    projection,
                     source_ordinal,
                 });
             }
@@ -1600,10 +2148,10 @@ fn normalize_root_node(
                     "`input.*` is available only inside a component instance",
                 ));
             }
-            let previous = *inside_template;
+            let previous = state.inside_template;
             if tag == TEMPLATE_ELEMENT || element_attr(element, BUILTIN_ATTRIBUTE) == Some("repeat")
             {
-                *inside_template = true;
+                state.inside_template = true;
             }
             let children = node
                 .children
@@ -1615,12 +2163,12 @@ fn normalize_root_node(
                         logical_path,
                         owner,
                         catalog,
-                        ordinal,
-                        inside_template,
+                        state,
+                        projected_content,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            *inside_template = previous;
+            state.inside_template = previous;
             Ok(ComponentTemplateNode::Element {
                 name: element.name.clone(),
                 attributes: element.attrs().to_vec(),
@@ -1861,9 +2409,16 @@ fn validate_static_component_element(
     for attribute in element.attrs() {
         let name = attribute.name.local.as_ref();
         let value = attribute.value.as_str();
+        if name == "slot" {
+            return Err(component_error(
+                PackageErrorKind::ComponentNamedSlotAttributeUnsupported,
+                owner,
+                logical_source,
+                "caller `slot` attributes are not supported by the default-slot profile",
+            ));
+        }
         if name == "id"
             || name == "for"
-            || name == "slot"
             || matches!(
                 name,
                 "aria-labelledby"
@@ -1946,8 +2501,6 @@ fn validate_static_component_element(
 
 fn validate_use_element(
     element: &blitz_dom::ElementData,
-    children: &[usize],
-    document: &HtmlDocument,
     owner: &PackageId,
     logical_source: &str,
 ) -> Result<Vec<(ComponentInputName, String)>, PackageLoadError> {
@@ -2026,30 +2579,322 @@ fn validate_use_element(
         }
         supplied.push((input, attribute.value.to_string()));
     }
-    for child in children {
-        let child = document
-            .get_node(*child)
-            .expect("htm-use child remains live");
-        match &child.data {
-            NodeData::Comment => {}
-            NodeData::Text(text) if text.content.chars().all(char::is_whitespace) => {}
-            _ => {
-                return Err(component_error(
-                    PackageErrorKind::ComponentInvocationChildren,
-                    owner,
-                    logical_source,
-                    "`htm-use` accepts only whitespace and comments as children",
-                ));
+    Ok(supplied)
+}
+
+fn retain_assignable_nodes<T>(nodes: Vec<T>) -> Vec<T>
+where
+    T: AssignableComponentNode,
+{
+    nodes
+        .into_iter()
+        .filter(AssignableComponentNode::is_assignable)
+        .collect()
+}
+
+trait AssignableComponentNode {
+    fn is_assignable(&self) -> bool;
+}
+
+impl AssignableComponentNode for UnresolvedTemplateNode {
+    fn is_assignable(&self) -> bool {
+        match self {
+            Self::Text { value, .. } => !value.chars().all(char::is_whitespace),
+            Self::Comment { .. } => false,
+            _ => true,
+        }
+    }
+}
+
+impl AssignableComponentNode for ComponentTemplateNode {
+    fn is_assignable(&self) -> bool {
+        match self {
+            Self::Text { value, .. } => !value.chars().all(char::is_whitespace),
+            Self::Comment { .. } => false,
+            _ => true,
+        }
+    }
+}
+
+fn locate_unresolved_default_slot(nodes: &[UnresolvedTemplateNode]) -> Option<(u32, usize)> {
+    for node in nodes {
+        match node {
+            UnresolvedTemplateNode::Slot {
+                fallback,
+                source_ordinal,
+            } => return Some((*source_ordinal, fallback.len())),
+            UnresolvedTemplateNode::Element { children, .. }
+            | UnresolvedTemplateNode::InputConsumer { children, .. } => {
+                if let Some(found) = locate_unresolved_default_slot(children) {
+                    return Some(found);
+                }
+            }
+            UnresolvedTemplateNode::Use { children, .. } => {
+                // Invocation children are caller-owned and cannot define the callee slot.
+                if children
+                    .iter()
+                    .any(|child| matches!(child, UnresolvedTemplateNode::Slot { .. }))
+                {
+                    unreachable!("slot elements in invocation content are rejected");
+                }
+            }
+            UnresolvedTemplateNode::Text { .. } | UnresolvedTemplateNode::Comment { .. } => {}
+        }
+    }
+    None
+}
+
+fn unresolved_slot_version(nodes: &[UnresolvedTemplateNode]) -> String {
+    fn find(nodes: &[UnresolvedTemplateNode], output: &mut String) -> bool {
+        for node in nodes {
+            match node {
+                UnresolvedTemplateNode::Slot { fallback, .. } => {
+                    output.push_str("component-slot-fallback-v1;");
+                    serialize_unresolved_nodes(fallback, output);
+                    return true;
+                }
+                UnresolvedTemplateNode::Element { children, .. }
+                | UnresolvedTemplateNode::InputConsumer { children, .. } => {
+                    if find(children, output) {
+                        return true;
+                    }
+                }
+                UnresolvedTemplateNode::Use { .. }
+                | UnresolvedTemplateNode::Text { .. }
+                | UnresolvedTemplateNode::Comment { .. } => {}
+            }
+        }
+        false
+    }
+    let mut output = String::new();
+    let _ = find(nodes, &mut output);
+    output
+}
+
+fn serialize_unresolved_nodes(nodes: &[UnresolvedTemplateNode], output: &mut String) {
+    for node in nodes {
+        match node {
+            UnresolvedTemplateNode::Element {
+                name,
+                attributes,
+                children,
+                ..
+            } => {
+                output.push_str("e:");
+                output.push_str(name.local.as_ref());
+                let mut attributes = attributes
+                    .iter()
+                    .map(|attribute| {
+                        (
+                            attribute.name.local.as_ref().to_owned(),
+                            attribute.value.to_string(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                attributes.sort();
+                for (name, value) in attributes {
+                    output.push(':');
+                    output.push_str(&name);
+                    output.push('=');
+                    output.push_str(&value);
+                }
+                output.push(';');
+                serialize_unresolved_nodes(children, output);
+                output.push_str("/e;");
+            }
+            UnresolvedTemplateNode::Text { value, .. } => {
+                output.push_str("t:");
+                output.push_str(&value.len().to_string());
+                output.push(':');
+                output.push_str(value);
+                output.push(';');
+            }
+            UnresolvedTemplateNode::Comment { .. } => {}
+            UnresolvedTemplateNode::Use {
+                reference,
+                supplied_inputs,
+                children,
+                ..
+            } => {
+                output.push_str("u:");
+                output.push_str(&reference.deterministic_string());
+                for (name, value) in supplied_inputs {
+                    output.push(':');
+                    output.push_str(name.as_str());
+                    output.push('=');
+                    output.push_str(value);
+                }
+                output.push(';');
+                serialize_unresolved_nodes(children, output);
+                output.push_str("/u;");
+            }
+            UnresolvedTemplateNode::Slot { fallback, .. } => {
+                output.push_str("s;");
+                serialize_unresolved_nodes(fallback, output);
+                output.push_str("/s;");
+            }
+            UnresolvedTemplateNode::InputConsumer {
+                consumer_kind,
+                input,
+                children,
+                ..
+            } => {
+                output.push_str("i:");
+                output.push_str(consumer_kind.as_str());
+                output.push(':');
+                output.push_str(input.as_str());
+                output.push(';');
+                serialize_unresolved_nodes(children, output);
+                output.push_str("/i;");
             }
         }
     }
-    Ok(supplied)
+}
+
+fn build_projection_plan(
+    slot: Option<&ComponentSlotDefinition>,
+    children: Vec<ComponentTemplateNode>,
+    owner: &PackageId,
+    component: &ComponentName,
+    logical_source: &str,
+) -> Result<Option<ComponentProjectionPlan>, PackageLoadError> {
+    let assigned = retain_assignable_nodes(children);
+    let Some(slot) = slot else {
+        if assigned.is_empty() {
+            return Ok(None);
+        }
+        return Err(component_error(
+            PackageErrorKind::ComponentInvocationContentWithoutSlot,
+            owner,
+            logical_source,
+            format!("component `{component}` does not declare a default slot"),
+        ));
+    };
+    if slot.declaration.required() && assigned.is_empty() {
+        return Err(component_error(
+            PackageErrorKind::ComponentRequiredSlotContentMissing,
+            owner,
+            logical_source,
+            format!("component `{component}` requires content for slot `default`"),
+        ));
+    }
+    let outcome = if !assigned.is_empty() {
+        ComponentSlotProjectionOutcome::Assigned
+    } else if slot.fallback_node_count > 0 {
+        ComponentSlotProjectionOutcome::Fallback
+    } else {
+        ComponentSlotProjectionOutcome::EmptyOptional
+    };
+    let version = component_projection_version(outcome, &assigned, slot);
+    Ok(Some(ComponentProjectionPlan {
+        outcome,
+        assigned: assigned.into(),
+        version,
+    }))
+}
+
+fn component_projection_version(
+    outcome: ComponentSlotProjectionOutcome,
+    assigned: &[ComponentTemplateNode],
+    slot: &ComponentSlotDefinition,
+) -> ComponentSlotProjectionVersion {
+    let mut value = format!("component-slot-projection-v1:{};", outcome.as_str());
+    match outcome {
+        ComponentSlotProjectionOutcome::Assigned => serialize_component_nodes(assigned, &mut value),
+        ComponentSlotProjectionOutcome::Fallback => value.push_str(slot.fallback_version()),
+        ComponentSlotProjectionOutcome::EmptyOptional => {}
+    }
+    ComponentSlotProjectionVersion(value.into())
+}
+
+fn serialize_component_nodes(nodes: &[ComponentTemplateNode], output: &mut String) {
+    for node in nodes {
+        match node {
+            ComponentTemplateNode::Element {
+                name,
+                attributes,
+                children,
+                ..
+            } => {
+                output.push_str("e:");
+                output.push_str(name.local.as_ref());
+                output.push('[');
+                let mut attributes = attributes
+                    .iter()
+                    .map(|attribute| {
+                        (
+                            attribute.name.local.as_ref().to_owned(),
+                            attribute.value.to_string(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                attributes.sort();
+                for (name, value) in attributes {
+                    output.push_str(&name.len().to_string());
+                    output.push(':');
+                    output.push_str(&name);
+                    output.push('=');
+                    output.push_str(&value.len().to_string());
+                    output.push(':');
+                    output.push_str(&value);
+                    output.push(';');
+                }
+                output.push(']');
+                serialize_component_nodes(children, output);
+                output.push_str("/e;");
+            }
+            ComponentTemplateNode::Text { value, .. } => {
+                output.push_str("t:");
+                output.push_str(&value.len().to_string());
+                output.push(':');
+                output.push_str(value);
+                output.push(';');
+            }
+            ComponentTemplateNode::Comment { .. } => {}
+            ComponentTemplateNode::Host {
+                target,
+                inputs,
+                projection,
+                ..
+            } => {
+                output.push_str("h:");
+                output.push_str(&target.deterministic_string());
+                output.push(':');
+                output.push_str(inputs.version().deterministic_string());
+                if let Some(projection) = projection {
+                    output.push(':');
+                    output.push_str(projection.version.deterministic_string());
+                }
+                output.push(';');
+            }
+            ComponentTemplateNode::Slot { fallback, .. } => {
+                output.push_str("s;");
+                serialize_component_nodes(fallback, output);
+                output.push_str("/s;");
+            }
+            ComponentTemplateNode::InputConsumer {
+                consumer_kind,
+                input,
+                children,
+                ..
+            } => {
+                output.push_str("i:");
+                output.push_str(consumer_kind.as_str());
+                output.push(':');
+                output.push_str(input.as_str());
+                output.push(';');
+                serialize_component_nodes(children, output);
+                output.push_str("/i;");
+            }
+        }
+    }
 }
 
 struct ComponentResolutionContext<'a> {
     packages: &'a BTreeMap<PackageId, Arc<ResolvedPackage>>,
     available: &'a BTreeSet<ComponentDefinitionKey>,
     input_declarations: &'a BTreeMap<ComponentDefinitionKey, Arc<[ComponentInputDeclaration]>>,
+    slot_definitions: &'a BTreeMap<ComponentDefinitionKey, Option<ComponentSlotDefinition>>,
     dependencies: &'a mut Vec<ComponentDefinitionKey>,
     dependency_set: &'a mut BTreeSet<ComponentDefinitionKey>,
     references: &'a mut Vec<(ComponentReference, ComponentDefinitionKey)>,
@@ -2087,6 +2932,7 @@ fn resolve_nodes(
             UnresolvedTemplateNode::Use {
                 reference,
                 supplied_inputs,
+                children,
                 source_ordinal,
             } => {
                 let package = context.packages.get(owner).ok_or_else(|| {
@@ -2116,6 +2962,17 @@ fn resolve_nodes(
                     &target.name,
                     "component template",
                 )?;
+                let children = resolve_nodes(children, owner, context)?;
+                let projection = build_projection_plan(
+                    context
+                        .slot_definitions
+                        .get(&target)
+                        .and_then(Option::as_ref),
+                    children,
+                    owner,
+                    &target.name,
+                    "component template",
+                )?;
                 if context.dependency_set.insert(target.clone()) {
                     context.dependencies.push(target.clone());
                 }
@@ -2124,9 +2981,17 @@ fn resolve_nodes(
                     reference,
                     target,
                     inputs,
+                    projection,
                     source_ordinal,
                 })
             }
+            UnresolvedTemplateNode::Slot {
+                fallback,
+                source_ordinal,
+            } => Ok(ComponentTemplateNode::Slot {
+                fallback: resolve_nodes(fallback, owner, context)?.into(),
+                source_ordinal,
+            }),
             UnresolvedTemplateNode::InputConsumer {
                 name,
                 attributes,
@@ -2355,6 +3220,7 @@ fn validate_prepared_expansion(
         state: &mut Expansion<'_>,
         depth: usize,
         path: &mut Vec<u32>,
+        active_projection: Option<&ComponentProjectionPlan>,
     ) -> Result<(), PackageLoadError> {
         fn add_expanded(state: &mut Expansion<'_>, count: usize) -> Result<(), PackageLoadError> {
             state.expanded = state.expanded.checked_add(count).ok_or_else(|| {
@@ -2376,16 +3242,17 @@ fn validate_prepared_expansion(
             add_expanded(state, 1)?;
             match node {
                 ComponentTemplateNode::Element { children, .. } => {
-                    visit(children, state, depth, path)?;
+                    visit(children, state, depth, path, active_projection)?;
                 }
                 ComponentTemplateNode::InputConsumer { children, .. } => {
                     // Materialization always appends one canonical value text node.
                     add_expanded(state, 1)?;
-                    visit(children, state, depth, path)?;
+                    visit(children, state, depth, path, active_projection)?;
                 }
                 ComponentTemplateNode::Host {
                     reference,
                     target,
+                    projection,
                     source_ordinal,
                     ..
                 } => {
@@ -2442,8 +3309,31 @@ fn validate_prepared_expansion(
                             format!("prepared component target `{target}` is absent"),
                         )
                     })?;
-                    visit(&definition.nodes, state, next_depth, path)?;
+                    visit(
+                        &definition.nodes,
+                        state,
+                        next_depth,
+                        path,
+                        projection.as_ref(),
+                    )?;
                     path.pop();
+                }
+                ComponentTemplateNode::Slot { fallback, .. } => {
+                    let projection = active_projection.ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::ComponentSlotProjectionUnresolved,
+                            "prepared component slot has no projection plan",
+                        )
+                    })?;
+                    match projection.outcome {
+                        ComponentSlotProjectionOutcome::Assigned => {
+                            visit(&projection.assigned, state, depth, path, None)?;
+                        }
+                        ComponentSlotProjectionOutcome::Fallback => {
+                            visit(fallback, state, depth, path, None)?;
+                        }
+                        ComponentSlotProjectionOutcome::EmptyOptional => {}
+                    }
                 }
                 ComponentTemplateNode::Text { .. } | ComponentTemplateNode::Comment { .. } => {}
             }
@@ -2459,7 +3349,7 @@ fn validate_prepared_expansion(
         maximum_depth: 0,
         paths: Vec::new(),
     };
-    visit(nodes, &mut state, 0, &mut Vec::new()).map_err(|error| error.at(logical_path))?;
+    visit(nodes, &mut state, 0, &mut Vec::new(), None).map_err(|error| error.at(logical_path))?;
     Ok((
         PreparedDocumentStats {
             component_instances: state.instances,
@@ -2471,11 +3361,32 @@ fn validate_prepared_expansion(
     ))
 }
 
+struct ActiveProjection<'a> {
+    id: ComponentSlotProjectionId,
+    plan: &'a ComponentProjectionPlan,
+    caller_instance: Option<&'a ComponentInstanceId>,
+    caller_inputs: Option<&'a ResolvedComponentInputs>,
+    caller: SlotProjectionSource,
+}
+
+#[derive(Clone, Copy)]
+enum ProjectionPlacement<'a> {
+    Assigned(&'a ActiveProjection<'a>),
+    Fallback(&'a ActiveProjection<'a>),
+}
+
+#[derive(Clone, Copy)]
+struct ComponentInstantiationContext<'a> {
+    instance: Option<&'a ComponentInstanceId>,
+    inputs: Option<&'a ResolvedComponentInputs>,
+}
+
 fn instantiate_nodes(
     document: &mut HtmlDocument,
     nodes: &[ComponentTemplateNode],
-    current_instance: Option<&ComponentInstanceId>,
-    current_inputs: Option<&ResolvedComponentInputs>,
+    context: ComponentInstantiationContext<'_>,
+    active_projection: Option<&ActiveProjection<'_>>,
+    placement: Option<ProjectionPlacement<'_>>,
     invocation_path: &[u32],
     state: &mut InstantiationState<'_>,
 ) -> Result<Vec<usize>, PackageLoadError> {
@@ -2487,12 +3398,12 @@ fn instantiate_nodes(
                 source_ordinal,
             } => {
                 let slot = document.mutate().create_text_node(value);
-                record_descendant(current_instance, *source_ordinal, slot, state);
+                record_descendant(context.instance, *source_ordinal, slot, placement, state);
                 created.push(slot);
             }
             ComponentTemplateNode::Comment { source_ordinal } => {
                 let slot = document.mutate().create_comment_node();
-                record_descendant(current_instance, *source_ordinal, slot, state);
+                record_descendant(context.instance, *source_ordinal, slot, placement, state);
                 created.push(slot);
             }
             ComponentTemplateNode::Element {
@@ -2504,12 +3415,13 @@ fn instantiate_nodes(
                 let slot = document
                     .mutate()
                     .create_element(name.clone(), attributes.clone());
-                record_descendant(current_instance, *source_ordinal, slot, state);
+                record_descendant(context.instance, *source_ordinal, slot, placement, state);
                 let child_slots = instantiate_nodes(
                     document,
                     children,
-                    current_instance,
-                    current_inputs,
+                    context,
+                    active_projection,
+                    placement,
                     invocation_path,
                     state,
                 )?;
@@ -2525,13 +3437,13 @@ fn instantiate_nodes(
                 value_format,
                 source_ordinal,
             } => {
-                let instance_id = current_instance.ok_or_else(|| {
+                let instance_id = context.instance.ok_or_else(|| {
                     PackageLoadError::new(
                         PackageErrorKind::ComponentInputNamespaceOutsideComponent,
                         "component input consumer has no component instance",
                     )
                 })?;
-                let inputs = current_inputs.ok_or_else(|| {
+                let inputs = context.inputs.ok_or_else(|| {
                     PackageLoadError::new(
                         PackageErrorKind::ComponentInputNamespaceOutsideComponent,
                         "component input consumer has no input map",
@@ -2550,17 +3462,18 @@ fn instantiate_nodes(
                     set_template_attribute(&mut attributes, name, &value);
                 }
                 let slot = document.mutate().create_element(name.clone(), attributes);
-                record_descendant(current_instance, *source_ordinal, slot, state);
+                record_descendant(context.instance, *source_ordinal, slot, placement, state);
                 let mut child_slots = instantiate_nodes(
                     document,
                     children,
-                    current_instance,
-                    current_inputs,
+                    context,
+                    active_projection,
+                    placement,
                     invocation_path,
                     state,
                 )?;
                 let text = document.mutate().create_text_node(&display);
-                record_descendant(current_instance, *source_ordinal, text, state);
+                record_descendant(context.instance, *source_ordinal, text, placement, state);
                 child_slots.push(text);
                 document.mutate().append_children(slot, &child_slots);
                 state.input_consumers.push(ComponentInputConsumerRecord {
@@ -2576,6 +3489,7 @@ fn instantiate_nodes(
                 reference,
                 target,
                 inputs,
+                projection,
                 source_ordinal,
             } => {
                 let mut path = invocation_path.to_vec();
@@ -2612,16 +3526,99 @@ fn instantiate_nodes(
                     top_level_slots: Arc::from([]),
                     inputs: instance_inputs.clone(),
                 });
+                let active = projection.as_ref().map(|plan| {
+                    let slot_definition = ComponentSlotDefinitionId {
+                        generation: state.generation,
+                        definition: target.clone(),
+                    };
+                    let id = ComponentSlotProjectionId {
+                        instance: instance_id.clone(),
+                        slot_definition,
+                        invocation_source_ordinal: *source_ordinal,
+                    };
+                    let caller = context
+                        .instance
+                        .cloned()
+                        .map(SlotProjectionSource::ComponentInstance)
+                        .unwrap_or(SlotProjectionSource::RootDocument {
+                            document_serial: state.document_serial,
+                        });
+                    let fallback_node_count = definition
+                        .default_slot()
+                        .map(ComponentSlotDefinition::fallback_node_count)
+                        .unwrap_or(0);
+                    state.slot_projections.push(ComponentSlotProjectionRecord {
+                        id: id.clone(),
+                        outcome: plan.outcome,
+                        source: caller.clone(),
+                        assigned_node_count: plan.assigned.len(),
+                        fallback_node_count: if plan.outcome
+                            == ComponentSlotProjectionOutcome::Fallback
+                        {
+                            fallback_node_count
+                        } else {
+                            0
+                        },
+                        version: plan.version.clone(),
+                    });
+                    ActiveProjection {
+                        id,
+                        plan,
+                        caller_instance: context.instance,
+                        caller_inputs: context.inputs,
+                        caller,
+                    }
+                });
                 let child_slots = instantiate_nodes(
                     document,
                     &definition.nodes,
-                    Some(&instance_id),
-                    Some(&instance_inputs),
+                    ComponentInstantiationContext {
+                        instance: Some(&instance_id),
+                        inputs: Some(&instance_inputs),
+                    },
+                    active.as_ref(),
+                    None,
                     &path,
                     state,
                 )?;
                 state.instances[record_index].top_level_slots = child_slots.clone().into();
                 created.extend(child_slots);
+            }
+            ComponentTemplateNode::Slot {
+                fallback,
+                source_ordinal: _,
+            } => {
+                let projection = active_projection.ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentSlotProjectionUnresolved,
+                        "component slot has no invocation projection plan",
+                    )
+                })?;
+                let slot_children = match projection.plan.outcome {
+                    ComponentSlotProjectionOutcome::Assigned => instantiate_nodes(
+                        document,
+                        &projection.plan.assigned,
+                        ComponentInstantiationContext {
+                            instance: projection.caller_instance,
+                            inputs: projection.caller_inputs,
+                        },
+                        None,
+                        Some(ProjectionPlacement::Assigned(projection)),
+                        invocation_path,
+                        state,
+                    )?,
+                    ComponentSlotProjectionOutcome::Fallback => instantiate_nodes(
+                        document,
+                        fallback,
+                        context,
+                        None,
+                        Some(ProjectionPlacement::Fallback(projection)),
+                        invocation_path,
+                        state,
+                    )?,
+                    ComponentSlotProjectionOutcome::EmptyOptional => Vec::new(),
+                };
+                created.extend(slot_children);
             }
         }
     }
@@ -2702,6 +3699,7 @@ fn record_descendant(
     current_instance: Option<&ComponentInstanceId>,
     source_ordinal: u32,
     slot: usize,
+    placement: Option<ProjectionPlacement<'_>>,
     state: &mut InstantiationState<'_>,
 ) {
     if let Some(instance_id) = current_instance {
@@ -2711,6 +3709,37 @@ fn record_descendant(
             dom_slot: slot,
             dom_slot_generation: 0,
         });
+    }
+    match placement {
+        Some(ProjectionPlacement::Assigned(projection)) => {
+            let ordinal = state
+                .projection_node_ordinals
+                .entry(projection.id.clone())
+                .or_insert(0);
+            state.projected_nodes.push(ProjectedNodeProvenance {
+                projection_id: projection.id.clone(),
+                caller: projection.caller.clone(),
+                caller_source_ordinal: source_ordinal,
+                projected_node_ordinal: *ordinal,
+                dom_slot: slot,
+                dom_slot_generation: 0,
+            });
+            *ordinal = ordinal
+                .checked_add(1)
+                .expect("expanded-node validation bounds projection ordinals");
+        }
+        Some(ProjectionPlacement::Fallback(projection)) => {
+            if let Some(instance_id) = current_instance {
+                state.fallback_nodes.push(ComponentFallbackNodeProvenance {
+                    projection_id: projection.id.clone(),
+                    instance_id: instance_id.clone(),
+                    fallback_source_ordinal: source_ordinal,
+                    dom_slot: slot,
+                    dom_slot_generation: 0,
+                });
+            }
+        }
+        None => {}
     }
 }
 

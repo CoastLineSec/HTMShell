@@ -6,7 +6,7 @@ use htm_runtime::{
     MAX_COMPONENT_INPUT_LITERAL_BYTES, MAX_COMPONENT_INPUT_NAME_BYTES,
     MAX_COMPONENT_INPUT_STRING_BYTES, MAX_COMPONENT_INPUTS, MAX_COMPONENT_INSTANCES_PER_DOCUMENT,
     MAX_COMPONENT_NAME_BYTES, MAX_COMPONENT_NESTING_DEPTH, MAX_COMPONENT_REFERENCES_PER_DOCUMENT,
-    MAX_COMPONENT_SOURCE_BYTES, MAX_COMPONENT_SOURCE_NODES,
+    MAX_COMPONENT_SLOTS, MAX_COMPONENT_SOURCE_BYTES, MAX_COMPONENT_SOURCE_NODES,
     MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT, MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
     MAX_CONTEXTUAL_LINK_REPEATS_PER_GROUP_TEMPLATE, MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT,
     MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE, MAX_DEPENDENCY_DEPTH, MAX_DIRECT_DEPENDENCIES,
@@ -281,10 +281,13 @@ fn component_documentation_matches_the_literal_input_contract() {
         fs::read_to_string(root.join("docs/types/HTMShell.Component/README.md")).unwrap();
     let input_reference =
         fs::read_to_string(root.join("docs/types/HTMShell.Component/Input.md")).unwrap();
+    let slot_reference =
+        fs::read_to_string(root.join("docs/types/HTMShell.Component/Slot.md")).unwrap();
     let manifest_reference =
         fs::read_to_string(root.join("docs/types/HTMShell/ShellManifest.md")).unwrap();
-    let public =
-        format!("{package_guide}\n{guide}\n{reference}\n{input_reference}\n{manifest_reference}");
+    let public = format!(
+        "{package_guide}\n{guide}\n{reference}\n{input_reference}\n{slot_reference}\n{manifest_reference}"
+    );
 
     for statement in [
         "`components`",
@@ -314,6 +317,15 @@ fn component_documentation_matches_the_literal_input_contract() {
         "resource-reference",
         "interpolation",
         "slots",
+        "one default content slot",
+        "`required`",
+        "fallback",
+        "caller ownership",
+        "caller order",
+        "no layout box",
+        "no paint",
+        "Named slots",
+        "Shadow DOM",
         "component-local IDs",
         "component-scoped CSS",
         "state or action",
@@ -403,10 +415,13 @@ fn component_documentation_matches_the_literal_input_contract() {
         "| Supplied literal bytes per invocation | {} KiB |",
         MAX_COMPONENT_INPUT_LITERAL_BYTES / 1024
     )));
+    assert!(slot_reference.contains(&format!(
+        "| Default slot declarations per component | {MAX_COMPONENT_SLOTS} |"
+    )));
 
     let manifest = ValidatedManifest::load(root.join("examples/package-graph/shell.json")).unwrap();
     let snapshot = manifest.snapshot();
-    assert_eq!(snapshot.components().definitions().len(), 2);
+    assert_eq!(snapshot.components().definitions().len(), 4);
     assert_eq!(snapshot.components().totals().source_read_count, 2);
     assert_eq!(snapshot.components().totals().source_parse_count, 2);
     assert_eq!(
@@ -419,6 +434,8 @@ fn component_documentation_matches_the_literal_input_contract() {
         [
             "dev.coastlinesec.htmshell.shared:badge-label",
             "dev.coastlinesec.htmshell.controls:status-card",
+            "dev.coastlinesec.htmshell.controls:required-frame",
+            "dev.coastlinesec.htmshell.controls:projected-label",
         ]
     );
     let diagnostic = manifest.deterministic_package_graph_json().unwrap();
@@ -430,6 +447,10 @@ fn component_documentation_matches_the_literal_input_contract() {
         "\"inputs\"",
         "\"semantic_version\"",
         "\"consumers\"",
+        "\"default_slot\"",
+        "\"projections\"",
+        "\"projected_nodes\"",
+        "\"fallback_nodes\"",
     ] {
         assert!(
             diagnostic.contains(expected),

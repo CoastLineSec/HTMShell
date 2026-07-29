@@ -53,5 +53,6 @@ Local schema version 2 packages provide validated reverse-DNS identities,
 optional SemVer metadata, and bounded offline library dependency graphs.
 Only the root shell package creates panel and overlay surfaces. Shell and
 library packages may export inert static HTML components with explicit,
-deterministic instantiation. Component inputs, slots, scoped styles,
-component-owned external resources, and hot reload are not yet available.
+deterministic instantiation, literal inputs, and one default content slot.
+Named slots, scoped styles, component-owned external resources, and hot reload
+are not yet available.

@@ -18,7 +18,19 @@
         input-enabled="false"
         input-tone="active"
         input-accent="rgb(124 196 255)"
-        input-spacing="10px"></htm-use>
+        input-spacing="10px">
+        <p class="projected-status">Caller-owned assigned content.</p>
+        <htm-use
+          component="shared.badge-label"
+          input-label="Nested component projected by the root"
+          input-tone="ready"></htm-use>
+      </htm-use>
+      <htm-use component="controls.required-frame">
+        <p class="projected-status">The required default slot is satisfied.</p>
+      </htm-use>
+      <htm-use
+        component="controls.projected-label"
+        input-label="Parent input scope survives nested projection"></htm-use>
     </main>
   </body>
 </html>

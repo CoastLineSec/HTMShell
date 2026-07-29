@@ -2,7 +2,7 @@
 
 HTMShell schema version 2 packages can export inert, reusable HTML fragments. A component definition is parsed and validated once while an immutable package snapshot candidate is built. An explicit `htm-use` then creates a fresh instance by cloning normalized template nodes. No source text is substituted or reparsed per instance.
 
-Components may declare bounded literal inputs. They still have no slots, local IDs, local state, actions, service state, repeat integration, scoped styles, or external component-owned resources.
+Components may declare bounded literal inputs and one default content slot. They still have no named slots, local IDs, local state, implicit actions or service state, repeat integration, scoped styles, or external component-owned resources.
 
 ## Export a definition
 
@@ -32,13 +32,19 @@ Both `shell` and `library` packages may declare an optional ordered `components`
           "type": "number",
           "default": 0
         }
+      ],
+      "slots": [
+        {
+          "name": "default",
+          "required": false
+        }
       ]
     }
   ]
 }
 ```
 
-Each entry has `name`, `source`, and an optional ordered `inputs` array. The manifest owns the public export and input tables. A template found in a file is not exported implicitly.
+Each entry has `name`, `source`, an optional ordered `inputs` array, and an optional `slots` array containing at most the default slot declaration. The manifest owns the public export, input, and slot tables. A template found in a file is not exported implicitly.
 
 Only the root shell package owns surfaces and topology. A library component always renders inside the root-owned document that explicitly instantiates it.
 
@@ -57,6 +63,7 @@ A source document contains one or more top-level declarations:
 <template data-htm-component="status-card">
   <article class="status-card">
     <strong>Ready</strong>
+    <slot><p>No content was supplied.</p></slot>
   </article>
 </template>
 ```
@@ -69,7 +76,7 @@ The component profile rejects:
 
 - `action-button`, `clock-text`, `repeat`, `range-control`, `peak-monitor`, and contextual repeat forms;
 - arbitrary state references, action references, service references, and other runtime `data-htm-*` behavior;
-- `slot` elements and attributes and renderable invocation children;
+- named slots, `slot` attributes, undeclared or duplicate `slot` elements, and slot elements outside component definitions;
 - `id`, `for`, fragment references, and supported ARIA local-reference attributes;
 - scripts, style elements, stylesheet links, `@import`, `url()`, and URL-valued CSS;
 - external images, SVG references, fonts, media, data files, or other component-owned resources.
@@ -92,7 +99,7 @@ It can use a direct library dependency through the declaring package's alias:
 
 A nested component resolves references in its definition owner's package scope. Bare references select an export in that package. Qualified references use one direct dependency alias from that package. Parent aliases, transitive aliases, package IDs, filesystem paths, `self`, and `root` do not leak into the scope.
 
-`htm-use` requires one `component` attribute. Its only other accepted attributes are declared `input-*` literals. It accepts no `id`, `class`, `style`, unprefixed input, or slot attributes. Only whitespace and comments may be children. Unknown references, attributes, inputs, or renderable children reject the complete candidate. Schema version 1 and manifestless headless roots cannot use `htm-use`.
+`htm-use` requires one `component` attribute. Its only other accepted attributes are declared `input-*` literals. It accepts no `id`, `class`, `style`, unprefixed input, or slot attributes. Renderable children are accepted only when the target declares its default slot. Unknown references, attributes, inputs, or content for a component without a slot reject the complete candidate. Schema version 1 and manifestless headless roots cannot use `htm-use`.
 
 ## Literal inputs
 
@@ -156,6 +163,55 @@ Components consume a value only through their nearest host's `input.<name>` name
 
 Nested components receive only their own declared literals and defaults. Parent inputs are not inherited or forwarded. Placeholder scanning, interpolation, expressions, state-reference inputs, action-reference inputs, and resource-reference inputs do not exist.
 
+## Default content slot
+
+A component export may declare exactly one default slot:
+
+```json
+{
+  "name": "content-frame",
+  "source": "components/content-frame.html",
+  "slots": [
+    {
+      "name": "default",
+      "required": false
+    }
+  ]
+}
+```
+
+The matching template contains exactly one attribute-free `slot` element:
+
+```html
+<template data-htm-component="content-frame">
+  <article class="content-frame">
+    <p>Before content</p>
+    <slot>
+      <p class="empty-message">No content was supplied.</p>
+    </slot>
+    <p>After content</p>
+  </article>
+</template>
+```
+
+Caller children are projected once at the `slot` position in caller order:
+
+```html
+<htm-use component="controls.content-frame">
+  <strong>Caller-owned content</strong>
+</htm-use>
+```
+
+Non-whitespace text, ordinary elements, self-contained inline SVG, nested component uses, and caller-permitted root built-ins are assignable. Whitespace and comments do not count as assigned content. An optional empty slot uses its definition-owned fallback, or produces no children when no fallback exists. Assigned content suppresses fallback completely.
+
+A required declaration uses `"required": true`. Every invocation must then supply assignable content, and the matching `slot` cannot contain fallback content.
+
+Projected nodes retain caller ownership. Root-owned content keeps root state, action, ID, local-reference, resource, and CSS behavior. Content projected by a parent component keeps that parent's nearest `input.*` scope and static component restrictions. It does not acquire callee inputs or the callee package resource base. Fallback content belongs to the callee and uses callee literal inputs.
+
+The component host and internal slot/projection boundaries create no layout box, paint, input region, accessibility node, stacking context, or public CSS selector. Projected or fallback children occupy the slot position directly. This is declarative projection, not Shadow DOM.
+
+Named slots, `name` attributes on `slot`, caller `slot` attributes, multiple slots, repeat projection, component-local IDs, scoped CSS, and component-owned resources are not supported.
+
 ## Host and identity
 
 Every invocation creates an internal non-rendering component host. The host retains the invocation provenance, definition identity, and component instance identity, but creates no layout box, paint, input region, accessibility node, or public CSS target. Expanded children participate in the parent layout and current root global cascade in invocation order.
@@ -163,6 +219,8 @@ Every invocation creates an internal non-rendering component host. The host reta
 Definitions are identified by the package snapshot generation, owning logical package ID, and component name. Each live or headless document creates distinct instance and descendant identities. Definitions may be shared across outputs, while document, component instance, descendant DOM, scene, surface, scale, damage, and presentation identities remain output-local.
 
 Replacing a package snapshot, document, or output creates fresh generation-safe identities. Identity never derives from a memory address, render order, source path, or HTML `id`.
+
+Each declared default slot has a generation-scoped definition identity. Every invocation has a distinct projection identity and semantic projection version. Assigned node provenance retains caller identity, while fallback provenance derives from the callee instance. Changing projected content changes the projection version without making the content part of component instance identity.
 
 ## Validation and limits
 
@@ -183,9 +241,10 @@ All package manifests, component sources, component references, component cycles
 | Supplied inputs per invocation | 64 |
 | String input | 4,096 UTF-8 bytes |
 | Supplied literal bytes per invocation | 16 KiB |
+| Default slots per component | 1 |
 
 Component references form a separately validated dependency graph. Direct, indirect, and cross-package recursion cannot become current. The dependency-first definition order is deterministic, shared definitions are parsed once, and diamonds reuse one immutable definition.
 
-See the [package graph example](../../examples/package-graph/shell.json), the [local package guide](packages.md), the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference, and the [component input reference](../types/HTMShell.Component/Input.md).
+See the [package graph example](../../examples/package-graph/shell.json), the [local package guide](packages.md), the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference, the [component input reference](../types/HTMShell.Component/Input.md), and the [default slot reference](../types/HTMShell.Component/Slot.md).
 
-Slots, local ID scoping, dynamic state and action bindings, repeat integration, component-scoped CSS, external component resources, and hot reload remain unavailable.
+Named slots, local ID scoping, dynamic state and action bindings, repeat integration, component-scoped CSS, external component resources, and hot reload remain unavailable.

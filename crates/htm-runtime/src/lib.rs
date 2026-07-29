@@ -66,17 +66,21 @@ pub use collection::{
 };
 pub use component::{
     ComponentCatalog, ComponentDefinition, ComponentDefinitionId, ComponentDefinitionKey,
-    ComponentDescendantProvenance, ComponentExport, ComponentInputConsumerKind,
-    ComponentInputConsumerRecord, ComponentInputDeclaration, ComponentInputName,
-    ComponentInputProvenance, ComponentInputType, ComponentInputValue, ComponentInputVersion,
-    ComponentInstanceId, ComponentInstanceRecord, ComponentName, ComponentReference,
+    ComponentDescendantProvenance, ComponentExport, ComponentFallbackNodeProvenance,
+    ComponentInputConsumerKind, ComponentInputConsumerRecord, ComponentInputDeclaration,
+    ComponentInputName, ComponentInputProvenance, ComponentInputType, ComponentInputValue,
+    ComponentInputVersion, ComponentInstanceId, ComponentInstanceRecord, ComponentName,
+    ComponentReference, ComponentSlotDeclaration, ComponentSlotDefinition,
+    ComponentSlotDefinitionId, ComponentSlotName, ComponentSlotProjectionId,
+    ComponentSlotProjectionOutcome, ComponentSlotProjectionRecord, ComponentSlotProjectionVersion,
     ComponentValidationTotals, MAX_COMPONENT_EXPANDED_NODES, MAX_COMPONENT_EXPORTS_PER_GRAPH,
     MAX_COMPONENT_EXPORTS_PER_PACKAGE, MAX_COMPONENT_INPUT_ATTRIBUTES,
     MAX_COMPONENT_INPUT_LITERAL_BYTES, MAX_COMPONENT_INPUT_NAME_BYTES,
     MAX_COMPONENT_INPUT_STRING_BYTES, MAX_COMPONENT_INPUTS, MAX_COMPONENT_INSTANCES_PER_DOCUMENT,
     MAX_COMPONENT_NAME_BYTES, MAX_COMPONENT_NESTING_DEPTH, MAX_COMPONENT_REFERENCES_PER_DOCUMENT,
-    MAX_COMPONENT_SOURCE_BYTES, MAX_COMPONENT_SOURCE_NODES, PreparedDocument,
-    PreparedDocumentStats, ResolvedComponentInput, ResolvedComponentInputs,
+    MAX_COMPONENT_SLOTS, MAX_COMPONENT_SOURCE_BYTES, MAX_COMPONENT_SOURCE_NODES, PreparedDocument,
+    PreparedDocumentStats, ProjectedNodeProvenance, ResolvedComponentInput,
+    ResolvedComponentInputs, SlotProjectionSource,
 };
 pub use error::RuntimeError;
 pub use incremental::{

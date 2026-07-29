@@ -537,6 +537,9 @@ pub struct LiveDocument {
     component_instances: Vec<crate::ComponentInstanceRecord>,
     component_descendants: Vec<crate::ComponentDescendantProvenance>,
     component_input_consumers: Vec<crate::ComponentInputConsumerRecord>,
+    component_slot_projections: Vec<crate::ComponentSlotProjectionRecord>,
+    projected_component_nodes: Vec<crate::ProjectedNodeProvenance>,
+    component_fallback_nodes: Vec<crate::ComponentFallbackNodeProvenance>,
     source: PathBuf,
     viewport: ViewportSpec,
     document_identity: ExperimentalDocumentIdentity,
@@ -999,28 +1002,38 @@ impl LiveDocument {
             ..Default::default()
         };
         let parse_started = Instant::now();
-        let (mut document, component_instances, component_descendants, component_input_consumers) =
-            match (&package_snapshot, prepared_document) {
-                (Some(snapshot), Some(prepared)) => {
-                    let instantiated = snapshot.instantiate_document(
-                        &prepared,
-                        document_identity.serial,
-                        config,
-                    )?;
-                    (
-                        instantiated.document,
-                        instantiated.instances,
-                        instantiated.descendants,
-                        instantiated.input_consumers,
-                    )
-                }
-                _ => (
-                    HtmlDocument::from_html(&html, config),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                ),
-            };
+        let (
+            mut document,
+            component_instances,
+            component_descendants,
+            component_input_consumers,
+            component_slot_projections,
+            projected_component_nodes,
+            component_fallback_nodes,
+        ) = match (&package_snapshot, prepared_document) {
+            (Some(snapshot), Some(prepared)) => {
+                let instantiated =
+                    snapshot.instantiate_document(&prepared, document_identity.serial, config)?;
+                (
+                    instantiated.document,
+                    instantiated.instances,
+                    instantiated.descendants,
+                    instantiated.input_consumers,
+                    instantiated.slot_projections,
+                    instantiated.projected_nodes,
+                    instantiated.fallback_nodes,
+                )
+            }
+            _ => (
+                HtmlDocument::from_html(&html, config),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        };
         document.set_incremental_layout(true);
         validate_document_limits(&document)?;
         let html_parse_ms = elapsed_ms(parse_started);
@@ -1096,6 +1109,9 @@ impl LiveDocument {
             component_instances,
             component_descendants,
             component_input_consumers,
+            component_slot_projections,
+            projected_component_nodes,
+            component_fallback_nodes,
             source,
             viewport,
             document_identity,
@@ -1604,6 +1620,18 @@ impl LiveDocument {
 
     pub fn component_input_consumers(&self) -> &[crate::ComponentInputConsumerRecord] {
         &self.component_input_consumers
+    }
+
+    pub fn component_slot_projections(&self) -> &[crate::ComponentSlotProjectionRecord] {
+        &self.component_slot_projections
+    }
+
+    pub fn projected_component_nodes(&self) -> &[crate::ProjectedNodeProvenance] {
+        &self.projected_component_nodes
+    }
+
+    pub fn component_fallback_nodes(&self) -> &[crate::ComponentFallbackNodeProvenance] {
+        &self.component_fallback_nodes
     }
 
     pub fn source(&self) -> &Path {

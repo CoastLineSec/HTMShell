@@ -98,6 +98,6 @@ The manifest is limited to 256 KiB. Document paths cannot be absolute, remote, o
 
 Dimensions are logical pixels. Scale is compositor-provided and cannot be selected by the manifest. Output names are not manifest selectors.
 
-Manifest hot reload, dynamic component bindings, slots, component-scoped styles, component-owned resources, persistent output selection, scale overrides, additional surface kinds, and more than one panel or overlay template are unavailable.
+Manifest hot reload, dynamic component bindings, named slots, component-scoped styles, component-owned resources, persistent output selection, scale overrides, additional surface kinds, and more than one panel or overlay template are unavailable. Component exports may declare one default slot.
 
 See the tracked [static panel manifest](../../../examples/static-panel/shell.json), [`PanelSurface`](PanelSurface.md), and [`OverlaySurface`](OverlaySurface.md).

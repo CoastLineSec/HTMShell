@@ -47,6 +47,33 @@
           "type": "length",
           "default": "8px"
         }
+      ],
+      "slots": [
+        {
+          "name": "default",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "required-frame",
+      "source": "components/status-card.html",
+      "slots": [
+        {
+          "name": "default",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "projected-label",
+      "source": "components/status-card.html",
+      "inputs": [
+        {
+          "name": "label",
+          "type": "string",
+          "required": true
+        }
       ]
     }
   ]

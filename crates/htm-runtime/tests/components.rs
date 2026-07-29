@@ -585,11 +585,11 @@ fn static_profile_rejects_dynamic_identity_style_and_resource_features() {
         ),
         (
             "<slot></slot>",
-            PackageErrorKind::ComponentFeatureNotSupported,
+            PackageErrorKind::ComponentSlotDefinitionUndeclared,
         ),
         (
             "<p slot=\"name\">x</p>",
-            PackageErrorKind::ComponentFeatureNotSupported,
+            PackageErrorKind::ComponentNamedSlotAttributeUnsupported,
         ),
         (
             "<style>p{color:red}</style>",
@@ -724,11 +724,11 @@ fn invocation_contract_rejects_attributes_children_and_compatibility_documents()
         ),
         (
             r#"<htm-use component="static-card">text</htm-use>"#,
-            PackageErrorKind::ComponentInvocationChildren,
+            PackageErrorKind::ComponentInvocationContentWithoutSlot,
         ),
         (
             r#"<htm-use component="static-card"><span></span></htm-use>"#,
-            PackageErrorKind::ComponentInvocationChildren,
+            PackageErrorKind::ComponentInvocationContentWithoutSlot,
         ),
         (
             r#"<HTM-USE component = "static-card" COMPONENT="static-card"></HTM-USE>"#,
@@ -1540,7 +1540,7 @@ fn unused_library_definitions_are_inert() {
 }
 
 #[test]
-fn package_graph_example_exercises_nested_components_with_literal_inputs() {
+fn package_graph_example_exercises_inputs_and_default_slot_projection() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -1557,9 +1557,12 @@ fn package_graph_example_exercises_nested_components_with_literal_inputs() {
         },
     )
     .unwrap();
-    assert_eq!(run.package_snapshot.components().definitions().len(), 2);
-    assert_eq!(run.component_instances.len(), 4);
-    assert_eq!(run.component_input_consumers.len(), 14);
+    assert_eq!(run.package_snapshot.components().definitions().len(), 4);
+    assert_eq!(run.component_instances.len(), 9);
+    assert_eq!(run.component_input_consumers.len(), 24);
+    assert_eq!(run.component_slot_projections.len(), 4);
+    assert!(!run.projected_component_nodes.is_empty());
+    assert!(!run.component_fallback_nodes.is_empty());
     assert_eq!(
         run.component_instances[0].inputs().values()[0]
             .value()

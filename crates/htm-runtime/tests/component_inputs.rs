@@ -375,7 +375,7 @@ fn declarations_and_invocations_reject_invalid_contracts() {
         ),
         (
             r#"<htm-use component="status-card" input-label="x">child</htm-use>"#,
-            PackageErrorKind::ComponentInvocationChildren,
+            PackageErrorKind::ComponentInvocationContentWithoutSlot,
         ),
     ];
     for (invocation, expected) in invocation_cases {

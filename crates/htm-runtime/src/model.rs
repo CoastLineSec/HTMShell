@@ -219,4 +219,7 @@ pub struct ExperimentRun {
     pub component_instances: Vec<crate::ComponentInstanceRecord>,
     pub component_descendants: Vec<crate::ComponentDescendantProvenance>,
     pub component_input_consumers: Vec<crate::ComponentInputConsumerRecord>,
+    pub component_slot_projections: Vec<crate::ComponentSlotProjectionRecord>,
+    pub projected_component_nodes: Vec<crate::ProjectedNodeProvenance>,
+    pub component_fallback_nodes: Vec<crate::ComponentFallbackNodeProvenance>,
 }

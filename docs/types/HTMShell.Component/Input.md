@@ -70,7 +70,7 @@ Pass values with `input-<name>`:
 
 `component` remains required. Every other attribute must be an `input-*` attribute matching one declared input. Unprefixed inputs, undeclared inputs, duplicate attributes, presence-only booleans, `id`, `class`, `style`, `slot`, and arbitrary host attributes are invalid. One use supplies at most 64 input attributes and 16 KiB of literal attribute bytes.
 
-Only whitespace and comments may be invocation children. Inputs do not add content projection or slots.
+Renderable invocation children are accepted only when the target declares its one default slot. Inputs and projection remain separate contracts. See [default slot](Slot.md).
 
 ## Required values and defaults
 
@@ -110,7 +110,7 @@ Example:
 
 These consumers resolve from immutable host-local data. They create no process-global state key, state subscription, action lookup, resource lookup, native-service demand, thread, timer, or renderer-specific state.
 
-Text nodes, ordinary attributes, and CSS are not scanned for placeholders. String substitution, interpolation, expressions, implicit input forwarding, slots, scoped CSS, component-local IDs, repeat integration, and hot reload are not supported.
+Text nodes, ordinary attributes, and CSS are not scanned for placeholders. String substitution, interpolation, expressions, implicit input forwarding, named slots, scoped CSS, component-local IDs, repeat integration, and hot reload are not supported.
 
 ## Limits
 
