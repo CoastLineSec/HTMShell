@@ -78,9 +78,9 @@ pub use component::{
     MAX_COMPONENT_INPUT_LITERAL_BYTES, MAX_COMPONENT_INPUT_NAME_BYTES,
     MAX_COMPONENT_INPUT_STRING_BYTES, MAX_COMPONENT_INPUTS, MAX_COMPONENT_INSTANCES_PER_DOCUMENT,
     MAX_COMPONENT_NAME_BYTES, MAX_COMPONENT_NESTING_DEPTH, MAX_COMPONENT_REFERENCES_PER_DOCUMENT,
-    MAX_COMPONENT_SLOTS, MAX_COMPONENT_SOURCE_BYTES, MAX_COMPONENT_SOURCE_NODES, PreparedDocument,
-    PreparedDocumentStats, ProjectedNodeProvenance, ResolvedComponentInput,
-    ResolvedComponentInputs, SlotProjectionSource,
+    MAX_COMPONENT_SLOT_NAME_BYTES, MAX_COMPONENT_SLOTS, MAX_COMPONENT_SOURCE_BYTES,
+    MAX_COMPONENT_SOURCE_NODES, PreparedDocument, PreparedDocumentStats, ProjectedNodeProvenance,
+    ResolvedComponentInput, ResolvedComponentInputs, SlotProjectionSource,
 };
 pub use error::RuntimeError;
 pub use incremental::{

@@ -62,6 +62,6 @@ Validated package data is published as one immutable generation. Headless and li
 
 The graph permits at most 64 packages, 32 direct dependencies per package, dependency depth 16, 256 component exports per package, and 4,096 component exports per graph. Each component declares at most 64 literal inputs. Each manifest is at most 256 KiB, each component source document is at most 2 MiB, and one candidate may read at most 256 MiB.
 
-There is no network resolution, package registry, version solver, optional dependency, global search path, dynamic component binding, named slot routing, scoped component CSS, component-owned external resource loading, or hot reload. Schema version 2 components may declare one default slot with caller-owned projection.
+There is no network resolution, package registry, version solver, optional dependency, global search path, dynamic component binding, scoped component CSS, component-owned external resource loading, or hot reload. Schema version 2 components may declare up to 32 default or named slots with caller-owned projection.
 
 See [local packages](../../guide/packages.md), [components](../../guide/components.md), [component inputs](../HTMShell.Component/Input.md), and [`ShellManifest`](../HTMShell/ShellManifest.md).

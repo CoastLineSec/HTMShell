@@ -589,7 +589,7 @@ fn static_profile_rejects_dynamic_identity_style_and_resource_features() {
         ),
         (
             "<p slot=\"name\">x</p>",
-            PackageErrorKind::ComponentNamedSlotAttributeUnsupported,
+            PackageErrorKind::ComponentSlotAttributePlacement,
         ),
         (
             "<style>p{color:red}</style>",
@@ -1540,7 +1540,7 @@ fn unused_library_definitions_are_inert() {
 }
 
 #[test]
-fn package_graph_example_exercises_inputs_and_default_slot_projection() {
+fn package_graph_example_exercises_inputs_and_named_slot_projection() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -1560,7 +1560,15 @@ fn package_graph_example_exercises_inputs_and_default_slot_projection() {
     assert_eq!(run.package_snapshot.components().definitions().len(), 4);
     assert_eq!(run.component_instances.len(), 9);
     assert_eq!(run.component_input_consumers.len(), 24);
-    assert_eq!(run.component_slot_projections.len(), 4);
+    assert_eq!(run.component_slot_projections.len(), 11);
+    assert!(run.component_slot_projections.iter().any(|projection| {
+        projection.id().slot_definition().name().as_str() == "icon"
+            && projection.outcome() == htm_runtime::ComponentSlotProjectionOutcome::Assigned
+    }));
+    assert!(run.component_slot_projections.iter().any(|projection| {
+        projection.id().slot_definition().name().as_str() == "content"
+            && projection.outcome() == htm_runtime::ComponentSlotProjectionOutcome::Assigned
+    }));
     assert!(!run.projected_component_nodes.is_empty());
     assert!(!run.component_fallback_nodes.is_empty());
     assert_eq!(

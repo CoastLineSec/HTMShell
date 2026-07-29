@@ -6,8 +6,9 @@ use htm_runtime::{
     MAX_COMPONENT_INPUT_LITERAL_BYTES, MAX_COMPONENT_INPUT_NAME_BYTES,
     MAX_COMPONENT_INPUT_STRING_BYTES, MAX_COMPONENT_INPUTS, MAX_COMPONENT_INSTANCES_PER_DOCUMENT,
     MAX_COMPONENT_NAME_BYTES, MAX_COMPONENT_NESTING_DEPTH, MAX_COMPONENT_REFERENCES_PER_DOCUMENT,
-    MAX_COMPONENT_SLOTS, MAX_COMPONENT_SOURCE_BYTES, MAX_COMPONENT_SOURCE_NODES,
-    MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT, MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
+    MAX_COMPONENT_SLOT_NAME_BYTES, MAX_COMPONENT_SLOTS, MAX_COMPONENT_SOURCE_BYTES,
+    MAX_COMPONENT_SOURCE_NODES, MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT,
+    MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
     MAX_CONTEXTUAL_LINK_REPEATS_PER_GROUP_TEMPLATE, MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT,
     MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE, MAX_DEPENDENCY_DEPTH, MAX_DIRECT_DEPENDENCIES,
     MAX_PACKAGE_ALIAS_BYTES, MAX_PACKAGE_ID_BYTES, MAX_PACKAGE_MANIFEST_BYTES,
@@ -273,7 +274,7 @@ fn local_package_documentation_matches_the_loader_contract() {
 }
 
 #[test]
-fn component_documentation_matches_the_literal_input_contract() {
+fn component_documentation_matches_the_composition_contract() {
     let root = workspace_root();
     let package_guide = fs::read_to_string(root.join("docs/guide/packages.md")).unwrap();
     let guide = fs::read_to_string(root.join("docs/guide/components.md")).unwrap();
@@ -317,14 +318,17 @@ fn component_documentation_matches_the_literal_input_contract() {
         "resource-reference",
         "interpolation",
         "slots",
-        "one default content slot",
+        "default or named content slots",
         "`required`",
         "fallback",
         "caller ownership",
         "caller order",
+        "direct child",
+        "`slot=\"<name>\"`",
+        "template determines rendered order",
         "no layout box",
         "no paint",
-        "Named slots",
+        "named slots",
         "Shadow DOM",
         "component-local IDs",
         "component-scoped CSS",
@@ -416,7 +420,10 @@ fn component_documentation_matches_the_literal_input_contract() {
         MAX_COMPONENT_INPUT_LITERAL_BYTES / 1024
     )));
     assert!(slot_reference.contains(&format!(
-        "| Default slot declarations per component | {MAX_COMPONENT_SLOTS} |"
+        "| Slot declarations per component | {MAX_COMPONENT_SLOTS} |"
+    )));
+    assert!(slot_reference.contains(&format!(
+        "| Slot name bytes | {MAX_COMPONENT_SLOT_NAME_BYTES} |"
     )));
 
     let manifest = ValidatedManifest::load(root.join("examples/package-graph/shell.json")).unwrap();
@@ -447,7 +454,7 @@ fn component_documentation_matches_the_literal_input_contract() {
         "\"inputs\"",
         "\"semantic_version\"",
         "\"consumers\"",
-        "\"default_slot\"",
+        "\"slots\"",
         "\"projections\"",
         "\"projected_nodes\"",
         "\"fallback_nodes\"",

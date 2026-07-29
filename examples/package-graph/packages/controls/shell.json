@@ -52,6 +52,14 @@
         {
           "name": "default",
           "required": false
+        },
+        {
+          "name": "icon",
+          "required": false
+        },
+        {
+          "name": "footer",
+          "required": false
         }
       ]
     },
@@ -60,7 +68,11 @@
       "source": "components/status-card.html",
       "slots": [
         {
-          "name": "default",
+          "name": "heading",
+          "required": false
+        },
+        {
+          "name": "content",
           "required": true
         }
       ]

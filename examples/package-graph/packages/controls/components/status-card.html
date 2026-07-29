@@ -1,9 +1,14 @@
 <!doctype html>
 <template data-htm-component="status-card">
   <article class="graph-status-card">
-    <h2>
-      <span data-htm-element="state-text" data-htm-bind="input.label"></span>
-    </h2>
+    <header class="graph-status-heading">
+      <slot name="icon">
+        <span class="slot-icon-fallback">●</span>
+      </slot>
+      <h2>
+        <span data-htm-element="state-text" data-htm-bind="input.label"></span>
+      </h2>
+    </header>
     <p>
       Count:
       <data data-htm-element="state-value" data-htm-bind="input.count"></data>
@@ -28,20 +33,25 @@
     <slot>
       <p class="slot-fallback">No caller content was supplied.</p>
     </slot>
+    <slot name="footer">
+      <small class="slot-fallback">No footer was supplied.</small>
+    </slot>
     <p class="slot-after">End projected content.</p>
   </article>
 </template>
 
 <template data-htm-component="required-frame">
   <section class="required-frame">
-    <strong>Required content</strong>
-    <slot></slot>
+    <slot name="heading">
+      <strong>Required content</strong>
+    </slot>
+    <slot name="content"></slot>
   </section>
 </template>
 
 <template data-htm-component="projected-label">
   <htm-use component="status-card" input-label="Nested caller scope">
-    <p class="projected-label">
+    <p class="projected-label" slot="footer">
       <span data-htm-element="state-text" data-htm-bind="input.label"></span>
     </p>
   </htm-use>

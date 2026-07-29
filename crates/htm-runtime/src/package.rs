@@ -129,8 +129,10 @@ pub enum PackageErrorKind {
     ComponentActionReferenceInputNotSupported,
     ComponentResourceReferenceInputNotSupported,
     InvalidComponentSlotDeclaration,
+    InvalidComponentSlotName,
     UnsupportedNamedComponentSlot,
     DuplicateDefaultComponentSlot,
+    DuplicateComponentSlotDeclaration,
     ComponentSlotDeclarationLimit,
     ComponentSlotDefinitionMissing,
     ComponentSlotDefinitionDuplicate,
@@ -142,6 +144,8 @@ pub enum PackageErrorKind {
     ComponentRequiredSlotContentMissing,
     ComponentInvocationContentWithoutSlot,
     ComponentNamedSlotAttributeUnsupported,
+    ComponentSlotAssignmentUnknown,
+    ComponentSlotAttributePlacement,
     ComponentProjectedRepeatNotSupported,
     ComponentSlotAssignmentDuplicate,
     ComponentSlotProjectionReentry,
@@ -910,7 +914,7 @@ struct ComponentExportDiagnostic<'a> {
     name: &'a str,
     source: &'a str,
     inputs: Vec<ComponentInputDeclarationDiagnostic>,
-    default_slot: Option<ComponentSlotDeclarationDiagnostic>,
+    slots: Vec<ComponentSlotDeclarationDiagnostic>,
 }
 
 #[derive(Debug, Serialize)]
@@ -927,19 +931,19 @@ struct ComponentDefinitionDiagnostic {
     source: String,
     source_nodes: usize,
     inputs: Vec<ComponentInputDeclarationDiagnostic>,
-    default_slot: Option<ComponentSlotDefinitionDiagnostic>,
+    slots: Vec<ComponentSlotDefinitionDiagnostic>,
     resolved_references: Vec<ComponentReferenceDiagnostic>,
 }
 
 #[derive(Debug, Serialize)]
 struct ComponentSlotDeclarationDiagnostic {
-    name: &'static str,
+    name: String,
     required: bool,
 }
 
 #[derive(Debug, Serialize)]
 struct ComponentSlotDefinitionDiagnostic {
-    name: &'static str,
+    name: String,
     required: bool,
     source_ordinal: u32,
     fallback_nodes: usize,
@@ -1098,12 +1102,14 @@ impl<'a> PackageGraphDiagnostic<'a> {
                             name: export.name().as_str(),
                             source: export.source(),
                             inputs: input_declaration_diagnostics(export.inputs()),
-                            default_slot: export.default_slot().map(|slot| {
-                                ComponentSlotDeclarationDiagnostic {
-                                    name: slot.name().as_str(),
+                            slots: export
+                                .slots()
+                                .iter()
+                                .map(|slot| ComponentSlotDeclarationDiagnostic {
+                                    name: slot.name().as_str().to_owned(),
                                     required: slot.required(),
-                                }
-                            }),
+                                })
+                                .collect(),
                         })
                         .collect(),
                 })
@@ -1121,15 +1127,17 @@ impl<'a> PackageGraphDiagnostic<'a> {
                         source: definition.logical_source().to_owned(),
                         source_nodes: definition.source_node_count(),
                         inputs: input_declaration_diagnostics(definition.inputs()),
-                        default_slot: definition.default_slot().map(|slot| {
-                            ComponentSlotDefinitionDiagnostic {
-                                name: slot.declaration().name().as_str(),
+                        slots: definition
+                            .slots()
+                            .iter()
+                            .map(|slot| ComponentSlotDefinitionDiagnostic {
+                                name: slot.declaration().name().as_str().to_owned(),
                                 required: slot.declaration().required(),
                                 source_ordinal: slot.source_ordinal(),
                                 fallback_nodes: slot.fallback_node_count(),
                                 fallback_version: slot.fallback_version().to_owned(),
-                            }
-                        }),
+                            })
+                            .collect(),
                         resolved_references: definition
                             .resolved_references()
                             .iter()
@@ -1973,7 +1981,7 @@ impl<'a> GraphBuilder<'a> {
                         export.name().clone(),
                         ExpectedComponentDefinition {
                             inputs: export.inputs().to_vec().into(),
-                            default_slot: export.default_slot().cloned(),
+                            slots: export.slots().to_vec().into(),
                         },
                     );
             }
@@ -2411,7 +2419,7 @@ fn validate_component_exports(
         let source = validate_component_source_path(&raw_export.source)
             .map_err(|error| error.in_package(owner.to_string()))?;
         let inputs = validate_component_inputs(raw_export.inputs, owner, &name)?;
-        let default_slot = validate_component_slots(raw_export.slots, owner, &name)?;
+        let slots = validate_component_slots(raw_export.slots, owner, &name)?;
         if !names.insert(name.clone()) {
             return Err(PackageLoadError::new(
                 PackageErrorKind::DuplicateComponentExport,
@@ -2419,7 +2427,7 @@ fn validate_component_exports(
             )
             .in_package(owner.to_string()));
         }
-        exports.push(ComponentExport::new(name, source, inputs, default_slot));
+        exports.push(ComponentExport::new(name, source, inputs, slots));
     }
     Ok(exports)
 }
@@ -2428,21 +2436,10 @@ fn validate_component_slots(
     raw: Vec<RawComponentSlot>,
     owner: &PackageId,
     component: &ComponentName,
-) -> Result<Option<ComponentSlotDeclaration>, PackageLoadError> {
-    if raw.is_empty() {
-        return Ok(None);
-    }
-    for slot in &raw {
-        ComponentSlotName::parse(&slot.name)
-            .map_err(|error| error.in_package(owner.to_string()))?;
-    }
+) -> Result<Vec<ComponentSlotDeclaration>, PackageLoadError> {
     if raw.len() > MAX_COMPONENT_SLOTS {
         return Err(PackageLoadError::new(
-            if raw.iter().all(|slot| slot.name == "default") {
-                PackageErrorKind::DuplicateDefaultComponentSlot
-            } else {
-                PackageErrorKind::ComponentSlotDeclarationLimit
-            },
+            PackageErrorKind::ComponentSlotDeclarationLimit,
             format!(
                 "component `{component}` declares {} slots; limit is {}",
                 raw.len(),
@@ -2451,11 +2448,25 @@ fn validate_component_slots(
         )
         .in_package(owner.to_string()));
     }
-    let slot = raw.into_iter().next().expect("nonempty slot list");
-    let name = ComponentSlotName::parse(&slot.name)
-        .map_err(|error| error.in_package(owner.to_string()))?;
-    debug_assert_eq!(name, ComponentSlotName::Default);
-    Ok(Some(ComponentSlotDeclaration::new(slot.required)))
+    let mut names = BTreeSet::new();
+    let mut declarations = Vec::with_capacity(raw.len());
+    for slot in raw {
+        let name = ComponentSlotName::parse(&slot.name)
+            .map_err(|error| error.in_package(owner.to_string()))?;
+        if !names.insert(name.clone()) {
+            return Err(PackageLoadError::new(
+                if name.is_default() {
+                    PackageErrorKind::DuplicateDefaultComponentSlot
+                } else {
+                    PackageErrorKind::DuplicateComponentSlotDeclaration
+                },
+                format!("component `{component}` repeats slot `{name}`"),
+            )
+            .in_package(owner.to_string()));
+        }
+        declarations.push(ComponentSlotDeclaration::new(name, slot.required));
+    }
+    Ok(declarations)
 }
 
 fn validate_component_inputs(

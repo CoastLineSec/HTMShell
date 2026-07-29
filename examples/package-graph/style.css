@@ -57,6 +57,17 @@ body {
   margin: 0;
 }
 
+.graph-status-heading {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.projected-icon,
+.slot-icon-fallback {
+  color: #7cc4ff;
+}
+
 .slot-before,
 .slot-after {
   color: #aebbd9;

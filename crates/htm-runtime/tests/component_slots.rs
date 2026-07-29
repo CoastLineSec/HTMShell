@@ -124,7 +124,7 @@ fn default_slot_declarations_and_template_matching_are_exact() {
     let declaration = snapshot.packages()[0].components()[0]
         .default_slot()
         .unwrap();
-    assert_eq!(declaration.name(), ComponentSlotName::Default);
+    assert_eq!(declaration.name(), &ComponentSlotName::Default);
     assert!(!declaration.required());
     let slot = snapshot.components().definitions()[0]
         .default_slot()
@@ -150,7 +150,7 @@ fn default_slot_declarations_and_template_matching_are_exact() {
         (
             valid.clone(),
             definition("content-frame", r#"<slot name="named"></slot>"#),
-            PackageErrorKind::ComponentSlotAttributesUnsupported,
+            PackageErrorKind::ComponentSlotDefinitionUndeclared,
         ),
         (
             valid.clone(),
@@ -168,12 +168,7 @@ fn default_slot_declarations_and_template_matching_are_exact() {
 }
 
 #[test]
-fn manifest_rejects_named_duplicate_and_malformed_slot_declarations() {
-    let named = r#"[{"name":"content-frame","source":"components/slots.html","slots":[{"name":"icon","required":false}]}]"#;
-    assert_eq!(
-        load_error(named, &definition("content-frame", "<slot></slot>"), ""),
-        PackageErrorKind::UnsupportedNamedComponentSlot
-    );
+fn manifest_rejects_duplicate_and_malformed_slot_declarations() {
     let duplicate = r#"[{"name":"content-frame","source":"components/slots.html","slots":[{"name":"default","required":false},{"name":"default","required":true}]}]"#;
     assert_eq!(
         load_error(duplicate, &definition("content-frame", "<slot></slot>"), ""),
@@ -273,7 +268,7 @@ fn required_slots_reject_empty_content_and_fallback() {
 }
 
 #[test]
-fn invocation_content_requires_a_slot_and_named_assignment_is_rejected() {
+fn invocation_content_requires_a_declared_slot() {
     let exports = format!("[{}]", plain_export("plain-card"));
     let definitions = definition("plain-card", "<p>plain</p>");
     assert_eq!(
@@ -301,7 +296,7 @@ fn invocation_content_requires_a_slot_and_named_assignment_is_rejected() {
             &definition("content-frame", "<slot></slot>"),
             r#"<htm-use component="content-frame"><span slot="icon">bad</span></htm-use>"#
         ),
-        PackageErrorKind::ComponentNamedSlotAttributeUnsupported
+        PackageErrorKind::ComponentSlotAssignmentUnknown
     );
 
     for (invocation, assigned_nodes) in [
@@ -782,7 +777,7 @@ fn failed_slot_candidate_preserves_last_known_good() {
             r#"[{"name":"content-frame","source":"components/slots.html","slots":[{"name":"named","required":false}]}]"#.to_owned(),
             definition("content-frame", "<slot></slot>"),
             r#"<htm-use component="content-frame"></htm-use>"#.to_owned(),
-            PackageErrorKind::UnsupportedNamedComponentSlot,
+            PackageErrorKind::ComponentSlotDefinitionUndeclared,
         ),
         (
             format!("[{}]", slot_export("content-frame", true, "[]")),
@@ -807,7 +802,7 @@ fn failed_slot_candidate_preserves_last_known_good() {
             valid_definition.clone(),
             r#"<htm-use component="content-frame"><p slot="named">assigned</p></htm-use>"#
                 .to_owned(),
-            PackageErrorKind::ComponentNamedSlotAttributeUnsupported,
+            PackageErrorKind::ComponentSlotAssignmentUnknown,
         ),
         (
             valid_exports.clone(),
