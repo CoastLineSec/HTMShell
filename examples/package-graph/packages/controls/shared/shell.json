@@ -30,6 +30,11 @@
           "name": "badge-icon",
           "type": "raster",
           "source": "assets/badge-icon.png"
+        },
+        {
+          "name": "badge-symbol",
+          "type": "svg",
+          "source": "assets/badge-symbol.svg"
         }
       ]
     },

@@ -1,4 +1,5 @@
 use crate::component::{ComponentDefinitionKey, ComponentInstanceId};
+use crate::component_svg::{ComponentSvgResolverStatistics, ComponentSvgSource};
 use crate::package::{PackageErrorKind, PackageId, PackageLoadError, PackageSnapshotGeneration};
 use image::codecs::jpeg::JpegDecoder;
 use image::codecs::png::PngDecoder;
@@ -21,6 +22,13 @@ pub const MAX_COMPONENT_RASTER_HEIGHT: u32 = 4_096;
 pub const MAX_COMPONENT_RASTER_PIXELS: u64 = 16_777_216;
 pub const MAX_COMPONENT_RASTER_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_COMPONENT_RESOURCE_SNAPSHOT_DECODED_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_COMPONENT_SVG_SOURCE_BYTES: u64 = 2 * 1024 * 1024;
+pub const MAX_COMPONENT_SVG_WIDTH: u32 = 4_096;
+pub const MAX_COMPONENT_SVG_HEIGHT: u32 = 4_096;
+pub const MAX_COMPONENT_SVG_PIXELS: u64 = 16_777_216;
+pub const MAX_COMPONENT_SVG_NODES: usize = 4_096;
+pub const MAX_COMPONENT_SVG_DEPTH: usize = 64;
+pub const MAX_COMPONENT_SVG_PATH_SEGMENTS: usize = 65_536;
 
 const RESERVED_NAMES: [&str; 11] = [
     "resource",
@@ -88,12 +96,14 @@ impl fmt::Display for ComponentResourceName {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ComponentResourceKind {
     Raster,
+    Svg,
 }
 
 impl ComponentResourceKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Raster => "raster",
+            Self::Svg => "svg",
         }
     }
 }
@@ -167,11 +177,20 @@ impl ComponentResourceDeclaration {
 pub struct ComponentResourceSourceId {
     package_id: PackageId,
     path: ComponentResourcePath,
+    kind: ComponentResourceKind,
 }
 
 impl ComponentResourceSourceId {
-    pub(crate) fn new(package_id: PackageId, path: ComponentResourcePath) -> Self {
-        Self { package_id, path }
+    pub(crate) fn new(
+        package_id: PackageId,
+        path: ComponentResourcePath,
+        kind: ComponentResourceKind,
+    ) -> Self {
+        Self {
+            package_id,
+            path,
+            kind,
+        }
     }
 
     pub fn package_id(&self) -> &PackageId {
@@ -182,9 +201,14 @@ impl ComponentResourceSourceId {
         &self.path
     }
 
+    pub fn kind(&self) -> ComponentResourceKind {
+        self.kind
+    }
+
     pub fn deterministic_string(&self, generation: PackageSnapshotGeneration) -> String {
         format!(
-            "component-raster-source:{}:{}@{}",
+            "component-{}-source:{}:{}@{}",
+            self.kind.as_str(),
             self.package_id,
             self.path,
             generation.get()
@@ -196,6 +220,10 @@ impl ComponentResourceSourceId {
 pub struct ComponentResourceSemanticVersion(Arc<str>);
 
 impl ComponentResourceSemanticVersion {
+    pub(crate) fn new(value: String) -> Self {
+        Self(Arc::from(value))
+    }
+
     pub fn deterministic_string(&self) -> &str {
         &self.0
     }
@@ -231,9 +259,8 @@ impl ComponentRasterSource {
         if decoded_bytes > remaining_snapshot_decoded_bytes {
             return Err(RasterDecodeError::snapshot_decoded_limit());
         }
-        let semantic_version = ComponentResourceSemanticVersion(Arc::from(semantic_version(
-            format, width, height, &rgba8,
-        )));
+        let semantic_version =
+            ComponentResourceSemanticVersion::new(semantic_version(format, width, height, &rgba8));
         Ok(Self {
             id,
             format,
@@ -286,11 +313,105 @@ impl ComponentRasterSource {
     }
 }
 
+#[derive(Debug)]
+pub enum ComponentResourceSource {
+    Raster(ComponentRasterSource),
+    Svg(ComponentSvgSource),
+}
+
+impl ComponentResourceSource {
+    pub(crate) fn decode_raster(
+        id: ComponentResourceSourceId,
+        encoded: &[u8],
+        remaining_snapshot_decoded_bytes: u64,
+    ) -> Result<Self, RasterDecodeError> {
+        ComponentRasterSource::decode(id, encoded, remaining_snapshot_decoded_bytes)
+            .map(Self::Raster)
+    }
+
+    pub(crate) fn parse_svg(
+        id: ComponentResourceSourceId,
+        encoded: &[u8],
+    ) -> Result<(Self, ComponentSvgResolverStatistics), crate::component_svg::ComponentSvgError>
+    {
+        ComponentSvgSource::parse(id, encoded)
+            .map(|(source, statistics)| (Self::Svg(source), statistics))
+    }
+
+    pub fn id(&self) -> &ComponentResourceSourceId {
+        match self {
+            Self::Raster(source) => source.id(),
+            Self::Svg(source) => source.id(),
+        }
+    }
+
+    pub fn package_id(&self) -> &PackageId {
+        self.id().package_id()
+    }
+
+    pub fn path(&self) -> &ComponentResourcePath {
+        self.id().path()
+    }
+
+    pub fn kind(&self) -> ComponentResourceKind {
+        self.id().kind()
+    }
+
+    pub fn encoded_bytes(&self) -> u64 {
+        match self {
+            Self::Raster(source) => source.encoded_bytes(),
+            Self::Svg(source) => source.encoded_bytes(),
+        }
+    }
+
+    pub fn decoded_bytes(&self) -> u64 {
+        match self {
+            Self::Raster(source) => source.decoded_bytes(),
+            Self::Svg(_) => 0,
+        }
+    }
+
+    pub fn natural_width(&self) -> f32 {
+        match self {
+            Self::Raster(source) => source.width() as f32,
+            Self::Svg(source) => source.width(),
+        }
+    }
+
+    pub fn natural_height(&self) -> f32 {
+        match self {
+            Self::Raster(source) => source.height() as f32,
+            Self::Svg(source) => source.height(),
+        }
+    }
+
+    pub fn semantic_version(&self) -> &ComponentResourceSemanticVersion {
+        match self {
+            Self::Raster(source) => source.semantic_version(),
+            Self::Svg(source) => source.semantic_version(),
+        }
+    }
+
+    pub fn raster(&self) -> Option<&ComponentRasterSource> {
+        match self {
+            Self::Raster(source) => Some(source),
+            Self::Svg(_) => None,
+        }
+    }
+
+    pub fn svg(&self) -> Option<&ComponentSvgSource> {
+        match self {
+            Self::Raster(_) => None,
+            Self::Svg(source) => Some(source),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ComponentResourceAssociation {
     definition: ComponentDefinitionKey,
     name: ComponentResourceName,
-    source: Arc<ComponentRasterSource>,
+    source: Arc<ComponentResourceSource>,
     ordinal: u16,
 }
 
@@ -298,7 +419,7 @@ impl ComponentResourceAssociation {
     pub(crate) fn new(
         definition: ComponentDefinitionKey,
         name: ComponentResourceName,
-        source: Arc<ComponentRasterSource>,
+        source: Arc<ComponentResourceSource>,
         ordinal: u16,
     ) -> Self {
         Self {
@@ -317,7 +438,7 @@ impl ComponentResourceAssociation {
         &self.name
     }
 
-    pub fn source(&self) -> &Arc<ComponentRasterSource> {
+    pub fn source(&self) -> &Arc<ComponentResourceSource> {
         &self.source
     }
 
@@ -327,7 +448,8 @@ impl ComponentResourceAssociation {
 
     pub fn deterministic_id(&self, generation: PackageSnapshotGeneration) -> String {
         format!(
-            "component-raster-association:{}:{}:{}:{}@{}",
+            "component-{}-association:{}:{}:{}:{}@{}",
+            self.source.kind().as_str(),
             self.definition,
             self.name,
             self.source.path(),
@@ -342,14 +464,18 @@ pub struct ComponentResourceValidationTotals {
     pub source_count: usize,
     pub source_read_count: usize,
     pub source_decode_count: usize,
+    pub source_parse_count: usize,
     pub association_count: usize,
     pub encoded_bytes: u64,
     pub decoded_bytes: u64,
+    pub svg_node_count: usize,
+    pub svg_path_segment_count: usize,
+    pub svg_resolver_statistics: ComponentSvgResolverStatistics,
 }
 
 #[derive(Debug, Default)]
 pub struct ComponentResourceCatalog {
-    sources: Arc<[Arc<ComponentRasterSource>]>,
+    sources: Arc<[Arc<ComponentResourceSource>]>,
     associations: Arc<[ComponentResourceAssociation]>,
     by_definition_and_name:
         BTreeMap<(ComponentDefinitionKey, ComponentResourceName), ComponentResourceAssociation>,
@@ -358,7 +484,7 @@ pub struct ComponentResourceCatalog {
 
 impl ComponentResourceCatalog {
     pub(crate) fn new(
-        sources: Vec<Arc<ComponentRasterSource>>,
+        sources: Vec<Arc<ComponentResourceSource>>,
         associations: Vec<ComponentResourceAssociation>,
         totals: ComponentResourceValidationTotals,
     ) -> Self {
@@ -380,7 +506,7 @@ impl ComponentResourceCatalog {
         }
     }
 
-    pub fn sources(&self) -> &[Arc<ComponentRasterSource>] {
+    pub fn sources(&self) -> &[Arc<ComponentResourceSource>] {
         &self.sources
     }
 
@@ -430,7 +556,8 @@ impl ComponentResourceUsage {
         template_source_ordinal: u32,
     ) -> Self {
         let id = ComponentResourceUsageId(Arc::from(format!(
-            "component-raster-usage:{}:{}:{}:{}:{}@{}",
+            "component-{}-usage:{}:{}:{}:{}:{}@{}",
+            association.source().kind().as_str(),
             document_serial,
             instance.deterministic_string(),
             node_slot,
@@ -463,7 +590,7 @@ impl ComponentResourceUsage {
         &self.association
     }
 
-    pub fn source(&self) -> &Arc<ComponentRasterSource> {
+    pub fn source(&self) -> &Arc<ComponentResourceSource> {
         self.association.source()
     }
 

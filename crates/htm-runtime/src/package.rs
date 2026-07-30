@@ -17,13 +17,14 @@ use crate::component::{
     prepare_root_document,
 };
 use crate::component_resource::{
-    ComponentRasterSource, ComponentResourceAssociation, ComponentResourceCatalog,
-    ComponentResourceDeclaration, ComponentResourceKind, ComponentResourceName,
-    ComponentResourcePath, ComponentResourceSourceId, ComponentResourceValidationTotals,
+    ComponentResourceAssociation, ComponentResourceCatalog, ComponentResourceDeclaration,
+    ComponentResourceKind, ComponentResourceName, ComponentResourcePath, ComponentResourceSource,
+    ComponentResourceSourceId, ComponentResourceValidationTotals,
     MAX_COMPONENT_RASTER_SOURCE_BYTES, MAX_COMPONENT_RESOURCE_ASSOCIATIONS_PER_PACKAGE,
     MAX_COMPONENT_RESOURCE_DECLARATIONS, MAX_COMPONENT_RESOURCE_PATH_BYTES,
     MAX_COMPONENT_RESOURCE_PATH_COMPONENTS, MAX_COMPONENT_RESOURCE_SNAPSHOT_DECODED_BYTES,
-    MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE, RasterDecodeErrorKind,
+    MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE, MAX_COMPONENT_SVG_SOURCE_BYTES,
+    RasterDecodeErrorKind,
 };
 use crate::component_style::{
     ComponentStyleCatalog, ComponentStyleValidationTotals, ComponentStylesheetAssociation,
@@ -32,6 +33,7 @@ use crate::component_style::{
     MAX_COMPONENT_STYLESHEET_FILES_PER_PACKAGE, MAX_COMPONENT_STYLESHEET_PATH_BYTES,
     MAX_COMPONENT_STYLESHEETS,
 };
+use crate::component_svg::{ComponentSvgError, ComponentSvgErrorKind};
 use crate::stylesheet::{ComponentCssErrorKind, prepare_component_author_stylesheet};
 
 pub const PACKAGE_MANIFEST_FILE: &str = "shell.json";
@@ -219,6 +221,46 @@ pub enum PackageErrorKind {
     ComponentResourceReferenceUnknown,
     ComponentResourceReferenceWrongOwner,
     ComponentResourceUsageInvalid,
+    ComponentSvgSourceTooLarge,
+    ComponentSvgMalformedXml,
+    ComponentSvgDoctypeForbidden,
+    ComponentSvgEntityDeclarationForbidden,
+    ComponentSvgProcessingInstructionForbidden,
+    ComponentSvgRootInvalid,
+    ComponentSvgElementForbidden,
+    ComponentSvgAttributeForbidden,
+    ComponentSvgNamespaceForbidden,
+    ComponentSvgCssForbidden,
+    ComponentSvgStyleAttributeForbidden,
+    ComponentSvgSubresourceForbidden,
+    ComponentSvgImageForbidden,
+    ComponentSvgDataImageForbidden,
+    ComponentSvgFontForbidden,
+    ComponentSvgTextForbidden,
+    ComponentSvgLinkForbidden,
+    ComponentSvgFragmentForbidden,
+    ComponentSvgScriptForbidden,
+    ComponentSvgAnimationForbidden,
+    ComponentSvgPaintServerForbidden,
+    ComponentSvgGradientForbidden,
+    ComponentSvgPatternForbidden,
+    ComponentSvgClipForbidden,
+    ComponentSvgMaskForbidden,
+    ComponentSvgFilterForbidden,
+    ComponentSvgMarkerForbidden,
+    ComponentSvgSymbolForbidden,
+    ComponentSvgUseForbidden,
+    ComponentSvgIntrinsicSizeInvalid,
+    ComponentSvgNaturalDimensionLimit,
+    ComponentSvgNodeLimit,
+    ComponentSvgDepthLimit,
+    ComponentSvgPathSegmentLimit,
+    ComponentSvgNonfiniteGeometry,
+    ComponentSvgTransformInvalid,
+    ComponentSvgParseFailure,
+    ComponentSvgTreeValidationFailure,
+    ComponentSvgAssociationInvalid,
+    ComponentSvgUsageInvalid,
     DocumentDepthLimit,
     PermissionDenied,
     SpecialFile,
@@ -1038,6 +1080,7 @@ struct PackageGraphDiagnostic<'a> {
     dependency_first_components: Vec<ComponentDefinitionDiagnostic>,
     component_stylesheet_sources: Vec<ComponentStylesheetSourceDiagnostic>,
     component_raster_sources: Vec<ComponentRasterSourceDiagnostic>,
+    component_svg_sources: Vec<ComponentSvgSourceDiagnostic>,
     component_resource_totals: ComponentResourceTotalsDiagnostic,
     prepared_root_documents: Vec<PreparedDocumentDiagnostic<'a>>,
 }
@@ -1111,10 +1154,26 @@ struct ComponentRasterSourceDiagnostic {
 }
 
 #[derive(Debug, Serialize)]
+struct ComponentSvgSourceDiagnostic {
+    identity: String,
+    package_id: String,
+    path: String,
+    semantic_version: String,
+    encoded_bytes: u64,
+    intrinsic_width: f32,
+    intrinsic_height: f32,
+    view_box: [f32; 4],
+    node_count: usize,
+    maximum_depth: usize,
+    path_segment_count: usize,
+}
+
+#[derive(Debug, Serialize)]
 struct ComponentResourceAssociationDiagnostic {
     identity: String,
     source_identity: String,
     name: String,
+    resource_type: &'static str,
     path: String,
     ordinal: u16,
 }
@@ -1124,9 +1183,16 @@ struct ComponentResourceTotalsDiagnostic {
     sources: usize,
     reads: usize,
     decodes: usize,
+    svg_parses: usize,
     associations: usize,
     encoded_bytes: u64,
     decoded_bytes: u64,
+    svg_nodes: usize,
+    svg_path_segments: usize,
+    secondary_filesystem_reads: usize,
+    data_image_decodes: usize,
+    font_queries: usize,
+    network_attempts: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -1197,6 +1263,7 @@ struct ComponentResourceUsageDiagnostic {
     dom_slot: usize,
     association: String,
     name: String,
+    resource_type: &'static str,
     source: String,
     source_ordinal: u32,
 }
@@ -1435,6 +1502,7 @@ impl<'a> PackageGraphDiagnostic<'a> {
                                     .id()
                                     .deterministic_string(snapshot.generation()),
                                 name: association.name().to_string(),
+                                resource_type: association.source().kind().as_str(),
                                 path: association.source().path().to_string(),
                                 ordinal: association.ordinal(),
                             })
@@ -1460,16 +1528,50 @@ impl<'a> PackageGraphDiagnostic<'a> {
                 .component_resources()
                 .sources()
                 .iter()
-                .map(|source| ComponentRasterSourceDiagnostic {
-                    identity: source.id().deterministic_string(snapshot.generation()),
-                    package_id: source.package_id().to_string(),
-                    path: source.path().to_string(),
-                    semantic_version: source.semantic_version().deterministic_string().to_owned(),
-                    format: source.format().as_str(),
-                    encoded_bytes: source.encoded_bytes(),
-                    width: source.width(),
-                    height: source.height(),
-                    decoded_bytes: source.decoded_bytes(),
+                .filter_map(|source| {
+                    source
+                        .raster()
+                        .map(|raster| ComponentRasterSourceDiagnostic {
+                            identity: raster.id().deterministic_string(snapshot.generation()),
+                            package_id: raster.package_id().to_string(),
+                            path: raster.path().to_string(),
+                            semantic_version: raster
+                                .semantic_version()
+                                .deterministic_string()
+                                .to_owned(),
+                            format: raster.format().as_str(),
+                            encoded_bytes: raster.encoded_bytes(),
+                            width: raster.width(),
+                            height: raster.height(),
+                            decoded_bytes: raster.decoded_bytes(),
+                        })
+                })
+                .collect(),
+            component_svg_sources: snapshot
+                .component_resources()
+                .sources()
+                .iter()
+                .filter_map(|source| {
+                    source.svg().map(|svg| {
+                        let view_box = svg.view_box();
+                        let statistics = svg.statistics();
+                        ComponentSvgSourceDiagnostic {
+                            identity: svg.id().deterministic_string(snapshot.generation()),
+                            package_id: svg.package_id().to_string(),
+                            path: svg.path().to_string(),
+                            semantic_version: svg
+                                .semantic_version()
+                                .deterministic_string()
+                                .to_owned(),
+                            encoded_bytes: svg.encoded_bytes(),
+                            intrinsic_width: svg.width(),
+                            intrinsic_height: svg.height(),
+                            view_box: [view_box.x, view_box.y, view_box.width, view_box.height],
+                            node_count: statistics.node_count,
+                            maximum_depth: statistics.maximum_depth,
+                            path_segment_count: statistics.path_segment_count,
+                        }
+                    })
                 })
                 .collect(),
             component_resource_totals: {
@@ -1478,9 +1580,21 @@ impl<'a> PackageGraphDiagnostic<'a> {
                     sources: totals.source_count,
                     reads: totals.source_read_count,
                     decodes: totals.source_decode_count,
+                    svg_parses: totals.source_parse_count,
                     associations: totals.association_count,
                     encoded_bytes: totals.encoded_bytes,
                     decoded_bytes: totals.decoded_bytes,
+                    svg_nodes: totals.svg_node_count,
+                    svg_path_segments: totals.svg_path_segment_count,
+                    secondary_filesystem_reads: totals
+                        .svg_resolver_statistics
+                        .secondary_filesystem_reads,
+                    data_image_decodes: totals.svg_resolver_statistics.data_image_decodes,
+                    font_queries: totals
+                        .svg_resolver_statistics
+                        .font_selection_calls
+                        .saturating_add(totals.svg_resolver_statistics.font_fallback_calls),
+                    network_attempts: totals.svg_resolver_statistics.network_attempts,
                 }
             },
             prepared_root_documents,
@@ -1637,6 +1751,7 @@ fn prepared_component_diagnostics(
             dom_slot: usage.node_slot(),
             association: usage.association().deterministic_id(snapshot.generation()),
             name: usage.association().name().to_string(),
+            resource_type: usage.source().kind().as_str(),
             source: usage.source().path().to_string(),
             source_ordinal: usage.template_source_ordinal(),
         })
@@ -2722,58 +2837,136 @@ impl<'a> GraphBuilder<'a> {
                 )
                 .in_package(package.id().to_string()));
             }
-            let unique_paths = package
+            let unique_sources = package
                 .components()
                 .iter()
                 .flat_map(ComponentExport::resources)
-                .map(ComponentResourceDeclaration::source)
-                .cloned()
+                .map(|declaration| (declaration.kind(), declaration.source().clone()))
                 .collect::<BTreeSet<_>>();
-            if unique_paths.len() > MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE {
+            if unique_sources.len() > MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE {
                 return Err(PackageLoadError::new(
                     PackageErrorKind::ComponentResourceUniqueSourceLimit,
                     format!(
-                        "package `{}` declares {} unique component raster sources; limit is {MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE}",
+                        "package `{}` declares {} unique component resource sources; limit is {MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE}",
                         package.id(),
-                        unique_paths.len()
+                        unique_sources.len()
                     ),
                 )
                 .in_package(package.id().to_string()));
             }
-            let mut loaded = BTreeMap::<ComponentResourcePath, Arc<ComponentRasterSource>>::new();
-            for path in unique_paths {
-                let declaring_component = package
+            let mut loaded = BTreeMap::<
+                (ComponentResourceKind, ComponentResourcePath),
+                Arc<ComponentResourceSource>,
+            >::new();
+            for (kind, path) in unique_sources {
+                let (declaring_component, declaring_resource_name) = package
                     .components()
                     .iter()
-                    .find(|export| {
-                        export
-                            .resources()
-                            .iter()
-                            .any(|declaration| declaration.source() == &path)
+                    .find_map(|export| {
+                        export.resources().iter().find_map(|declaration| {
+                            (declaration.kind() == kind && declaration.source() == &path)
+                                .then_some((export.name(), declaration.name()))
+                        })
                     })
-                    .map(ComponentExport::name)
                     .expect("unique component resource paths come from one declaration");
-                let encoded = self.read_component_raster(package, declaring_component, &path)?;
-                let source_id = ComponentResourceSourceId::new(package.id().clone(), path.clone());
-                let remaining_snapshot_decoded_bytes =
-                    MAX_COMPONENT_RESOURCE_SNAPSHOT_DECODED_BYTES
-                        .checked_sub(totals.decoded_bytes)
-                        .ok_or_else(|| {
-                            PackageLoadError::new(
-                                PackageErrorKind::ComponentResourceSnapshotDecodedByteLimit,
-                                "component raster decoded snapshot-byte accounting underflowed",
+                let encoded = self.read_component_resource(
+                    package,
+                    declaring_component,
+                    declaring_resource_name,
+                    kind,
+                    &path,
+                )?;
+                let source_id =
+                    ComponentResourceSourceId::new(package.id().clone(), path.clone(), kind);
+                let source = match kind {
+                    ComponentResourceKind::Raster => {
+                        let remaining_snapshot_decoded_bytes =
+                            MAX_COMPONENT_RESOURCE_SNAPSHOT_DECODED_BYTES
+                                .checked_sub(totals.decoded_bytes)
+                                .ok_or_else(|| {
+                                    PackageLoadError::new(
+                                        PackageErrorKind::ComponentResourceSnapshotDecodedByteLimit,
+                                        "component raster decoded snapshot-byte accounting underflowed",
+                                    )
+                                })?;
+                        let source = ComponentResourceSource::decode_raster(
+                            source_id,
+                            &encoded,
+                            remaining_snapshot_decoded_bytes,
+                        )
+                        .map_err(|error| {
+                            component_raster_decode_error(
+                                package,
+                                declaring_component,
+                                declaring_resource_name,
+                                &path,
+                                error,
                             )
                         })?;
-                let source = Arc::new(
-                    ComponentRasterSource::decode(
-                        source_id,
-                        &encoded,
-                        remaining_snapshot_decoded_bytes,
-                    )
-                    .map_err(|error| {
-                        component_raster_decode_error(package, declaring_component, &path, error)
-                    })?,
-                );
+                        totals.source_decode_count =
+                            totals.source_decode_count.checked_add(1).ok_or_else(|| {
+                                PackageLoadError::new(
+                                    PackageErrorKind::ComponentResourceUniqueSourceLimit,
+                                    "component resource decode count overflowed",
+                                )
+                            })?;
+                        source
+                    }
+                    ComponentResourceKind::Svg => {
+                        let (source, resolver_statistics) = ComponentResourceSource::parse_svg(
+                            source_id, &encoded,
+                        )
+                        .map_err(|error| {
+                            component_svg_parse_error(
+                                package,
+                                declaring_component,
+                                declaring_resource_name,
+                                &path,
+                                error,
+                            )
+                        })?;
+                        let statistics = source
+                            .svg()
+                            .expect("SVG parser produces an SVG resource source")
+                            .statistics();
+                        totals.source_parse_count =
+                            totals.source_parse_count.checked_add(1).ok_or_else(|| {
+                                PackageLoadError::new(
+                                    PackageErrorKind::ComponentResourceUniqueSourceLimit,
+                                    "component SVG parse count overflowed",
+                                )
+                            })?;
+                        totals.svg_node_count = totals
+                            .svg_node_count
+                            .checked_add(statistics.node_count)
+                            .ok_or_else(|| {
+                                PackageLoadError::new(
+                                    PackageErrorKind::ComponentSvgNodeLimit,
+                                    "component SVG catalog node count overflowed",
+                                )
+                            })?;
+                        totals.svg_path_segment_count = totals
+                            .svg_path_segment_count
+                            .checked_add(statistics.path_segment_count)
+                            .ok_or_else(|| {
+                                PackageLoadError::new(
+                                    PackageErrorKind::ComponentSvgPathSegmentLimit,
+                                    "component SVG catalog path-segment count overflowed",
+                                )
+                            })?;
+                        totals.svg_resolver_statistics = totals
+                            .svg_resolver_statistics
+                            .checked_add(resolver_statistics)
+                            .ok_or_else(|| {
+                                PackageLoadError::new(
+                                    PackageErrorKind::ComponentSvgSubresourceForbidden,
+                                    "component SVG resolver diagnostics overflowed",
+                                )
+                            })?;
+                        source
+                    }
+                };
+                let source = Arc::new(source);
                 let next_decoded = totals
                     .decoded_bytes
                     .checked_add(source.decoded_bytes())
@@ -2793,12 +2986,30 @@ impl<'a> GraphBuilder<'a> {
                     .in_package(package.id().to_string())
                     .at(path.as_str()));
                 }
-                totals.source_count = totals.source_count.saturating_add(1);
-                totals.source_read_count = totals.source_read_count.saturating_add(1);
-                totals.source_decode_count = totals.source_decode_count.saturating_add(1);
-                totals.encoded_bytes = totals.encoded_bytes.saturating_add(encoded.len() as u64);
+                totals.source_count = totals.source_count.checked_add(1).ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceUniqueSourceLimit,
+                        "component resource source count overflowed",
+                    )
+                })?;
+                totals.source_read_count =
+                    totals.source_read_count.checked_add(1).ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::ComponentResourceUniqueSourceLimit,
+                            "component resource read count overflowed",
+                        )
+                    })?;
+                totals.encoded_bytes = totals
+                    .encoded_bytes
+                    .checked_add(encoded.len() as u64)
+                    .ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::TotalReadLimit,
+                            "component resource encoded-byte count overflowed",
+                        )
+                    })?;
                 totals.decoded_bytes = next_decoded;
-                loaded.insert(path, Arc::clone(&source));
+                loaded.insert((kind, path), Arc::clone(&source));
                 sources.push(source);
             }
             for export in package.components() {
@@ -2814,18 +3025,20 @@ impl<'a> GraphBuilder<'a> {
                     .in_package(package.id().to_string()));
                 }
                 for (ordinal, declaration) in export.resources().iter().enumerate() {
-                    let source = loaded.get(declaration.source()).ok_or_else(|| {
-                        PackageLoadError::new(
-                            PackageErrorKind::ComponentResourceAssociationInvalid,
-                            format!(
-                                "component `{}` resource `{}` source was not loaded",
-                                export.name(),
-                                declaration.name()
-                            ),
-                        )
-                        .in_package(package.id().to_string())
-                        .at(declaration.source().as_str())
-                    })?;
+                    let source = loaded
+                        .get(&(declaration.kind(), declaration.source().clone()))
+                        .ok_or_else(|| {
+                            PackageLoadError::new(
+                                PackageErrorKind::ComponentResourceAssociationInvalid,
+                                format!(
+                                    "component `{}` resource `{}` source was not loaded",
+                                    export.name(),
+                                    declaration.name()
+                                ),
+                            )
+                            .in_package(package.id().to_string())
+                            .at(declaration.source().as_str())
+                        })?;
                     associations.push(ComponentResourceAssociation::new(
                         definition.clone(),
                         declaration.name().clone(),
@@ -2833,28 +3046,46 @@ impl<'a> GraphBuilder<'a> {
                         u16::try_from(ordinal)
                             .expect("component resource declaration limit fits u16"),
                     ));
-                    totals.association_count = totals.association_count.saturating_add(1);
+                    totals.association_count =
+                        totals.association_count.checked_add(1).ok_or_else(|| {
+                            PackageLoadError::new(
+                                PackageErrorKind::ComponentResourceAssociationLimit,
+                                "component resource association count overflowed",
+                            )
+                        })?;
                 }
             }
         }
         Ok(ComponentResourceCatalog::new(sources, associations, totals))
     }
 
-    fn read_component_raster(
+    fn read_component_resource(
         &mut self,
         package: &ResolvedPackage,
         component: &ComponentName,
+        resource_name: &ComponentResourceName,
+        kind: ComponentResourceKind,
         path: &ComponentResourcePath,
     ) -> Result<Vec<u8>, PackageLoadError> {
         let logical = path.as_str();
+        let limit = match kind {
+            ComponentResourceKind::Raster => MAX_COMPONENT_RASTER_SOURCE_BYTES,
+            ComponentResourceKind::Svg => MAX_COMPONENT_SVG_SOURCE_BYTES,
+        };
         let bytes = self
             .file_system
-            .read_regular_nofollow(
-                package.canonical_root(),
-                logical,
-                MAX_COMPONENT_RASTER_SOURCE_BYTES,
-            )
-            .map_err(|error| component_resource_read_error(package, component, path, error))?;
+            .read_regular_nofollow(package.canonical_root(), logical, limit)
+            .map_err(|error| {
+                component_resource_read_error(
+                    package,
+                    component,
+                    resource_name,
+                    kind,
+                    path,
+                    limit,
+                    error,
+                )
+            })?;
         self.budget.account(bytes.len())?;
         Ok(bytes)
     }
@@ -3465,6 +3696,7 @@ fn validate_component_resources(
         }
         let kind = match entry.resource_type.as_str() {
             "raster" => ComponentResourceKind::Raster,
+            "svg" => ComponentResourceKind::Svg,
             value => {
                 return Err(PackageLoadError::new(
                     PackageErrorKind::UnsupportedComponentResourceType,
@@ -4115,37 +4347,46 @@ fn component_stylesheet_css_error(
 fn component_resource_read_error(
     package: &ResolvedPackage,
     component: &ComponentName,
+    resource_name: &ComponentResourceName,
+    resource_kind: ComponentResourceKind,
     path: &ComponentResourcePath,
+    source_limit: u64,
     error: SecureReadError,
 ) -> PackageLoadError {
+    let resource_label = resource_kind.as_str();
     let base = match error {
         SecureReadError::Missing(error) => io_package_error(
             PackageErrorKind::ComponentResourceMissing,
-            "open component raster source",
+            "open component resource source",
             Path::new(path.as_str()),
             error,
         ),
         SecureReadError::Symlink => PackageLoadError::new(
             PackageErrorKind::ComponentResourceSymlink,
-            "component raster source path contains a symbolic link",
+            "component resource source path contains a symbolic link",
         ),
         SecureReadError::Special => PackageLoadError::new(
             PackageErrorKind::ComponentResourceSpecialFile,
-            "component raster source must be a regular file with directory path components",
+            "component resource source must be a regular file with directory path components",
         ),
-        SecureReadError::TooLarge => PackageLoadError::new(
-            PackageErrorKind::ComponentResourceSourceTooLarge,
-            format!(
-                "component raster encoded source exceeds {MAX_COMPONENT_RASTER_SOURCE_BYTES} bytes"
-            ),
-        ),
+        SecureReadError::TooLarge => {
+            let kind = if resource_kind == ComponentResourceKind::Svg {
+                PackageErrorKind::ComponentSvgSourceTooLarge
+            } else {
+                PackageErrorKind::ComponentResourceSourceTooLarge
+            };
+            PackageLoadError::new(
+                kind,
+                format!("component {resource_label} source exceeds {source_limit} bytes"),
+            )
+        }
         SecureReadError::Mutation => PackageLoadError::new(
             PackageErrorKind::ComponentResourceMutationRace,
-            "component raster source changed during the bounded read",
+            "component resource source changed during the bounded read",
         ),
         SecureReadError::Io(error) => io_package_error(
             PackageErrorKind::Io,
-            "read component raster source",
+            "read component resource source",
             Path::new(path.as_str()),
             error,
         ),
@@ -4153,8 +4394,89 @@ fn component_resource_read_error(
     PackageLoadError::new(
         base.kind,
         format!(
-            "component `{component}` resource source `{path}`: {}",
+            "component `{component}` {resource_label} resource `{resource_name}` source `{path}`: {}",
             base.message
+        ),
+    )
+    .in_package(package.id().to_string())
+    .at(path.as_str())
+}
+
+fn component_svg_parse_error(
+    package: &ResolvedPackage,
+    component: &ComponentName,
+    resource_name: &ComponentResourceName,
+    path: &ComponentResourcePath,
+    error: ComponentSvgError,
+) -> PackageLoadError {
+    let kind = match error.kind {
+        ComponentSvgErrorKind::MalformedXml => PackageErrorKind::ComponentSvgMalformedXml,
+        ComponentSvgErrorKind::DoctypeForbidden => PackageErrorKind::ComponentSvgDoctypeForbidden,
+        ComponentSvgErrorKind::EntityForbidden => {
+            PackageErrorKind::ComponentSvgEntityDeclarationForbidden
+        }
+        ComponentSvgErrorKind::ProcessingInstructionForbidden => {
+            PackageErrorKind::ComponentSvgProcessingInstructionForbidden
+        }
+        ComponentSvgErrorKind::RootInvalid => PackageErrorKind::ComponentSvgRootInvalid,
+        ComponentSvgErrorKind::ElementForbidden => PackageErrorKind::ComponentSvgElementForbidden,
+        ComponentSvgErrorKind::AttributeForbidden => {
+            PackageErrorKind::ComponentSvgAttributeForbidden
+        }
+        ComponentSvgErrorKind::NamespaceForbidden => {
+            PackageErrorKind::ComponentSvgNamespaceForbidden
+        }
+        ComponentSvgErrorKind::CssForbidden => PackageErrorKind::ComponentSvgCssForbidden,
+        ComponentSvgErrorKind::StyleAttributeForbidden => {
+            PackageErrorKind::ComponentSvgStyleAttributeForbidden
+        }
+        ComponentSvgErrorKind::SubresourceForbidden => {
+            PackageErrorKind::ComponentSvgSubresourceForbidden
+        }
+        ComponentSvgErrorKind::ImageForbidden => PackageErrorKind::ComponentSvgImageForbidden,
+        ComponentSvgErrorKind::DataImageForbidden => {
+            PackageErrorKind::ComponentSvgDataImageForbidden
+        }
+        ComponentSvgErrorKind::FontForbidden => PackageErrorKind::ComponentSvgFontForbidden,
+        ComponentSvgErrorKind::TextForbidden => PackageErrorKind::ComponentSvgTextForbidden,
+        ComponentSvgErrorKind::LinkForbidden => PackageErrorKind::ComponentSvgLinkForbidden,
+        ComponentSvgErrorKind::FragmentForbidden => PackageErrorKind::ComponentSvgFragmentForbidden,
+        ComponentSvgErrorKind::ScriptForbidden => PackageErrorKind::ComponentSvgScriptForbidden,
+        ComponentSvgErrorKind::AnimationForbidden => {
+            PackageErrorKind::ComponentSvgAnimationForbidden
+        }
+        ComponentSvgErrorKind::PaintServerForbidden => {
+            PackageErrorKind::ComponentSvgPaintServerForbidden
+        }
+        ComponentSvgErrorKind::GradientForbidden => PackageErrorKind::ComponentSvgGradientForbidden,
+        ComponentSvgErrorKind::PatternForbidden => PackageErrorKind::ComponentSvgPatternForbidden,
+        ComponentSvgErrorKind::ClipForbidden => PackageErrorKind::ComponentSvgClipForbidden,
+        ComponentSvgErrorKind::MaskForbidden => PackageErrorKind::ComponentSvgMaskForbidden,
+        ComponentSvgErrorKind::FilterForbidden => PackageErrorKind::ComponentSvgFilterForbidden,
+        ComponentSvgErrorKind::MarkerForbidden => PackageErrorKind::ComponentSvgMarkerForbidden,
+        ComponentSvgErrorKind::SymbolForbidden => PackageErrorKind::ComponentSvgSymbolForbidden,
+        ComponentSvgErrorKind::UseForbidden => PackageErrorKind::ComponentSvgUseForbidden,
+        ComponentSvgErrorKind::IntrinsicSizeInvalid => {
+            PackageErrorKind::ComponentSvgIntrinsicSizeInvalid
+        }
+        ComponentSvgErrorKind::NaturalDimensionLimit => {
+            PackageErrorKind::ComponentSvgNaturalDimensionLimit
+        }
+        ComponentSvgErrorKind::NodeLimit => PackageErrorKind::ComponentSvgNodeLimit,
+        ComponentSvgErrorKind::DepthLimit => PackageErrorKind::ComponentSvgDepthLimit,
+        ComponentSvgErrorKind::PathSegmentLimit => PackageErrorKind::ComponentSvgPathSegmentLimit,
+        ComponentSvgErrorKind::NonfiniteGeometry => PackageErrorKind::ComponentSvgNonfiniteGeometry,
+        ComponentSvgErrorKind::TransformInvalid => PackageErrorKind::ComponentSvgTransformInvalid,
+        ComponentSvgErrorKind::ParseFailure => PackageErrorKind::ComponentSvgParseFailure,
+        ComponentSvgErrorKind::TreeValidationFailure => {
+            PackageErrorKind::ComponentSvgTreeValidationFailure
+        }
+    };
+    PackageLoadError::new(
+        kind,
+        format!(
+            "component `{component}` SVG resource `{resource_name}` source `{path}` at {}:{}: {}",
+            error.line, error.column, error.message
         ),
     )
     .in_package(package.id().to_string())
@@ -4164,6 +4486,7 @@ fn component_resource_read_error(
 fn component_raster_decode_error(
     package: &ResolvedPackage,
     component: &ComponentName,
+    resource_name: &ComponentResourceName,
     path: &ComponentResourcePath,
     error: crate::component_resource::RasterDecodeError,
 ) -> PackageLoadError {
@@ -4184,7 +4507,7 @@ fn component_raster_decode_error(
     PackageLoadError::new(
         kind,
         format!(
-            "component `{component}` resource source `{path}`: {}",
+            "component `{component}` raster resource `{resource_name}` source `{path}`: {}",
             error.message
         ),
     )

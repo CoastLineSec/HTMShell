@@ -81,6 +81,11 @@
           "name": "alpha-chip",
           "type": "raster",
           "source": "assets/alpha-chip.webp"
+        },
+        {
+          "name": "control-symbol",
+          "type": "svg",
+          "source": "assets/control-symbol.svg"
         }
       ]
     },
@@ -105,6 +110,11 @@
           "name": "status-orb",
           "type": "raster",
           "source": "assets/status-orb.png"
+        },
+        {
+          "name": "control-symbol",
+          "type": "svg",
+          "source": "assets/control-symbol.svg"
         }
       ]
     },
@@ -120,6 +130,13 @@
       ],
       "styles": [
         "components/component-frames.css"
+      ],
+      "resources": [
+        {
+          "name": "control-symbol",
+          "type": "svg",
+          "source": "assets/control-symbol.svg"
+        }
       ]
     }
   ]

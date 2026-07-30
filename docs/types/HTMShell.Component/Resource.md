@@ -1,8 +1,8 @@
 # `HTMShell.Component.Resource`
 
-**Kind:** Definition-owned static raster | **Status:** Experimental
+**Kind:** Definition-owned static image | **Status:** Experimental
 
-`HTMShell.Component.Resource` gives a schema version 2 component definition a bounded catalog of package-owned raster images. Resources are explicit manifest declarations and are referenced only by logical name from component-owned HTML image elements.
+`HTMShell.Component.Resource` gives a schema version 2 component definition a bounded catalog of package-owned raster images and simple SVG geometry. Resources are explicit manifest declarations referenced only by logical name from component-owned HTML image elements.
 
 ## Declaration
 
@@ -14,27 +14,32 @@ A component export may contain an ordered `resources` array:
   "source": "components/media-card.html",
   "resources": [
     {
-      "name": "speaker-icon",
+      "name": "speaker-photo",
       "type": "raster",
       "source": "assets/speaker.png"
+    },
+    {
+      "name": "speaker-symbol",
+      "type": "svg",
+      "source": "assets/speaker.svg"
     }
   ]
 }
 ```
 
-Every entry contains exactly `name`, `type`, and `source`. The only supported type is `raster`. A component may declare at most 32 resources. Names are local to one component definition, and one source file may be associated with several names or definitions.
+Every entry contains exactly `name`, `type`, and `source`. Supported types are `raster` and `svg`. A component may declare at most 32 resources. Names are local to one component definition, and one source file may be associated with several names or definitions.
 
 Names contain 1 through 64 lowercase ASCII bytes. They start with a letter, end with a letter or digit, and otherwise use lowercase letters, digits, and single hyphens. Consecutive hyphens are invalid. The names `resource`, `component`, `input`, `slot`, `style`, `state`, `action`, `service`, `surface`, `host`, and `repeat` are reserved. Names beginning with `htm-`, `xml-`, or `xlink-` are also reserved.
 
 ## Markup reference
 
-Component-owned HTML consumes an associated raster through one exact form:
+Component-owned HTML consumes either resource kind through one exact form:
 
 ```html
-<img src="resource:speaker-icon" alt="">
+<img src="resource:speaker-symbol" alt="">
 ```
 
-The `resource:` prefix is lowercase. The reference contains only one declared logical name, with no slash, query, fragment, percent encoding, or dependency alias. This profile applies only to `<img src>`. It does not add component resource support to SVG, `srcset`, CSS `url()`, fonts, media elements, or generic data consumers.
+The `resource:` prefix is lowercase. The reference contains only one declared logical name, with no slash, query, fragment, percent encoding, or dependency alias. This profile applies only to `<img src>`. It does not add component resource support to SVG `<image>`, `srcset`, CSS `url()`, fonts, media elements, or generic data consumers.
 
 Ordinary relative, absolute, network, and data URL image sources remain invalid in component definitions. Root documents do not receive a component resource catalog and retain their existing resource behavior.
 
@@ -58,52 +63,95 @@ Every path component is opened without following symbolic links. The final objec
 
 Hard-linked paths remain separate logical source identities.
 
-## Raster profile and limits
+## Raster profile
 
-The accepted encoded formats are:
+The accepted encoded raster formats are:
 
 - PNG;
 - JPEG;
 - static WebP.
 
-GIF, animated WebP, animated PNG, SVG, BMP, TIFF, ICO, AVIF, and other formats are invalid. HTMShell detects the format from encoded bytes rather than the file extension. Animated content is rejected instead of displaying one frame.
+GIF, animated WebP, animated PNG, BMP, TIFF, ICO, AVIF, and other raster formats are invalid. HTMShell detects the format from encoded bytes rather than the file extension. Animated content is rejected instead of displaying one frame.
+
+The immutable snapshot stores width, height, encoded format metadata, and straight-alpha RGBA8 pixels in top-to-bottom row order. PNG and WebP alpha are preserved. JPEG pixels receive alpha 255. Transparent-pixel RGB values follow the locked decoder result. The runtime does not promise ICC color management, EXIF orientation application, or gamma-perfect correction beyond the current decoder pipeline.
+
+## Simple SVG profile
+
+A component SVG is static, self-contained, geometry-only, font-free, CSS-free, reference-free, and subresource-free.
+
+The only allowed elements are:
+
+```text
+svg
+g
+path
+rect
+circle
+ellipse
+line
+polyline
+polygon
+```
+
+The root is the only `svg` element and must declare a positive finite `viewBox`. `width` and `height` may both be omitted, in which case natural dimensions come from the viewBox. If present, both must use positive finite unitless or `px` values. Percentages and context-dependent units reject.
+
+Allowed attributes are limited by element. They cover `width`, `height`, `viewBox`, `preserveAspectRatio`, finite transforms, opacity, solid hexadecimal fill and stroke, fill and stroke opacity, fill rule, stroke geometry, path data, and the geometry attributes needed by the allowed shapes. Paint is limited to `none` or hexadecimal colors in `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa` form. Named colors and `currentColor` are not accepted.
+
+The SVG profile rejects:
+
+- nested `svg`, `defs`, unknown elements, foreign namespaces, and unknown attributes;
+- CSS, `style` elements, `style` attributes, classes, CSS variables, and stylesheets;
+- text, font lookup, glyph conversion, and font declarations;
+- image elements, embedded raster data, data URLs, external files, and network references;
+- IDs, links, fragments, `href`, `xlink:href`, `symbol`, and `use`;
+- gradients, patterns, paint-server URLs, clip paths, masks, filters, and markers;
+- scripts, event-handler attributes, processing instructions, document types, entity declarations, and animation.
+
+Component stylesheets and caller styles do not enter the external SVG tree. Presentation attributes are the only styling mechanism. The component parser uses explicit no-op image resolvers, an empty font database, no font resolver, no injected stylesheet, no resource directory, and XML parsing with DTD and external entity resolution disabled. Parsing the declared SVG performs no secondary filesystem read, raster decode, font query, or network attempt.
+
+Root-owned external SVGs continue using the existing root document resource pipeline. That pipeline is separate and less restrictive.
+
+## Limits
 
 | Limit | Value |
 | --- | ---: |
 | Resource declarations per component | 32 |
 | Resource associations per package | 4,096 |
-| Unique raster source files per package | 256 |
+| Unique resource source files per package | 256 |
 | Logical resource name | 64 bytes |
 | Logical source path | 512 UTF-8 bytes |
 | Source path components | 32 |
-| Encoded source file | 8 MiB |
+| Encoded raster source file | 8 MiB |
 | Raster width | 4,096 pixels |
 | Raster height | 4,096 pixels |
 | Raster pixels | 16,777,216 |
 | One decoded raster | 64 MiB |
 | Decoded component resources per snapshot | 256 MiB |
+| Encoded SVG source file | 2 MiB |
+| SVG natural width | 4,096 pixels |
+| SVG natural height | 4,096 pixels |
+| SVG natural area | 16,777,216 pixels |
+| SVG allowed nodes | 4,096 |
+| SVG element depth | 64 |
+| SVG normalized path segments | 65,536 |
 | Total package candidate reads | 256 MiB |
 
-Dimensions must be nonzero. HTMShell does not downscale or crop oversized sources.
+Dimensions must be positive. HTMShell does not downscale, crop, simplify, or flatten oversized sources to evade a limit.
 
-## Decode and sharing
+## Validation and sharing
 
-All declarations are validated eagerly during candidate construction, including resources on unused component definitions. Every unique owning-package and logical-path source is read and decoded once per candidate. Invalid unused resources reject the candidate.
+All declarations are validated eagerly during candidate construction, including resources on unused component definitions. Every unique owning-package, resource kind, and logical-path source is read once per candidate. Raster sources are decoded once. SVG sources are structurally validated and normalized into one immutable tree once. Invalid unused resources reject the candidate.
 
-The immutable snapshot stores width, height, encoded format metadata, and straight-alpha RGBA8 pixels in top-to-bottom row order. PNG and WebP alpha are preserved. JPEG pixels receive alpha 255. Transparent-pixel RGB values follow the locked decoder result. The runtime does not promise ICC color management, EXIF orientation application, or gamma-perfect correction beyond the current decoder pipeline.
-
-Definitions receive immutable ordered associations. Component instances, prepared roots, headless and live documents, and outputs share the snapshot-owned neutral decoded source. Each materialized image still has a distinct generation-safe usage identity.
-
-## Rendering and lifecycle
+Definitions receive immutable ordered associations. Component instances, prepared roots, headless and live documents, and outputs share the snapshot-owned neutral source. Each materialized image still has a distinct generation-safe usage identity.
 
 Natural dimensions enter the existing HTML image layout path. Current CSS sizing, clipping, opacity, transforms, and foreground effects remain authoritative. Resource resolution adds no wrapper, component host box, slot box, or selector marker.
 
-CPU rendering consumes the shared neutral pixels without filesystem access or another decode. Vello prepares backend-private image state lazily for the current device generation. A device reset discards GPU state while retaining the neutral snapshot source for preparation again. Successful native Vello presentation does not require a readback or SHM fallback.
+CPU and Vello consume the same immutable source without filesystem access or reparsing after publication. Raster GPU state is prepared lazily for the current device generation. Simple SVG remains neutral vector geometry and is recorded into the renderer scene from the shared tree, so there is no independent SVG image upload. Device and output replacement retain the package source and create fresh backend or usage generations as required.
 
-An unused library resource may be read and decoded during package validation, but it creates no component instance, prepared usage, scene resource, GPU upload, surface, frame, service demand, or Wayland object. Closed and idle surfaces perform no resource work.
+An unused library resource may be read and validated during package preparation, but it creates no component instance, prepared usage, scene resource, rasterization, GPU preparation, surface, frame, service demand, or Wayland object. Closed and idle surfaces perform no resource work.
 
-Any declaration, path, read, format, decode, association, or reference failure rejects the complete candidate. The last published snapshot remains current.
+Any declaration, path, read, parse, decode, association, or reference failure rejects the complete candidate. The last published snapshot remains current.
 
-External SVG resources, CSS URL assets, component fonts, generic data, resource-reference inputs, dynamic resource bindings, animation, and dependency resource aliases are not supported.
+SVG text, subresources, advanced reference graphs, CSS URL assets, component fonts, generic data, resource-reference inputs, dynamic resource bindings, animation, and dependency resource aliases are not supported.
 
 See [components](../../guide/components.md), [`HTMShell.Component`](README.md), [slots](Slot.md), [component styles](Style.md), and [local packages](../../guide/packages.md).

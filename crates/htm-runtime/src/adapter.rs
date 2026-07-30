@@ -691,7 +691,13 @@ pub(crate) fn image_diagnostic(node: &Node) -> Option<ImageDiagnostic> {
     let source = element
         .attr(blitz_dom::local_name!("src"))
         .map(str::to_owned)
-        .or_else(|| element.image_data().map(|_| "component-raster".to_owned()))?;
+        .or_else(|| {
+            element.image_data().map(|image| match image {
+                ImageData::Raster(_) => "component-raster".to_owned(),
+                ImageData::Svg(_) => "component-svg".to_owned(),
+                ImageData::None => "component-resource-unavailable".to_owned(),
+            })
+        })?;
     let decoded_kind = match element.image_data() {
         Some(ImageData::Raster(_)) => "raster",
         Some(ImageData::Svg(_)) => "svg",

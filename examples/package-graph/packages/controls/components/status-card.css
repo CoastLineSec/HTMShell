@@ -44,6 +44,18 @@
   filter: contrast(1.04) drop-shadow(0 2px 4px rgba(4, 8, 18, 0.45));
 }
 
+.component-svg-strip {
+  display: flex;
+  gap: 8px;
+}
+
+.component-svg-strip img {
+  width: 56px;
+  height: 42px;
+  border-radius: 8px;
+  filter: brightness(1.04) drop-shadow(0 3px 6px rgba(4, 8, 18, 0.5));
+}
+
 .slot-before,
 .slot-after {
   color: #aebbd9;
@@ -52,4 +64,9 @@
 
 .slot-fallback {
   color: #dce6ff;
+}
+
+.slot-fallback-symbol {
+  width: 40px;
+  height: 30px;
 }

@@ -150,6 +150,7 @@ pub enum SceneResourceKey {
     Dom { slot: usize, generation: u64 },
     Process { name: String },
     ComponentRaster { path: String },
+    ComponentSvg { path: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -828,24 +829,40 @@ fn register_component_resource(
 ) -> Result<(SceneResourceId, SceneResourceVersion), RuntimeError> {
     let source = usage.source();
     let generation = usage.instance().snapshot_generation();
+    let (kind, key, byte_len, label) = match source.as_ref() {
+        crate::ComponentResourceSource::Raster(source) => (
+            ResourceKind::RasterImage,
+            SceneResourceKey::ComponentRaster {
+                path: source.path().as_str().to_owned(),
+            },
+            usize::try_from(source.decoded_bytes()).ok(),
+            "raster",
+        ),
+        crate::ComponentResourceSource::Svg(source) => (
+            ResourceKind::Svg,
+            SceneResourceKey::ComponentSvg {
+                path: source.path().as_str().to_owned(),
+            },
+            usize::try_from(source.encoded_bytes()).ok(),
+            "SVG",
+        ),
+    };
     let id = SceneResourceId {
         owner: ResourceOwner::Package {
             generation: generation.get(),
             package_id: source.package_id().to_string(),
         },
-        kind: ResourceKind::RasterImage,
-        key: SceneResourceKey::ComponentRaster {
-            path: source.path().as_str().to_owned(),
-        },
+        kind,
+        key,
     };
     let version = SceneResourceVersion(stable_hash_bytes(
         source.semantic_version().deterministic_string().as_bytes(),
     ));
     let diagnostic_key = source.id().deterministic_string(generation);
     if diagnostic_key.len() > 4_096 {
-        return Err(RuntimeError::LimitExceeded(
-            "retained component raster key exceeds 4096 bytes".into(),
-        ));
+        return Err(RuntimeError::LimitExceeded(format!(
+            "retained component {label} key exceeds 4096 bytes"
+        )));
     }
     resources.insert(
         id.clone(),
@@ -854,7 +871,7 @@ fn register_component_resource(
             version,
             lifecycle: ResourceLifecycle::Ready,
             diagnostic_key,
-            byte_len: usize::try_from(source.decoded_bytes()).ok(),
+            byte_len,
         },
     );
     Ok((id, version))

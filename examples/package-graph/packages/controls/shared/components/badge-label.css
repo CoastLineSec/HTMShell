@@ -3,6 +3,11 @@
   height: 16px;
 }
 
+.package-badge-symbol {
+  width: 18px;
+  height: 18px;
+}
+
 .package-badge {
   color: #b8c9ff;
   font-size: 0.85rem;

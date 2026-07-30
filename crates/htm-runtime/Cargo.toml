@@ -29,5 +29,7 @@ serde_json.workspace = true
 skrifa.workspace = true
 stylo.workspace = true
 stylo_traits.workspace = true
+svgtypes.workspace = true
+usvg.workspace = true
 url.workspace = true
 vello = { workspace = true, optional = true }

@@ -2,7 +2,7 @@
 
 HTMShell schema version 2 packages can export inert, reusable HTML fragments. A component definition is parsed and validated once while an immutable package snapshot candidate is built. An explicit `htm-use` then creates a fresh instance by cloning normalized template nodes. No source text is substituted or reparsed per instance.
 
-Components may declare bounded literal inputs, up to 32 default or named content slots, up to 16 package-owned stylesheets, and up to 32 static raster resources. They still have no local IDs, local state, implicit actions or service state, repeat integration, external SVG resources, CSS URL assets, or fonts.
+Components may declare bounded literal inputs, up to 32 default or named content slots, up to 16 package-owned stylesheets, and up to 32 static raster or simple SVG resources. They still have no local IDs, local state, implicit actions or service state, repeat integration, SVG subresources, CSS URL assets, or fonts.
 
 ## Export a definition
 
@@ -89,7 +89,7 @@ The component profile rejects:
 - undeclared or duplicate `slot` elements, invalid slot names or routing, nested slot fallback, and slot elements outside component definitions;
 - `id`, `for`, fragment references, and supported ARIA local-reference attributes;
 - scripts, style elements, stylesheet links, `@import`, `url()`, and URL-valued CSS;
-- undeclared images, ordinary relative component image paths, SVG references, fonts, media, data files, or other component-owned resources.
+- undeclared images, ordinary relative component image paths, SVG subresources or advanced references, fonts, media, data files, or other component-owned resources.
 
 Root shell documents retain their existing built-ins, state, actions, repeats, stylesheets, and resources outside component definitions.
 
@@ -269,9 +269,9 @@ Selector isolation does not change the rendered tree. Inherited properties and s
 
 Component sheets use the existing HTMShell CSS selector and property profile. `@import`, `@font-face`, any `url()` resource, `:host`, `::slotted()`, shadow-tree selectors, ID selectors, and unsupported CSS reject the complete candidate. No external asset is fetched. The scope is internal metadata: no public attribute, generated class, selector rewriting, layout wrapper, or Shadow DOM is introduced.
 
-## Component raster resources
+## Component image resources
 
-The optional `resources` array declares definition-owned static raster sources:
+The optional `resources` array declares definition-owned static raster or simple SVG sources:
 
 ```json
 {
@@ -282,6 +282,11 @@ The optional `resources` array declares definition-owned static raster sources:
       "name": "status-icon",
       "type": "raster",
       "source": "assets/status-icon.png"
+    },
+    {
+      "name": "status-symbol",
+      "type": "svg",
+      "source": "assets/status-symbol.svg"
     }
   ]
 }
@@ -295,13 +300,17 @@ Component markup consumes the association by logical name:
 
 Names contain 1 through 64 lowercase ASCII bytes and use letters, digits, and single interior hyphens. Paths resolve from the package root that owns the export. They are normalized, package-contained, opened without following symlinks, limited to 512 UTF-8 bytes and 32 components, and must identify a regular file.
 
-PNG, JPEG, and static WebP are supported. GIF, animated WebP, animated PNG, SVG, and other formats reject. An encoded source is at most 8 MiB. Width and height are at most 4,096 pixels, total pixels are at most 16,777,216, one canonical RGBA8 decode is at most 64 MiB, and all decoded component resources in one snapshot are at most 256 MiB.
+Raster resources accept PNG, JPEG, and static WebP. GIF, animated WebP, animated PNG, and other raster formats reject. An encoded raster is at most 8 MiB. Width and height are at most 4,096 pixels, total pixels are at most 16,777,216, one canonical RGBA8 decode is at most 64 MiB, and all decoded component rasters in one snapshot are at most 256 MiB.
 
-Every declared source, including one on an unused definition, is eagerly read, validated, and decoded before publication. One owning-package and logical-path source is read and decoded once per candidate, then shared by associations, definitions, instances, roots, and outputs. CPU and Vello consume the same immutable neutral pixels. Vello preparation remains lazy and device-generation-owned.
+Simple SVG resources are geometry-only and self-contained. They allow only `svg`, `g`, `path`, `rect`, `circle`, `ellipse`, `line`, `polyline`, and `polygon`, with finite transforms, solid hexadecimal fill and stroke, opacity, stroke geometry, and the attributes required by those shapes. The root requires a positive finite `viewBox`. The source is at most 2 MiB, natural dimensions are at most 4,096 by 4,096 with area at most 16,777,216, and the tree is limited to 4,096 nodes, depth 64, and 65,536 normalized path segments.
+
+SVG CSS, text, fonts, images, data URLs, external references, IDs, links, fragments, gradients, patterns, clips, masks, filters, markers, symbols, use, scripts, and animation reject. Explicit no-op resolvers and an empty font database prevent subresource and font access. Component or caller CSS does not style inside the SVG tree. Root external SVG behavior remains separate.
+
+Every declared source, including one on an unused definition, is eagerly read and validated before publication. One owning-package, resource kind, and logical-path source is read once per candidate. Raster sources decode once into immutable neutral pixels. SVG sources parse once into immutable neutral trees. Sources are shared by associations, definitions, instances, roots, and outputs. CPU and Vello consume the same neutral data without filesystem access or reparsing after publication.
 
 Definition content and fallback resolve against the callee definition catalog. Nested children use their own catalogs. Assigned slot content keeps caller ownership: root content keeps the root resource pipeline, and parent-component content keeps its parent definition catalog. Projection never grants access to a callee resource. Dependency resource aliases do not exist.
 
-The initial syntax applies only to `<img src>`. It does not add `srcset`, SVG resource references, CSS `url()`, fonts, media, data, resource-reference inputs, animation, network loading, or data URLs. See the [component raster resource reference](../types/HTMShell.Component/Resource.md).
+The syntax applies only to `<img src>`. It does not add `srcset`, SVG `<image>` resources, CSS `url()`, fonts, media, data, resource-reference inputs, animation, network loading, or data URLs. See the [component resource reference](../types/HTMShell.Component/Resource.md).
 
 ## Host and identity
 
@@ -338,9 +347,9 @@ All package manifests, component sources, component references, component cycles
 | Unique component stylesheet files per package | 64 |
 | Component stylesheet path | 512 UTF-8 bytes |
 | Component stylesheet file | 1 MiB |
-| Raster resources per component | 32 |
+| Image resources per component | 32 |
 | Resource associations per package | 4,096 |
-| Unique raster sources per package | 256 |
+| Unique image sources per package | 256 |
 | Resource name | 64 ASCII bytes |
 | Resource path | 512 UTF-8 bytes and 32 components |
 | Encoded raster source | 8 MiB |
@@ -348,9 +357,15 @@ All package manifests, component sources, component references, component cycles
 | Raster pixels | 16,777,216 |
 | Decoded raster | 64 MiB |
 | Snapshot decoded component resources | 256 MiB |
+| Encoded SVG source | 2 MiB |
+| SVG natural dimensions | 4,096 by 4,096 pixels |
+| SVG natural area | 16,777,216 pixels |
+| SVG allowed nodes | 4,096 |
+| SVG element depth | 64 |
+| SVG normalized path segments | 65,536 |
 
 Component references form a separately validated dependency graph. Direct, indirect, and cross-package recursion cannot become current. The dependency-first definition order is deterministic, shared definitions are parsed once, and diamonds reuse one immutable definition.
 
-See the [package graph example](../../examples/package-graph/shell.json), the [local package guide](packages.md), the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference, the [component input reference](../types/HTMShell.Component/Input.md), the [slot reference](../types/HTMShell.Component/Slot.md), the [component style reference](../types/HTMShell.Component/Style.md), and the [component raster resource reference](../types/HTMShell.Component/Resource.md).
+See the [package graph example](../../examples/package-graph/shell.json), the [local package guide](packages.md), the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference, the [component input reference](../types/HTMShell.Component/Input.md), the [slot reference](../types/HTMShell.Component/Slot.md), the [component style reference](../types/HTMShell.Component/Style.md), and the [component resource reference](../types/HTMShell.Component/Resource.md).
 
-Local ID scoping, host styling, slotted-content selectors, package-global library styles, dynamic state and action bindings, repeat integration, component external SVG, CSS URL assets, fonts, resource-reference inputs, and hot reload remain unavailable.
+Local ID scoping, host styling, slotted-content selectors, package-global library styles, dynamic state and action bindings, repeat integration, advanced or subresource-bearing component SVG, CSS URL assets, fonts, resource-reference inputs, and hot reload remain unavailable.

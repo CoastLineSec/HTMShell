@@ -26,7 +26,7 @@ Local package identity, dependencies, and immutable graph snapshots.
 
 ## `HTMShell.Component`
 
-Component definitions, literal typed inputs, content projection, scoped stylesheets, declared raster resources, references, and explicit uses.
+Component definitions, literal typed inputs, content projection, scoped stylesheets, declared raster and simple SVG resources, references, and explicit uses.
 
 - [`Component`](HTMShell.Component/README.md)
 - [`Component.Input`](HTMShell.Component/Input.md)

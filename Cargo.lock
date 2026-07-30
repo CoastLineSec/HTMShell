@@ -1057,7 +1057,9 @@ dependencies = [
  "skrifa",
  "stylo",
  "stylo_traits",
+ "svgtypes",
  "url",
+ "usvg",
  "vello",
 ]
 

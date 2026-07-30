@@ -75,7 +75,7 @@ The following are unavailable:
 - `::slotted(...)`, shadow parts, and shadow-tree traversal;
 - component-local ID selectors;
 - package-global library stylesheets;
-- component external SVG, font, media, and generic data assets;
+- SVG, font, media, and generic data assets through CSS URLs;
 - raster resources through CSS `url()`.
 
 No referenced URL is fetched or resolved. Self-contained CSS values that require no external resource use remain subject to the existing CSS profile.
@@ -86,6 +86,6 @@ Stylesheet source identity contains the package snapshot generation, owning pack
 
 One definition-level association serves every instance, while selector scope instances remain document and output local. New package snapshots, document replacements, removed and re-added outputs, and fresh live documents receive fresh generation-safe owner and scope-instance identities. Closed surfaces perform no stylesheet presentation work, and idle surfaces add no polling or timers.
 
-Declared component raster images are consumed through HTML `<img src="resource:name">`, not CSS URLs. See [component raster resources](Resource.md).
+Declared component raster and simple SVG images are consumed through HTML `<img src="resource:name">`, not CSS URLs. See [component resources](Resource.md).
 
 See [components](../../guide/components.md), [`HTMShell.Component`](README.md), [slots](Slot.md), and [local packages](../../guide/packages.md).

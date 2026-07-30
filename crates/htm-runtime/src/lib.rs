@@ -7,6 +7,7 @@ mod collection;
 mod component;
 mod component_resource;
 mod component_style;
+mod component_svg;
 mod error;
 mod identity;
 mod incremental;
@@ -89,19 +90,25 @@ pub use component_resource::{
     ComponentRasterFormat, ComponentRasterSource, ComponentResourceAssociation,
     ComponentResourceCatalog, ComponentResourceDeclaration, ComponentResourceKind,
     ComponentResourceName, ComponentResourcePath, ComponentResourceSemanticVersion,
-    ComponentResourceSourceId, ComponentResourceUsage, ComponentResourceUsageId,
-    ComponentResourceValidationTotals, MAX_COMPONENT_RASTER_DECODED_BYTES,
-    MAX_COMPONENT_RASTER_HEIGHT, MAX_COMPONENT_RASTER_PIXELS, MAX_COMPONENT_RASTER_SOURCE_BYTES,
-    MAX_COMPONENT_RASTER_WIDTH, MAX_COMPONENT_RESOURCE_ASSOCIATIONS_PER_PACKAGE,
-    MAX_COMPONENT_RESOURCE_DECLARATIONS, MAX_COMPONENT_RESOURCE_NAME_BYTES,
-    MAX_COMPONENT_RESOURCE_PATH_BYTES, MAX_COMPONENT_RESOURCE_PATH_COMPONENTS,
-    MAX_COMPONENT_RESOURCE_SNAPSHOT_DECODED_BYTES, MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE,
+    ComponentResourceSource, ComponentResourceSourceId, ComponentResourceUsage,
+    ComponentResourceUsageId, ComponentResourceValidationTotals,
+    MAX_COMPONENT_RASTER_DECODED_BYTES, MAX_COMPONENT_RASTER_HEIGHT, MAX_COMPONENT_RASTER_PIXELS,
+    MAX_COMPONENT_RASTER_SOURCE_BYTES, MAX_COMPONENT_RASTER_WIDTH,
+    MAX_COMPONENT_RESOURCE_ASSOCIATIONS_PER_PACKAGE, MAX_COMPONENT_RESOURCE_DECLARATIONS,
+    MAX_COMPONENT_RESOURCE_NAME_BYTES, MAX_COMPONENT_RESOURCE_PATH_BYTES,
+    MAX_COMPONENT_RESOURCE_PATH_COMPONENTS, MAX_COMPONENT_RESOURCE_SNAPSHOT_DECODED_BYTES,
+    MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE, MAX_COMPONENT_SVG_DEPTH, MAX_COMPONENT_SVG_HEIGHT,
+    MAX_COMPONENT_SVG_NODES, MAX_COMPONENT_SVG_PATH_SEGMENTS, MAX_COMPONENT_SVG_PIXELS,
+    MAX_COMPONENT_SVG_SOURCE_BYTES, MAX_COMPONENT_SVG_WIDTH,
 };
 pub use component_style::{
     ComponentStyleCatalog, ComponentStyleValidationTotals, ComponentStylesheetAssociation,
     ComponentStylesheetPath, ComponentStylesheetSemanticVersion, ComponentStylesheetSource,
     MAX_COMPONENT_STYLESHEET_BYTES, MAX_COMPONENT_STYLESHEET_FILES_PER_PACKAGE,
     MAX_COMPONENT_STYLESHEET_PATH_BYTES, MAX_COMPONENT_STYLESHEETS,
+};
+pub use component_svg::{
+    ComponentSvgResolverStatistics, ComponentSvgSource, ComponentSvgStatistics, ComponentSvgViewBox,
 };
 pub use error::RuntimeError;
 pub use incremental::{

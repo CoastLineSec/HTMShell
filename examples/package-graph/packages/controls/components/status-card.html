@@ -34,8 +34,13 @@
       <img src="resource:photo-swatch" alt="">
       <img src="resource:alpha-chip" alt="">
     </div>
+    <div class="component-svg-strip">
+      <img src="resource:control-symbol" alt="">
+      <img src="resource:control-symbol" alt="">
+    </div>
     <p class="slot-before">Projected content:</p>
     <slot>
+      <img class="slot-fallback-symbol" src="resource:control-symbol" alt="">
       <p class="slot-fallback">No caller content was supplied.</p>
     </slot>
     <slot name="footer">
@@ -48,6 +53,7 @@
 <template data-htm-component="required-frame">
   <section class="required-frame">
     <img class="required-frame-icon" src="resource:status-orb" alt="">
+    <img class="required-frame-symbol" src="resource:control-symbol" alt="">
     <slot name="heading">
       <strong>Required content</strong>
     </slot>
@@ -57,6 +63,7 @@
 
 <template data-htm-component="projected-label">
   <htm-use component="status-card" input-label="Nested caller scope">
+    <img class="projected-label-symbol" src="resource:control-symbol" alt="">
     <p class="projected-label" slot="footer">
       <span data-htm-element="state-text" data-htm-bind="input.label"></span>
     </p>

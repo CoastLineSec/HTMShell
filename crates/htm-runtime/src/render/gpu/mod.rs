@@ -2475,10 +2475,58 @@ mod tests {
         let pixels = gpu_pixels(&mut renderer, &transform_plan, transformed);
         assert_tolerant_pixels(&expected, &pixels, 4, 2.0);
 
-        let (text_svg_plan, text_svg_prepared) = text_svg_document_proof(None, 77);
+        let (mut text_svg_plan, text_svg_prepared) = text_svg_document_proof(None, 77);
+        let component_svg_id = SceneResourceId {
+            owner: ResourceOwner::Package {
+                generation: 7,
+                package_id: "org.example.controls".into(),
+            },
+            kind: ResourceKind::Svg,
+            key: SceneResourceKey::ComponentSvg {
+                path: "assets/status-symbol.svg".into(),
+            },
+        };
+        {
+            let scene = Arc::make_mut(&mut text_svg_plan.scene);
+            let prior_svg_id = scene
+                .resources
+                .iter()
+                .find(|resource| resource.id.kind == ResourceKind::Svg)
+                .map(|resource| resource.id.clone())
+                .unwrap();
+            for node in &mut scene.nodes {
+                if node
+                    .resource
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == prior_svg_id)
+                {
+                    node.resource = Some((component_svg_id.clone(), SceneResourceVersion(1)));
+                }
+            }
+            let svg_resource = scene
+                .resources
+                .iter_mut()
+                .find(|resource| resource.id == prior_svg_id)
+                .unwrap();
+            svg_resource.id = component_svg_id;
+            svg_resource.diagnostic_key = "component-svg-hardware-proof".into();
+            scene
+                .resources
+                .sort_by(|left, right| left.id.cmp(&right.id));
+        }
         let expected = cpu_pixels(text_svg_prepared.recording.clone(), &text_svg_plan);
+        let component_svg_uploads = renderer.statistics.resource_uploads;
+        let component_svg_hits = renderer.statistics.cache_hits;
+        let pixels = gpu_pixels(
+            &mut renderer,
+            &text_svg_plan,
+            text_svg_prepared.recording.clone(),
+        );
+        assert_tolerant_pixels(&expected, &pixels, 8, 8.0);
+        assert!(renderer.statistics.resource_uploads > component_svg_uploads);
         let pixels = gpu_pixels(&mut renderer, &text_svg_plan, text_svg_prepared.recording);
         assert_tolerant_pixels(&expected, &pixels, 8, 8.0);
+        assert!(renderer.statistics.cache_hits > component_svg_hits);
 
         let fallback_surface = RenderSurfaceId {
             instance: 14,
@@ -2569,7 +2617,7 @@ mod tests {
         );
 
         assert_eq!(renderer.targets.len(), 6);
-        assert_eq!(renderer.statistics.frames_rendered, 8);
+        assert_eq!(renderer.statistics.frames_rendered, 9);
         assert!(!renderer.info.name.is_empty());
 
         let old_generation = renderer.device_generation;

@@ -14,8 +14,10 @@ use htm_runtime::{
     MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE, MAX_COMPONENT_SLOT_NAME_BYTES, MAX_COMPONENT_SLOTS,
     MAX_COMPONENT_SOURCE_BYTES, MAX_COMPONENT_SOURCE_NODES, MAX_COMPONENT_STYLESHEET_BYTES,
     MAX_COMPONENT_STYLESHEET_FILES_PER_PACKAGE, MAX_COMPONENT_STYLESHEET_PATH_BYTES,
-    MAX_COMPONENT_STYLESHEETS, MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT,
-    MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
+    MAX_COMPONENT_STYLESHEETS, MAX_COMPONENT_SVG_DEPTH, MAX_COMPONENT_SVG_HEIGHT,
+    MAX_COMPONENT_SVG_NODES, MAX_COMPONENT_SVG_PATH_SEGMENTS, MAX_COMPONENT_SVG_PIXELS,
+    MAX_COMPONENT_SVG_SOURCE_BYTES, MAX_COMPONENT_SVG_WIDTH,
+    MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT, MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
     MAX_CONTEXTUAL_LINK_REPEATS_PER_GROUP_TEMPLATE, MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT,
     MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE, MAX_DEPENDENCY_DEPTH, MAX_DIRECT_DEPENDENCIES,
     MAX_PACKAGE_ALIAS_BYTES, MAX_PACKAGE_ID_BYTES, MAX_PACKAGE_MANIFEST_BYTES,
@@ -209,9 +211,11 @@ fn public_documentation_links_and_example_paths_resolve() {
         "examples/package-graph/packages/controls/assets/status-orb.png",
         "examples/package-graph/packages/controls/assets/photo-swatch.jpg",
         "examples/package-graph/packages/controls/assets/alpha-chip.webp",
+        "examples/package-graph/packages/controls/assets/control-symbol.svg",
         "examples/package-graph/packages/controls/shared/components/badge-label.html",
         "examples/package-graph/packages/controls/shared/components/badge-label.css",
         "examples/package-graph/packages/controls/shared/assets/badge-icon.png",
+        "examples/package-graph/packages/controls/shared/assets/badge-symbol.svg",
     ] {
         assert!(
             root.join(path).is_file(),
@@ -381,7 +385,7 @@ fn component_documentation_matches_the_composition_contract() {
         "`@import`",
         "`@font-face`",
         "`resources`",
-        "resource:speaker-icon",
+        "resource:speaker-symbol",
         "static WebP",
         "Animated content is rejected",
         "straight-alpha RGBA8",
@@ -394,7 +398,11 @@ fn component_documentation_matches_the_composition_contract() {
         "device generation",
         "state or action",
         "repeat integration",
-        "external SVG",
+        "simple SVG",
+        "no secondary filesystem read",
+        "CSS-free",
+        "text",
+        "IDs",
         "hot reload",
         "Headless and live",
         "Multi-output",
@@ -499,7 +507,7 @@ fn component_documentation_matches_the_composition_contract() {
         ),
         (
             MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE as u64,
-            "Unique raster source files per package",
+            "Unique resource source files per package",
         ),
         (
             MAX_COMPONENT_RESOURCE_NAME_BYTES as u64,
@@ -516,6 +524,15 @@ fn component_documentation_matches_the_composition_contract() {
         (MAX_COMPONENT_RASTER_WIDTH as u64, "Raster width"),
         (MAX_COMPONENT_RASTER_HEIGHT as u64, "Raster height"),
         (MAX_COMPONENT_RASTER_PIXELS, "Raster pixels"),
+        (MAX_COMPONENT_SVG_WIDTH as u64, "SVG natural width"),
+        (MAX_COMPONENT_SVG_HEIGHT as u64, "SVG natural height"),
+        (MAX_COMPONENT_SVG_PIXELS, "SVG natural area"),
+        (MAX_COMPONENT_SVG_NODES as u64, "SVG allowed nodes"),
+        (MAX_COMPONENT_SVG_DEPTH as u64, "SVG element depth"),
+        (
+            MAX_COMPONENT_SVG_PATH_SEGMENTS as u64,
+            "SVG normalized path segments",
+        ),
     ] {
         let documented_value = formatted_decimal(value);
         assert!(
@@ -524,7 +541,10 @@ fn component_documentation_matches_the_composition_contract() {
         );
     }
     for (value, label) in [
-        (MAX_COMPONENT_RASTER_SOURCE_BYTES, "Encoded source file"),
+        (
+            MAX_COMPONENT_RASTER_SOURCE_BYTES,
+            "Encoded raster source file",
+        ),
         (MAX_COMPONENT_RASTER_DECODED_BYTES, "One decoded raster"),
         (
             MAX_COMPONENT_RESOURCE_SNAPSHOT_DECODED_BYTES,
@@ -536,6 +556,10 @@ fn component_documentation_matches_the_composition_contract() {
             "component resource reference does not match source limit {label}={value}"
         );
     }
+    assert!(resource_reference.contains(&format!(
+        "| Encoded SVG source file | {} MiB |",
+        MAX_COMPONENT_SVG_SOURCE_BYTES / (1024 * 1024)
+    )));
 
     let manifest = ValidatedManifest::load(root.join("examples/package-graph/shell.json")).unwrap();
     let snapshot = manifest.snapshot();
@@ -546,13 +570,24 @@ fn component_documentation_matches_the_composition_contract() {
     assert_eq!(snapshot.component_styles().totals().source_read_count, 4);
     assert_eq!(snapshot.component_styles().totals().source_parse_count, 4);
     assert_eq!(snapshot.component_styles().associations().len(), 5);
-    assert_eq!(snapshot.component_resources().sources().len(), 4);
-    assert_eq!(snapshot.component_resources().totals().source_read_count, 4);
+    assert_eq!(snapshot.component_resources().sources().len(), 6);
+    assert_eq!(snapshot.component_resources().totals().source_read_count, 6);
     assert_eq!(
         snapshot.component_resources().totals().source_decode_count,
         4
     );
-    assert_eq!(snapshot.component_resources().associations().len(), 5);
+    assert_eq!(
+        snapshot.component_resources().totals().source_parse_count,
+        2
+    );
+    assert_eq!(
+        snapshot
+            .component_resources()
+            .totals()
+            .svg_resolver_statistics,
+        Default::default()
+    );
+    assert_eq!(snapshot.component_resources().associations().len(), 9);
     assert_eq!(
         snapshot
             .components()
@@ -591,6 +626,7 @@ fn component_documentation_matches_the_composition_contract() {
         "\"style_owned_nodes\"",
         "\"resources\"",
         "\"component_raster_sources\"",
+        "\"component_svg_sources\"",
         "\"component_resource_totals\"",
         "\"resource_usages\"",
         "\"semantic_version\"",

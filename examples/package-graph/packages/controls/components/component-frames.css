@@ -15,6 +15,13 @@
   height: 20px;
 }
 
+.required-frame-symbol,
+.projected-label-symbol {
+  width: 32px;
+  height: 24px;
+  opacity: 0.9;
+}
+
 .projected-label {
   color: #dce6ff;
 }

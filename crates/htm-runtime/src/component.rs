@@ -8,7 +8,7 @@ use crate::{
     ComponentResourceUsage, ComponentStylesheetPath,
 };
 use crate::{NumericValue, StateToken, StateValueFormat};
-use blitz_dom::node::{ImageData, NodeData, RasterImageData, SpecialElementData};
+use blitz_dom::node::{ImageData, NodeData, RasterImageData, SpecialElementData, SvgImageData};
 use blitz_dom::{Attribute, DocumentConfig, LocalName, QualName, ns};
 use blitz_html::HtmlDocument;
 use cssparser::{Parser, ParserInput, Token};
@@ -3974,7 +3974,7 @@ fn instantiate_nodes(
                 let instance = context.instance.ok_or_else(|| {
                     PackageLoadError::new(
                         PackageErrorKind::ComponentResourceUsageInvalid,
-                        "component raster usage has no component instance",
+                        "component resource usage has no component instance",
                     )
                 })?;
                 let association = state
@@ -3995,16 +3995,25 @@ fn instantiate_nodes(
                     attributes.clone(),
                 );
                 let source = association.source();
+                let image_data = match source.as_ref() {
+                    crate::ComponentResourceSource::Raster(source) => {
+                        ImageData::Raster(RasterImageData::new(
+                            source.width(),
+                            source.height(),
+                            Arc::clone(source.rgba8()),
+                        ))
+                    }
+                    crate::ComponentResourceSource::Svg(source) => ImageData::Svg(SvgImageData {
+                        tree: Arc::clone(source.tree()),
+                        intrinsic_width: Some(source.width()),
+                        intrinsic_height: Some(source.height()),
+                    }),
+                };
                 document
                     .get_node_mut(slot)
                     .and_then(blitz_dom::node::Node::element_data_mut)
                     .expect("created image node remains an element")
-                    .special_data =
-                    SpecialElementData::Image(Box::new(ImageData::Raster(RasterImageData::new(
-                        source.width(),
-                        source.height(),
-                        Arc::clone(source.rgba8()),
-                    ))));
+                    .special_data = SpecialElementData::Image(Box::new(image_data));
                 record_descendant(context.instance, *source_ordinal, slot, placement, state);
                 state.resource_usages.push(ComponentResourceUsage::new(
                     state.generation,
