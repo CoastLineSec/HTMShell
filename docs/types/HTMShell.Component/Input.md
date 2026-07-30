@@ -110,7 +110,7 @@ Example:
 
 These consumers resolve from immutable host-local data. They create no process-global state key, state subscription, action lookup, resource lookup, native-service demand, thread, timer, or renderer-specific state.
 
-Text nodes, ordinary attributes, and CSS are not scanned for placeholders. String substitution, interpolation, expressions, implicit input forwarding, scoped CSS, component-local IDs, repeat integration, and hot reload are not supported.
+Text nodes, ordinary attributes, and CSS are not scanned for placeholders. String substitution, interpolation, expressions, implicit input forwarding, component-local IDs, repeat integration, and hot reload are not supported. Component stylesheets are static and do not interpolate input values.
 
 ## Limits
 

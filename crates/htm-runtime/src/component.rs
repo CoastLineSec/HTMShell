@@ -1,8 +1,9 @@
+use crate::ComponentStylesheetPath;
 use crate::package::{
     PackageAlias, PackageErrorKind, PackageId, PackageLoadError, PackageSchemaSource,
     PackageSnapshotGeneration, ResolvedPackage,
 };
-use crate::style_owner::{StyleOwnedNodeKind, StyleOwnerId, StyleOwnership};
+use crate::style_owner::{StyleActivationMode, StyleOwnedNodeKind, StyleOwnerId, StyleOwnership};
 use crate::{NumericValue, StateToken, StateValueFormat};
 use blitz_dom::node::NodeData;
 use blitz_dom::{Attribute, DocumentConfig, LocalName, QualName, ns};
@@ -768,6 +769,7 @@ pub struct ComponentExport {
     source: String,
     inputs: Arc<[ComponentInputDeclaration]>,
     slots: Arc<[ComponentSlotDeclaration]>,
+    styles: Arc<[ComponentStylesheetPath]>,
 }
 
 impl ComponentExport {
@@ -776,12 +778,14 @@ impl ComponentExport {
         source: String,
         inputs: Vec<ComponentInputDeclaration>,
         slots: Vec<ComponentSlotDeclaration>,
+        styles: Vec<ComponentStylesheetPath>,
     ) -> Self {
         Self {
             name,
             source,
             inputs: inputs.into(),
             slots: slots.into(),
+            styles: styles.into(),
         }
     }
 
@@ -799,6 +803,10 @@ impl ComponentExport {
 
     pub fn slots(&self) -> &[ComponentSlotDeclaration] {
         &self.slots
+    }
+
+    pub fn styles(&self) -> &[ComponentStylesheetPath] {
+        &self.styles
     }
 
     pub fn default_slot(&self) -> Option<&ComponentSlotDeclaration> {
@@ -1170,6 +1178,8 @@ pub struct PreparedDocument {
     nodes: Arc<[ComponentTemplateNode]>,
     stats: PreparedDocumentStats,
     logical_instance_paths: Arc<[String]>,
+    referenced_definition_keys: Arc<[ComponentDefinitionKey]>,
+    ownership_aware_styles: bool,
 }
 
 impl PreparedDocument {
@@ -1183,6 +1193,18 @@ impl PreparedDocument {
 
     pub fn logical_instance_paths(&self) -> &[String] {
         &self.logical_instance_paths
+    }
+
+    pub fn referenced_definition_keys(&self) -> &[ComponentDefinitionKey] {
+        &self.referenced_definition_keys
+    }
+
+    pub(crate) const fn ownership_aware_styles(&self) -> bool {
+        self.ownership_aware_styles
+    }
+
+    pub(crate) fn select_style_matching_mode(&mut self, ownership_aware: bool) {
+        self.ownership_aware_styles = ownership_aware;
     }
 
     pub(crate) fn instantiate(
@@ -1238,6 +1260,7 @@ impl PreparedDocument {
             projected_nodes: state.projected_nodes,
             fallback_nodes: state.fallback_nodes,
             style_ownership: state.style_ownership,
+            style_activation: StyleActivationMode::LegacyDocumentGlobal,
         })
     }
 }
@@ -1543,6 +1566,7 @@ pub(crate) struct InstantiatedDocument {
     pub projected_nodes: Vec<ProjectedNodeProvenance>,
     pub fallback_nodes: Vec<ComponentFallbackNodeProvenance>,
     pub style_ownership: StyleOwnership,
+    pub style_activation: StyleActivationMode,
 }
 
 struct InstantiationState<'a> {
@@ -1865,13 +1889,15 @@ pub(crate) fn prepare_root_document(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let (stats, logical_instance_paths) =
+    let (stats, logical_instance_paths, referenced_definition_keys) =
         validate_prepared_expansion(&nodes, catalog, logical_path)?;
     Ok(PreparedDocument {
         logical_path: logical_path.to_owned(),
         nodes: nodes.into(),
         stats,
         logical_instance_paths: logical_instance_paths.into(),
+        referenced_definition_keys: referenced_definition_keys.into(),
+        ownership_aware_styles: false,
     })
 }
 
@@ -3534,7 +3560,14 @@ fn validate_prepared_expansion(
     nodes: &[ComponentTemplateNode],
     catalog: &ComponentCatalog,
     logical_path: &str,
-) -> Result<(PreparedDocumentStats, Vec<String>), PackageLoadError> {
+) -> Result<
+    (
+        PreparedDocumentStats,
+        Vec<String>,
+        Vec<ComponentDefinitionKey>,
+    ),
+    PackageLoadError,
+> {
     struct Expansion<'a> {
         catalog: &'a ComponentCatalog,
         instances: usize,
@@ -3687,15 +3720,13 @@ fn validate_prepared_expansion(
         paths: Vec::new(),
     };
     visit(nodes, &mut state, 0, &mut Vec::new(), None).map_err(|error| error.at(logical_path))?;
-    Ok((
-        PreparedDocumentStats {
-            component_instances: state.instances,
-            referenced_definitions: state.referenced.len(),
-            expanded_nodes: state.expanded,
-            maximum_nesting_depth: state.maximum_depth,
-        },
-        state.paths,
-    ))
+    let stats = PreparedDocumentStats {
+        component_instances: state.instances,
+        referenced_definitions: state.referenced.len(),
+        expanded_nodes: state.expanded,
+        maximum_nesting_depth: state.maximum_depth,
+    };
+    Ok((stats, state.paths, state.referenced.into_iter().collect()))
 }
 
 struct ActiveProjection<'a> {

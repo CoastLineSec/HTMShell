@@ -52,7 +52,7 @@ Dependency paths cannot use parent traversal, absolute paths, backslashes, URLs,
 
 One graph contains exactly one `shell`, at its root. Only that package may declare the supported panel and overlay topology. A `library` may depend on libraries but cannot create surfaces or load presentation content as an import side effect.
 
-Schema version 2 shell and library packages may declare an ordered `components` export table with optional literal typed input declarations. Definitions remain inert until an explicit root or component [`htm-use`](../HTMShell.Component/README.md#component-use) references them. Libraries still cannot contribute topology, presentation stylesheets, assets, state, actions, services, or surfaces as import side effects.
+Schema version 2 shell and library packages may declare an ordered `components` export table with optional literal typed inputs, content slots, and package-owned scoped stylesheet associations. Definitions remain inert until an explicit root or component [`htm-use`](../HTMShell.Component/README.md#component-use) references them. Declared component sheets are validated with the package, but unused definitions create no live style scope. Libraries still cannot contribute topology, package-global presentation stylesheets, assets, state, actions, services, or surfaces as import side effects.
 
 The graph is resolved in deterministic dependency-first order. Cycles, ID conflicts, location conflicts, version conflicts, and package-kind violations reject the complete candidate.
 
@@ -60,8 +60,8 @@ Validated package data is published as one immutable generation. Headless and li
 
 ## Limits
 
-The graph permits at most 64 packages, 32 direct dependencies per package, dependency depth 16, 256 component exports per package, and 4,096 component exports per graph. Each component declares at most 64 literal inputs. Each manifest is at most 256 KiB, each component source document is at most 2 MiB, and one candidate may read at most 256 MiB.
+The graph permits at most 64 packages, 32 direct dependencies per package, dependency depth 16, 256 component exports per package, and 4,096 component exports per graph. Each component declares at most 64 literal inputs, 32 slots, and 16 stylesheet paths. One package may use 64 unique component stylesheet files. Each manifest is at most 256 KiB, each component source document is at most 2 MiB, each component stylesheet is at most 1 MiB, and one candidate may read at most 256 MiB.
 
-There is no network resolution, package registry, version solver, optional dependency, global search path, dynamic component binding, scoped component CSS, component-owned external resource loading, or hot reload. Schema version 2 components may declare up to 32 default or named slots with caller-owned projection.
+There is no network resolution, package registry, version solver, optional dependency, global search path, dynamic component binding, package-global library style, component-owned external resource loading, or hot reload. Schema version 2 components support caller-owned projection and selector-isolated component styles, without `:host`, `::slotted()`, or Shadow DOM.
 
-See [local packages](../../guide/packages.md), [components](../../guide/components.md), [component inputs](../HTMShell.Component/Input.md), and [`ShellManifest`](../HTMShell/ShellManifest.md).
+See [local packages](../../guide/packages.md), [components](../../guide/components.md), [component inputs](../HTMShell.Component/Input.md), [component styles](../HTMShell.Component/Style.md), and [`ShellManifest`](../HTMShell/ShellManifest.md).

@@ -61,6 +61,10 @@
           "name": "footer",
           "required": false
         }
+      ],
+      "styles": [
+        "components/status-card.css",
+        "components/status-card-density.css"
       ]
     },
     {
@@ -75,6 +79,9 @@
           "name": "content",
           "required": true
         }
+      ],
+      "styles": [
+        "components/component-frames.css"
       ]
     },
     {
@@ -86,6 +93,9 @@
           "type": "string",
           "required": true
         }
+      ],
+      "styles": [
+        "components/component-frames.css"
       ]
     }
   ]

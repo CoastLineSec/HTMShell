@@ -5,6 +5,7 @@ mod builtin;
 mod clock;
 mod collection;
 mod component;
+mod component_style;
 mod error;
 mod identity;
 mod incremental;
@@ -82,6 +83,12 @@ pub use component::{
     MAX_COMPONENT_SLOT_NAME_BYTES, MAX_COMPONENT_SLOTS, MAX_COMPONENT_SOURCE_BYTES,
     MAX_COMPONENT_SOURCE_NODES, PreparedDocument, PreparedDocumentStats, ProjectedNodeProvenance,
     ResolvedComponentInput, ResolvedComponentInputs, SlotProjectionSource,
+};
+pub use component_style::{
+    ComponentStyleCatalog, ComponentStyleValidationTotals, ComponentStylesheetAssociation,
+    ComponentStylesheetPath, ComponentStylesheetSemanticVersion, ComponentStylesheetSource,
+    MAX_COMPONENT_STYLESHEET_BYTES, MAX_COMPONENT_STYLESHEET_FILES_PER_PACKAGE,
+    MAX_COMPONENT_STYLESHEET_PATH_BYTES, MAX_COMPONENT_STYLESHEETS,
 };
 pub use error::RuntimeError;
 pub use incremental::{

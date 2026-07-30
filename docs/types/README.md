@@ -26,11 +26,12 @@ Local package identity, dependencies, and immutable graph snapshots.
 
 ## `HTMShell.Component`
 
-Component definitions, literal typed inputs, default-slot projection, references, and explicit uses.
+Component definitions, literal typed inputs, content projection, scoped stylesheets, references, and explicit uses.
 
 - [`Component`](HTMShell.Component/README.md)
 - [`Component.Input`](HTMShell.Component/Input.md)
 - [`Component.Slot`](HTMShell.Component/Slot.md)
+- [`Component.Style`](HTMShell.Component/Style.md)
 
 ## `HTMShell.Elements`
 

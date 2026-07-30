@@ -16,6 +16,14 @@ use crate::component::{
     build_component_catalog, parse_component_input_default, parse_component_source,
     prepare_root_document,
 };
+use crate::component_style::{
+    ComponentStyleCatalog, ComponentStyleValidationTotals, ComponentStylesheetAssociation,
+    ComponentStylesheetPath, ComponentStylesheetSemanticVersion, ComponentStylesheetSource,
+    ComponentStylesheetSourceKey, MAX_COMPONENT_STYLESHEET_BYTES,
+    MAX_COMPONENT_STYLESHEET_FILES_PER_PACKAGE, MAX_COMPONENT_STYLESHEET_PATH_BYTES,
+    MAX_COMPONENT_STYLESHEETS,
+};
+use crate::stylesheet::{ComponentCssErrorKind, prepare_component_author_stylesheet};
 
 pub const PACKAGE_MANIFEST_FILE: &str = "shell.json";
 pub const MAX_PACKAGE_ID_BYTES: usize = 255;
@@ -152,6 +160,27 @@ pub enum PackageErrorKind {
     ComponentSlotProjectionLimit,
     ComponentSlotCallerScopeInvalid,
     ComponentSlotProjectionUnresolved,
+    InvalidComponentStylesheetDeclaration,
+    ComponentStylesheetDeclarationLimit,
+    ComponentStylesheetPackageFileLimit,
+    DuplicateComponentStylesheet,
+    InvalidComponentStylesheetPath,
+    ComponentStylesheetMissing,
+    ComponentStylesheetSymlink,
+    ComponentStylesheetSpecialFile,
+    ComponentStylesheetTooLarge,
+    ComponentStylesheetReadFailure,
+    ComponentStylesheetParseFailure,
+    ComponentStylesheetForbiddenImport,
+    ComponentStylesheetForbiddenUrlResource,
+    ComponentStylesheetForbiddenFontResource,
+    ComponentStylesheetForbiddenHostSelector,
+    ComponentStylesheetForbiddenSlottedSelector,
+    ComponentStylesheetForbiddenShadowSelector,
+    ComponentStylesheetAssociationInvalid,
+    ComponentStyleScopeActivationInvalid,
+    ComponentStyleOwnerAssignmentInvalid,
+    ComponentSelectorScopeValidationFailure,
     DocumentDepthLimit,
     PermissionDenied,
     SpecialFile,
@@ -588,6 +617,7 @@ pub struct PackageSnapshot {
     root_manifest: Option<ShellManifest>,
     headless_entry: Option<PackageEntryDocument>,
     components: Arc<ComponentCatalog>,
+    component_styles: Arc<ComponentStyleCatalog>,
     bytes_read: u64,
     measurements: ManifestMeasurements,
 }
@@ -619,6 +649,10 @@ impl PackageSnapshot {
 
     pub fn components(&self) -> &ComponentCatalog {
         &self.components
+    }
+
+    pub fn component_styles(&self) -> &ComponentStyleCatalog {
+        &self.component_styles
     }
 
     pub fn component_definition_id(
@@ -673,7 +707,23 @@ impl PackageSnapshot {
         document_serial: u64,
         config: blitz_dom::DocumentConfig,
     ) -> Result<crate::component::InstantiatedDocument, PackageLoadError> {
-        prepared.instantiate(&self.components, self.generation, document_serial, config)
+        let mut instantiated =
+            prepared.instantiate(&self.components, self.generation, document_serial, config)?;
+        instantiated.style_activation = self
+            .component_styles
+            .activation_mode(
+                prepared.referenced_definition_keys(),
+                self.generation,
+                prepared.ownership_aware_styles(),
+            )
+            .map_err(|error| {
+                PackageLoadError::new(
+                    PackageErrorKind::ComponentStyleScopeActivationInvalid,
+                    error.to_string(),
+                )
+                .at(prepared.logical_path())
+            })?;
+        Ok(instantiated)
     }
 }
 
@@ -701,6 +751,7 @@ pub struct PackageSnapshotCandidate {
     root_manifest: Option<ShellManifest>,
     headless_entry: Option<PackageEntryDocument>,
     components: ComponentCatalog,
+    component_styles: ComponentStyleCatalog,
     bytes_read: u64,
     measurements: ManifestMeasurements,
 }
@@ -782,9 +833,11 @@ impl PackageSnapshotLoader {
             root_manifest: candidate.root_manifest,
             headless_entry: candidate.headless_entry,
             components: Arc::new(candidate.components),
+            component_styles: Arc::new(candidate.component_styles),
             bytes_read: candidate.bytes_read,
             measurements: candidate.measurements,
         });
+        validate_snapshot_style_scopes(&snapshot)?;
         self.next_generation = next;
         self.current = Some(Arc::clone(&snapshot));
         Ok(snapshot)
@@ -805,6 +858,51 @@ impl PackageSnapshotLoader {
         let candidate = self.build_headless_candidate(package_root)?;
         self.publish(candidate)
     }
+}
+
+fn validate_snapshot_style_scopes(snapshot: &PackageSnapshot) -> Result<(), PackageLoadError> {
+    let mut prepared = Vec::new();
+    if let Some(manifest) = snapshot.root_manifest() {
+        prepared.extend(
+            manifest
+                .surfaces
+                .iter()
+                .filter_map(SurfaceTemplate::prepared_document),
+        );
+    }
+    if let Some(entry) = snapshot.headless_entry()
+        && let Some(document) = entry.prepared_document()
+    {
+        prepared.push(document);
+    }
+    for (index, prepared) in prepared.into_iter().enumerate() {
+        if !prepared.ownership_aware_styles() {
+            continue;
+        }
+        let serial = u64::try_from(index + 1).expect("surface template limit fits u64");
+        let mut instantiated = snapshot.instantiate_document(
+            prepared,
+            serial,
+            blitz_dom::DocumentConfig {
+                base_url: Some("htm-package://candidate/root.html".to_owned()),
+                style_threading: blitz_dom::StyleThreading::Sequential,
+                ..Default::default()
+            },
+        )?;
+        crate::style_owner::activate_style_ownership(
+            &mut instantiated.document,
+            &instantiated.style_ownership,
+            &instantiated.style_activation,
+        )
+        .map_err(|error| {
+            PackageLoadError::new(
+                PackageErrorKind::ComponentSelectorScopeValidationFailure,
+                error.to_string(),
+            )
+            .at(prepared.logical_path())
+        })?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -888,6 +986,7 @@ struct PackageGraphDiagnostic<'a> {
     dependency_first_packages: Vec<PackageDiagnostic<'a>>,
     component_definition_count: usize,
     dependency_first_components: Vec<ComponentDefinitionDiagnostic>,
+    component_stylesheet_sources: Vec<ComponentStylesheetSourceDiagnostic>,
     prepared_root_documents: Vec<PreparedDocumentDiagnostic<'a>>,
 }
 
@@ -915,6 +1014,7 @@ struct ComponentExportDiagnostic<'a> {
     source: &'a str,
     inputs: Vec<ComponentInputDeclarationDiagnostic>,
     slots: Vec<ComponentSlotDeclarationDiagnostic>,
+    styles: Vec<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -933,6 +1033,26 @@ struct ComponentDefinitionDiagnostic {
     inputs: Vec<ComponentInputDeclarationDiagnostic>,
     slots: Vec<ComponentSlotDefinitionDiagnostic>,
     resolved_references: Vec<ComponentReferenceDiagnostic>,
+    stylesheets: Vec<ComponentStylesheetAssociationDiagnostic>,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentStylesheetSourceDiagnostic {
+    identity: String,
+    package_id: String,
+    path: String,
+    semantic_version: String,
+    bytes: u64,
+    parsed_rules: usize,
+    selectors: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentStylesheetAssociationDiagnostic {
+    identity: String,
+    source_identity: String,
+    path: String,
+    ordinal: u16,
 }
 
 #[derive(Debug, Serialize)]
@@ -969,6 +1089,19 @@ struct PreparedDocumentDiagnostic<'a> {
     projections: Vec<ComponentSlotProjectionDiagnostic>,
     projected_nodes: Vec<ProjectedNodeDiagnostic>,
     fallback_nodes: Vec<FallbackNodeDiagnostic>,
+    matching_mode: &'static str,
+    root_style_owner: String,
+    style_scope_definitions: Vec<String>,
+    style_scope_instances: Vec<String>,
+    style_owned_nodes: Vec<StyleOwnedNodeDiagnostic>,
+}
+
+#[derive(Debug, Serialize)]
+struct StyleOwnedNodeDiagnostic {
+    dom_slot: usize,
+    dom_slot_generation: u64,
+    owner: String,
+    category: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -1044,6 +1177,11 @@ impl<'a> PackageGraphDiagnostic<'a> {
                         projections: diagnostics.projections,
                         projected_nodes: diagnostics.projected_nodes,
                         fallback_nodes: diagnostics.fallback_nodes,
+                        matching_mode: diagnostics.matching_mode,
+                        root_style_owner: diagnostics.root_style_owner,
+                        style_scope_definitions: diagnostics.style_scope_definitions,
+                        style_scope_instances: diagnostics.style_scope_instances,
+                        style_owned_nodes: diagnostics.style_owned_nodes,
                     }
                 })
             }));
@@ -1070,6 +1208,11 @@ impl<'a> PackageGraphDiagnostic<'a> {
                     projections: diagnostics.projections,
                     projected_nodes: diagnostics.projected_nodes,
                     fallback_nodes: diagnostics.fallback_nodes,
+                    matching_mode: diagnostics.matching_mode,
+                    root_style_owner: diagnostics.root_style_owner,
+                    style_scope_definitions: diagnostics.style_scope_definitions,
+                    style_scope_instances: diagnostics.style_scope_instances,
+                    style_owned_nodes: diagnostics.style_owned_nodes,
                 });
             }
         }
@@ -1110,6 +1253,11 @@ impl<'a> PackageGraphDiagnostic<'a> {
                                     required: slot.required(),
                                 })
                                 .collect(),
+                            styles: export
+                                .styles()
+                                .iter()
+                                .map(ComponentStylesheetPath::as_str)
+                                .collect(),
                         })
                         .collect(),
                 })
@@ -1146,7 +1294,34 @@ impl<'a> PackageGraphDiagnostic<'a> {
                                 target: target.deterministic_string(),
                             })
                             .collect(),
+                        stylesheets: snapshot
+                            .component_styles()
+                            .associations_for(key)
+                            .iter()
+                            .map(|association| ComponentStylesheetAssociationDiagnostic {
+                                identity: association.deterministic_id(snapshot.generation()),
+                                source_identity: association
+                                    .source()
+                                    .deterministic_id(snapshot.generation()),
+                                path: association.source().path().to_string(),
+                                ordinal: association.ordinal(),
+                            })
+                            .collect(),
                     })
+                })
+                .collect(),
+            component_stylesheet_sources: snapshot
+                .component_styles()
+                .sources()
+                .iter()
+                .map(|source| ComponentStylesheetSourceDiagnostic {
+                    identity: source.deterministic_id(snapshot.generation()),
+                    package_id: source.package_id().to_string(),
+                    path: source.path().to_string(),
+                    semantic_version: source.semantic_version().deterministic_string().to_owned(),
+                    bytes: source.bytes(),
+                    parsed_rules: source.parsed_rule_count(),
+                    selectors: source.selector_count(),
                 })
                 .collect(),
             prepared_root_documents,
@@ -1176,6 +1351,11 @@ struct PreparedComponentDiagnostics {
     projections: Vec<ComponentSlotProjectionDiagnostic>,
     projected_nodes: Vec<ProjectedNodeDiagnostic>,
     fallback_nodes: Vec<FallbackNodeDiagnostic>,
+    matching_mode: &'static str,
+    root_style_owner: String,
+    style_scope_definitions: Vec<String>,
+    style_scope_instances: Vec<String>,
+    style_owned_nodes: Vec<StyleOwnedNodeDiagnostic>,
 }
 
 fn prepared_component_diagnostics(
@@ -1196,8 +1376,56 @@ fn prepared_component_diagnostics(
             projections: Vec::new(),
             projected_nodes: Vec::new(),
             fallback_nodes: Vec::new(),
+            matching_mode: "invalid",
+            root_style_owner: "invalid".to_owned(),
+            style_scope_definitions: Vec::new(),
+            style_scope_instances: Vec::new(),
+            style_owned_nodes: Vec::new(),
         };
     };
+    let matching_mode = instantiated.style_activation.as_str();
+    let root_style_owner = instantiated
+        .style_ownership
+        .root_owner()
+        .deterministic_string();
+    let style_owned_nodes = instantiated
+        .style_ownership
+        .nodes()
+        .map(|node| StyleOwnedNodeDiagnostic {
+            dom_slot: node.dom_slot(),
+            dom_slot_generation: node.dom_slot_generation(),
+            owner: node.owner().deterministic_string(),
+            category: node.kind().as_str(),
+        })
+        .collect::<Vec<_>>();
+    let style_scope_instances = instantiated
+        .style_ownership
+        .nodes()
+        .filter_map(|node| match node.owner() {
+            crate::style_owner::StyleOwnerId::RootDocument { .. } => None,
+            owner => Some(format!(
+                "selector-scope-instance:{}",
+                owner.deterministic_string()
+            )),
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let style_scope_definitions = instantiated
+        .style_ownership
+        .nodes()
+        .filter_map(|node| match node.owner().definition() {
+            crate::style_owner::StylesheetOwnerId::RootDocument => None,
+            crate::style_owner::StylesheetOwnerId::ComponentDefinition(definition) => {
+                Some(format!(
+                    "selector-scope-definition:{}",
+                    definition.deterministic_string()
+                ))
+            }
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     let instance_paths: BTreeMap<_, _> = instantiated
         .instances
         .iter()
@@ -1281,6 +1509,11 @@ fn prepared_component_diagnostics(
         projections,
         projected_nodes,
         fallback_nodes,
+        matching_mode,
+        root_style_owner,
+        style_scope_definitions,
+        style_scope_instances,
+        style_owned_nodes,
     }
 }
 
@@ -1423,6 +1656,8 @@ struct RawComponentExport {
     inputs: Vec<RawComponentInput>,
     #[serde(default)]
     slots: Vec<RawComponentSlot>,
+    #[serde(default)]
+    styles: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2033,6 +2268,208 @@ impl<'a> GraphBuilder<'a> {
         build_component_catalog(&packages, unresolved, totals)
     }
 
+    fn load_component_style_catalog(
+        &mut self,
+        components: &ComponentCatalog,
+    ) -> Result<ComponentStyleCatalog, PackageLoadError> {
+        let packages = self.ordered.clone();
+        let mut sources = Vec::new();
+        let mut associations = Vec::new();
+        let mut totals = ComponentStyleValidationTotals::default();
+        for package in &packages {
+            let unique_paths = package
+                .components()
+                .iter()
+                .flat_map(ComponentExport::styles)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if unique_paths.len() > MAX_COMPONENT_STYLESHEET_FILES_PER_PACKAGE {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentStylesheetPackageFileLimit,
+                    format!(
+                        "package `{}` declares {} unique component stylesheet files; limit is {MAX_COMPONENT_STYLESHEET_FILES_PER_PACKAGE}",
+                        package.id(),
+                        unique_paths.len()
+                    ),
+                )
+                .in_package(package.id().to_string()));
+            }
+
+            let mut loaded =
+                BTreeMap::<ComponentStylesheetPath, Arc<ComponentStylesheetSource>>::new();
+            for path in unique_paths {
+                let css = self.read_component_stylesheet(package, &path)?;
+                let declaring_component = package
+                    .components()
+                    .iter()
+                    .find(|export| export.styles().contains(&path))
+                    .map(ComponentExport::name);
+                let parsed =
+                    prepare_component_author_stylesheet(&css, path.as_str()).map_err(|error| {
+                        component_stylesheet_css_error(package, declaring_component, &path, error)
+                    })?;
+                let source = Arc::new(ComponentStylesheetSource::new(
+                    ComponentStylesheetSourceKey::new(package.id().clone(), path.clone()),
+                    ComponentStylesheetSemanticVersion::new(parsed.semantic_version()),
+                    parsed,
+                    css.len() as u64,
+                ));
+                totals.source_count = totals.source_count.saturating_add(1);
+                totals.source_read_count = totals.source_read_count.saturating_add(1);
+                totals.source_parse_count = totals.source_parse_count.saturating_add(1);
+                totals.bytes_read = totals.bytes_read.saturating_add(css.len() as u64);
+                loaded.insert(path, Arc::clone(&source));
+                sources.push(source);
+            }
+
+            for export in package.components() {
+                let definition =
+                    crate::ComponentDefinitionKey::new(package.id().clone(), export.name().clone());
+                if components.definition(&definition).is_none() {
+                    return Err(PackageLoadError::new(
+                        PackageErrorKind::ComponentStylesheetAssociationInvalid,
+                        format!(
+                            "component stylesheet association targets missing definition `{definition}`"
+                        ),
+                    )
+                    .in_package(package.id().to_string()));
+                }
+                for (ordinal, path) in export.styles().iter().enumerate() {
+                    let source = loaded.get(path).ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::ComponentStylesheetAssociationInvalid,
+                            format!(
+                                "component `{}` stylesheet `{path}` was not loaded",
+                                export.name()
+                            ),
+                        )
+                        .in_package(package.id().to_string())
+                        .at(path.as_str())
+                    })?;
+                    associations.push(ComponentStylesheetAssociation::new(
+                        definition.clone(),
+                        Arc::clone(source),
+                        u16::try_from(ordinal).expect("component stylesheet limit fits u16"),
+                    ));
+                    totals.association_count = totals.association_count.saturating_add(1);
+                }
+            }
+        }
+        Ok(ComponentStyleCatalog::new(sources, associations, totals))
+    }
+
+    fn read_component_stylesheet(
+        &mut self,
+        package: &ResolvedPackage,
+        logical_path: &ComponentStylesheetPath,
+    ) -> Result<String, PackageLoadError> {
+        let logical = logical_path.as_str();
+        let mut requested = package.canonical_root().to_path_buf();
+        let components = logical.split('/').collect::<Vec<_>>();
+        for (index, component) in components.iter().enumerate() {
+            requested.push(component);
+            let metadata = self.file_system.metadata(&requested).map_err(|error| {
+                let kind = if error.kind() == io::ErrorKind::NotFound {
+                    PackageErrorKind::ComponentStylesheetMissing
+                } else {
+                    PackageErrorKind::ComponentStylesheetReadFailure
+                };
+                io_package_error(
+                    kind,
+                    "inspect component stylesheet path",
+                    Path::new(logical),
+                    error,
+                )
+                .in_package(package.id().to_string())
+            })?;
+            if metadata.kind == PackageFileKind::Symlink {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentStylesheetSymlink,
+                    "component stylesheet path contains a symbolic link",
+                )
+                .in_package(package.id().to_string())
+                .at(logical));
+            }
+            let final_component = index + 1 == components.len();
+            let expected_kind = if final_component {
+                PackageFileKind::File
+            } else {
+                PackageFileKind::Directory
+            };
+            if metadata.kind != expected_kind {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentStylesheetSpecialFile,
+                    if final_component {
+                        "component stylesheet is not a regular file"
+                    } else {
+                        "component stylesheet path component is not a directory"
+                    },
+                )
+                .in_package(package.id().to_string())
+                .at(logical));
+            }
+            if final_component && metadata.len > MAX_COMPONENT_STYLESHEET_BYTES {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentStylesheetTooLarge,
+                    format!(
+                        "component stylesheet is {} bytes; limit is {MAX_COMPONENT_STYLESHEET_BYTES}",
+                        metadata.len
+                    ),
+                )
+                .in_package(package.id().to_string())
+                .at(logical));
+            }
+        }
+        let canonical = self.file_system.canonicalize(&requested).map_err(|error| {
+            io_package_error(
+                PackageErrorKind::ComponentStylesheetMissing,
+                "resolve component stylesheet",
+                Path::new(logical),
+                error,
+            )
+            .in_package(package.id().to_string())
+        })?;
+        if !canonical.starts_with(package.canonical_root())
+            || !canonical.starts_with(&self.composition_root)
+        {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::InvalidComponentStylesheetPath,
+                "component stylesheet resolves outside its owning package",
+            )
+            .in_package(package.id().to_string())
+            .at(logical));
+        }
+        let bytes = self
+            .file_system
+            .read_bounded(&canonical, MAX_COMPONENT_STYLESHEET_BYTES)
+            .map_err(|error| {
+                io_package_error(
+                    PackageErrorKind::ComponentStylesheetReadFailure,
+                    "read component stylesheet",
+                    Path::new(logical),
+                    error,
+                )
+                .in_package(package.id().to_string())
+            })?;
+        if bytes.len() as u64 > MAX_COMPONENT_STYLESHEET_BYTES {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::ComponentStylesheetTooLarge,
+                format!("component stylesheet exceeds {MAX_COMPONENT_STYLESHEET_BYTES} bytes"),
+            )
+            .in_package(package.id().to_string())
+            .at(logical));
+        }
+        self.budget.account(bytes.len())?;
+        String::from_utf8(bytes).map_err(|_| {
+            PackageLoadError::new(
+                PackageErrorKind::ComponentStylesheetReadFailure,
+                "component stylesheet is not UTF-8",
+            )
+            .in_package(package.id().to_string())
+            .at(logical)
+        })
+    }
+
     fn read_component_source(
         &mut self,
         package: &ResolvedPackage,
@@ -2119,24 +2556,33 @@ impl<'a> GraphBuilder<'a> {
             )
         })?;
         let components = self.load_component_catalog()?;
+        let component_styles = self.load_component_style_catalog(&components)?;
         let root_package = Arc::clone(&self.ordered[root_index]);
         if let Some(manifest) = self.root_topology.as_mut() {
             for surface in &mut manifest.surfaces {
-                surface.prepared_document = Some(Arc::new(prepare_root_document(
+                let mut prepared = prepare_root_document(
                     surface.html(),
                     &path_to_logical(surface.document()),
                     &root_package,
                     &components,
-                )?));
+                )?;
+                prepared.select_style_matching_mode(
+                    component_styles.has_reachable_styles(prepared.referenced_definition_keys()),
+                );
+                surface.prepared_document = Some(Arc::new(prepared));
             }
         }
         if let Some(entry) = headless_entry.as_mut() {
-            entry.prepared_document = Some(Arc::new(prepare_root_document(
+            let mut prepared = prepare_root_document(
                 entry.html(),
                 &path_to_logical(entry.logical_path()),
                 &root_package,
                 &components,
-            )?));
+            )?;
+            prepared.select_style_matching_mode(
+                component_styles.has_reachable_styles(prepared.referenced_definition_keys()),
+            );
+            entry.prepared_document = Some(Arc::new(prepared));
         }
         Ok(PackageSnapshotCandidate {
             composition_root: self.composition_root,
@@ -2145,6 +2591,7 @@ impl<'a> GraphBuilder<'a> {
             root_manifest: self.root_topology,
             headless_entry,
             components,
+            component_styles,
             bytes_read: self.budget.bytes,
             measurements: ManifestMeasurements {
                 parse_us: self.root_parse_us,
@@ -2304,6 +2751,7 @@ fn build_headless_candidate(
                 root_manifest: None,
                 headless_entry: Some(entry),
                 components,
+                component_styles: ComponentStyleCatalog::empty(),
                 bytes_read: budget.bytes,
                 measurements: ManifestMeasurements::default(),
             })
@@ -2420,6 +2868,7 @@ fn validate_component_exports(
             .map_err(|error| error.in_package(owner.to_string()))?;
         let inputs = validate_component_inputs(raw_export.inputs, owner, &name)?;
         let slots = validate_component_slots(raw_export.slots, owner, &name)?;
+        let styles = validate_component_stylesheets(raw_export.styles, owner, &name)?;
         if !names.insert(name.clone()) {
             return Err(PackageLoadError::new(
                 PackageErrorKind::DuplicateComponentExport,
@@ -2427,9 +2876,84 @@ fn validate_component_exports(
             )
             .in_package(owner.to_string()));
         }
-        exports.push(ComponentExport::new(name, source, inputs, slots));
+        exports.push(ComponentExport::new(name, source, inputs, slots, styles));
     }
     Ok(exports)
+}
+
+fn validate_component_stylesheets(
+    raw: Vec<serde_json::Value>,
+    owner: &PackageId,
+    component: &ComponentName,
+) -> Result<Vec<ComponentStylesheetPath>, PackageLoadError> {
+    if raw.len() > MAX_COMPONENT_STYLESHEETS {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::ComponentStylesheetDeclarationLimit,
+            format!(
+                "component `{component}` declares {} stylesheets; limit is {MAX_COMPONENT_STYLESHEETS}",
+                raw.len()
+            ),
+        )
+        .in_package(owner.to_string()));
+    }
+    let mut paths = BTreeSet::new();
+    let mut styles = Vec::with_capacity(raw.len());
+    for value in raw {
+        let value = value.as_str().ok_or_else(|| {
+            PackageLoadError::new(
+                PackageErrorKind::InvalidComponentStylesheetDeclaration,
+                format!("component `{component}` stylesheet declarations must be strings"),
+            )
+            .in_package(owner.to_string())
+        })?;
+        let path = validate_component_stylesheet_path(value)
+            .map_err(|error| error.in_package(owner.to_string()))?;
+        if !paths.insert(path.clone()) {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::DuplicateComponentStylesheet,
+                format!("component `{component}` repeats stylesheet `{path}`"),
+            )
+            .in_package(owner.to_string())
+            .at(path));
+        }
+        styles.push(ComponentStylesheetPath::new(path));
+    }
+    Ok(styles)
+}
+
+fn validate_component_stylesheet_path(value: &str) -> Result<String, PackageLoadError> {
+    if value.is_empty()
+        || value.len() > MAX_COMPONENT_STYLESHEET_PATH_BYTES
+        || value.contains('\0')
+        || value.contains('\\')
+        || value.contains("://")
+        || value.starts_with("//")
+    {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::InvalidComponentStylesheetPath,
+            format!(
+                "component stylesheet path must contain 1..={MAX_COMPONENT_STYLESHEET_PATH_BYTES} local UTF-8 bytes"
+            ),
+        ));
+    }
+    let path = Path::new(value);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+        || value
+            .split('/')
+            .any(|component| component.is_empty() || component == ".")
+    {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::InvalidComponentStylesheetPath,
+            "component stylesheet must be a normalized package-relative path",
+        ));
+    }
+    Ok(value.to_owned())
 }
 
 fn validate_component_slots(
@@ -2913,6 +3437,47 @@ fn read_text_file(
         .map_err(|_| PackageLoadError::new(kind, "text file is not UTF-8").at(logical))
 }
 
+fn component_stylesheet_css_error(
+    package: &ResolvedPackage,
+    component: Option<&ComponentName>,
+    path: &ComponentStylesheetPath,
+    error: crate::stylesheet::ComponentCssError,
+) -> PackageLoadError {
+    let kind = match error.kind {
+        ComponentCssErrorKind::Parse | ComponentCssErrorKind::IdSelector => {
+            PackageErrorKind::ComponentStylesheetParseFailure
+        }
+        ComponentCssErrorKind::Import => PackageErrorKind::ComponentStylesheetForbiddenImport,
+        ComponentCssErrorKind::UrlResource => {
+            PackageErrorKind::ComponentStylesheetForbiddenUrlResource
+        }
+        ComponentCssErrorKind::FontResource => {
+            PackageErrorKind::ComponentStylesheetForbiddenFontResource
+        }
+        ComponentCssErrorKind::HostSelector => {
+            PackageErrorKind::ComponentStylesheetForbiddenHostSelector
+        }
+        ComponentCssErrorKind::SlottedSelector => {
+            PackageErrorKind::ComponentStylesheetForbiddenSlottedSelector
+        }
+        ComponentCssErrorKind::ShadowSelector => {
+            PackageErrorKind::ComponentStylesheetForbiddenShadowSelector
+        }
+    };
+    let owner = component
+        .map(|name| format!("component `{name}`"))
+        .unwrap_or_else(|| "component stylesheet".to_owned());
+    PackageLoadError::new(
+        kind,
+        format!(
+            "{owner} stylesheet `{path}` at {}:{}: {}",
+            error.line, error.column, error.message
+        ),
+    )
+    .in_package(package.id().to_string())
+    .at(path.as_str())
+}
+
 fn ensure_existing_path_has_no_symlink(
     file_system: &dyn ReadOnlyPackageFileSystem,
     path: &Path,
@@ -3141,6 +3706,13 @@ mod tests {
 
     fn dependency(alias: &str, id: &str, path: &str) -> String {
         format!(r#"{{"alias":"{alias}","id":"{id}","path":"{path}"}}"#)
+    }
+
+    fn styled_component_shell(styles: &str) -> String {
+        format!(
+            r#"{{"version":2,"package":{{"id":"org.example.shell","kind":"shell"}},"dependencies":[],"components":[{{"name":"status-card","source":"components/status-card.html","inputs":[],"slots":[],"styles":{styles}}}],"surfaces":{}}}"#,
+            surfaces()
+        )
     }
 
     #[test]
@@ -3452,7 +4024,7 @@ mod tests {
         fixture.write_root(
             &v2_shell("org.example.shell", None, "[]").replacen(
                 "\"dependencies\"",
-                "\"components\":[{\"name\":\"status-card\",\"source\":\"components/status-card.html\",\"styles\":[]}],\"dependencies\"",
+                "\"components\":[{\"name\":\"status-card\",\"source\":\"components/status-card.html\",\"styling\":[]}],\"dependencies\"",
                 1,
             ),
         );
@@ -3462,6 +4034,178 @@ mod tests {
                 .kind(),
             PackageErrorKind::UnknownField
         );
+    }
+
+    #[test]
+    fn component_stylesheets_load_parse_share_and_activate_by_reachability() {
+        use blitz_dom::{DocumentConfig, StyleThreading};
+        use blitz_html::HtmlProvider;
+        use style_traits::ToCss;
+
+        let fixture = Fixture::new();
+        fixture.write_root(&styled_component_shell(
+            r#"["components/status-card.css","components/status-card-override.css"]"#,
+        ));
+        fs::create_dir_all(fixture.root.join("components")).unwrap();
+        fs::write(
+            fixture.root.join("components/status-card.html"),
+            r#"<template data-htm-component="status-card"><div class="shared" data-case="styled">Styled</div></template>"#,
+        )
+        .unwrap();
+        fs::write(
+            fixture.root.join("components/status-card.css"),
+            ".shared { color: rgb(1, 2, 3); }",
+        )
+        .unwrap();
+        fs::write(
+            fixture.root.join("components/status-card-override.css"),
+            ".shared { color: rgb(4, 5, 6); }",
+        )
+        .unwrap();
+        fs::write(
+            fixture.root.join("panel.html"),
+            r#"<main><htm-use component="status-card"></htm-use></main>"#,
+        )
+        .unwrap();
+        fs::write(fixture.root.join("overlay.html"), "<main>Plain</main>").unwrap();
+
+        let snapshot = PackageSnapshotLoader::new()
+            .load_manifest(fixture.manifest())
+            .unwrap();
+        assert_eq!(snapshot.component_styles().sources().len(), 2);
+        assert_eq!(snapshot.component_styles().associations().len(), 2);
+        let totals = snapshot.component_styles().totals();
+        assert_eq!(totals.source_count, 2);
+        assert_eq!(totals.source_read_count, 2);
+        assert_eq!(totals.source_parse_count, 2);
+        assert_eq!(totals.association_count, 2);
+        assert!(totals.bytes_read > 0);
+
+        let manifest = snapshot.root_manifest().unwrap();
+        let prepared_panel = manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id() == "panel")
+            .unwrap()
+            .prepared_document()
+            .unwrap();
+        let prepared_overlay = manifest
+            .surfaces
+            .iter()
+            .find(|surface| surface.id() == "overlay")
+            .unwrap()
+            .prepared_document()
+            .unwrap();
+        let mut panel = snapshot
+            .instantiate_document(
+                prepared_panel,
+                1,
+                DocumentConfig {
+                    html_parser_provider: Some(Arc::new(HtmlProvider)),
+                    style_threading: StyleThreading::Sequential,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(panel.style_activation.as_str(), "ownership-aware");
+        let evidence = crate::style_owner::activate_style_ownership(
+            &mut panel.document,
+            &panel.style_ownership,
+            &panel.style_activation,
+        )
+        .unwrap();
+        assert_eq!(evidence.parsed_stylesheets, 2);
+        assert_eq!(evidence.stylesheet_associations, 2);
+        panel.document.resolve(0.0);
+        let slot = panel
+            .document
+            .tree()
+            .iter()
+            .find_map(|(slot, node)| {
+                node.element_data()
+                    .and_then(|element| {
+                        element
+                            .attrs()
+                            .iter()
+                            .find(|attribute| attribute.name.local.as_ref() == "data-case")
+                    })
+                    .is_some_and(|attribute| attribute.value.as_str() == "styled")
+                    .then_some(slot)
+            })
+            .unwrap();
+        assert_eq!(
+            panel
+                .document
+                .get_node(slot)
+                .unwrap()
+                .primary_styles()
+                .unwrap()
+                .clone_color()
+                .to_css_string(),
+            "rgb(4, 5, 6)"
+        );
+        let first_owner = panel.style_ownership.node(slot).unwrap().owner().clone();
+
+        let mut second_panel = snapshot
+            .instantiate_document(
+                prepared_panel,
+                2,
+                DocumentConfig {
+                    html_parser_provider: Some(Arc::new(HtmlProvider)),
+                    style_threading: StyleThreading::Sequential,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let second_evidence = crate::style_owner::activate_style_ownership(
+            &mut second_panel.document,
+            &second_panel.style_ownership,
+            &second_panel.style_activation,
+        )
+        .unwrap();
+        assert_eq!(second_evidence.parsed_stylesheets, 2);
+        second_panel.document.resolve(0.0);
+        let second_slot = second_panel
+            .document
+            .tree()
+            .iter()
+            .find_map(|(slot, node)| {
+                node.element_data()
+                    .and_then(|element| {
+                        element
+                            .attrs()
+                            .iter()
+                            .find(|attribute| attribute.name.local.as_ref() == "data-case")
+                    })
+                    .is_some_and(|attribute| attribute.value.as_str() == "styled")
+                    .then_some(slot)
+            })
+            .unwrap();
+        assert_ne!(
+            &first_owner,
+            second_panel
+                .style_ownership
+                .node(second_slot)
+                .unwrap()
+                .owner()
+        );
+        assert_eq!(
+            second_panel
+                .document
+                .get_node(second_slot)
+                .unwrap()
+                .primary_styles()
+                .unwrap()
+                .clone_color()
+                .to_css_string(),
+            "rgb(4, 5, 6)"
+        );
+        assert_eq!(snapshot.component_styles().totals().source_parse_count, 2);
+
+        let overlay = snapshot
+            .instantiate_document(prepared_overlay, 3, DocumentConfig::default())
+            .unwrap();
+        assert_eq!(overlay.style_activation.as_str(), "legacy-document-global");
     }
 
     #[test]

@@ -1,0 +1,42 @@
+* {
+  box-sizing: border-box;
+}
+
+.graph-status-card {
+  display: grid;
+  gap: 6px;
+  max-width: 420px;
+  padding: 18px;
+  border: 1px solid rgba(177, 197, 255, 0.32);
+  border-radius: 14px;
+  background: rgba(42, 54, 82, 0.72);
+}
+
+.graph-status-card:hover {
+  filter: brightness(1.06);
+}
+
+.graph-status-card h2,
+.graph-status-card p {
+  margin: 0;
+}
+
+.graph-status-heading {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.slot-icon-fallback {
+  color: #7cc4ff;
+}
+
+.slot-before,
+.slot-after {
+  color: #aebbd9;
+  font-size: 0.75rem;
+}
+
+.slot-fallback {
+  color: #dce6ff;
+}

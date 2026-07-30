@@ -1557,8 +1557,8 @@ fn package_graph_example_exercises_inputs_and_named_slot_projection() {
         },
     )
     .unwrap();
-    assert_eq!(run.package_snapshot.components().definitions().len(), 4);
-    assert_eq!(run.component_instances.len(), 9);
+    assert_eq!(run.package_snapshot.components().definitions().len(), 5);
+    assert_eq!(run.component_instances.len(), 12);
     assert_eq!(run.component_input_consumers.len(), 24);
     assert_eq!(run.component_slot_projections.len(), 11);
     assert!(run.component_slot_projections.iter().any(|projection| {

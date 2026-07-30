@@ -7,7 +7,9 @@ use htm_runtime::{
     MAX_COMPONENT_INPUT_STRING_BYTES, MAX_COMPONENT_INPUTS, MAX_COMPONENT_INSTANCES_PER_DOCUMENT,
     MAX_COMPONENT_NAME_BYTES, MAX_COMPONENT_NESTING_DEPTH, MAX_COMPONENT_REFERENCES_PER_DOCUMENT,
     MAX_COMPONENT_SLOT_NAME_BYTES, MAX_COMPONENT_SLOTS, MAX_COMPONENT_SOURCE_BYTES,
-    MAX_COMPONENT_SOURCE_NODES, MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT,
+    MAX_COMPONENT_SOURCE_NODES, MAX_COMPONENT_STYLESHEET_BYTES,
+    MAX_COMPONENT_STYLESHEET_FILES_PER_PACKAGE, MAX_COMPONENT_STYLESHEET_PATH_BYTES,
+    MAX_COMPONENT_STYLESHEETS, MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT,
     MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
     MAX_CONTEXTUAL_LINK_REPEATS_PER_GROUP_TEMPLATE, MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT,
     MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE, MAX_DEPENDENCY_DEPTH, MAX_DIRECT_DEPENDENCIES,
@@ -183,7 +185,11 @@ fn public_documentation_links_and_example_paths_resolve() {
         "examples/package-graph/packages/controls/shell.json",
         "examples/package-graph/packages/controls/shared/shell.json",
         "examples/package-graph/packages/controls/components/status-card.html",
+        "examples/package-graph/packages/controls/components/status-card.css",
+        "examples/package-graph/packages/controls/components/status-card-density.css",
+        "examples/package-graph/packages/controls/components/component-frames.css",
         "examples/package-graph/packages/controls/shared/components/badge-label.html",
+        "examples/package-graph/packages/controls/shared/components/badge-label.css",
     ] {
         assert!(
             root.join(path).is_file(),
@@ -284,10 +290,12 @@ fn component_documentation_matches_the_composition_contract() {
         fs::read_to_string(root.join("docs/types/HTMShell.Component/Input.md")).unwrap();
     let slot_reference =
         fs::read_to_string(root.join("docs/types/HTMShell.Component/Slot.md")).unwrap();
+    let style_reference =
+        fs::read_to_string(root.join("docs/types/HTMShell.Component/Style.md")).unwrap();
     let manifest_reference =
         fs::read_to_string(root.join("docs/types/HTMShell/ShellManifest.md")).unwrap();
     let public = format!(
-        "{package_guide}\n{guide}\n{reference}\n{input_reference}\n{slot_reference}\n{manifest_reference}"
+        "{package_guide}\n{guide}\n{reference}\n{input_reference}\n{slot_reference}\n{style_reference}\n{manifest_reference}"
     );
 
     for statement in [
@@ -331,7 +339,23 @@ fn component_documentation_matches_the_composition_contract() {
         "named slots",
         "Shadow DOM",
         "component-local IDs",
-        "component-scoped CSS",
+        "scoped component stylesheets",
+        "`styles`",
+        "ownership-aware",
+        "legacy document-global",
+        "Root styles",
+        "fallback nodes",
+        "nested child",
+        "projected",
+        "manifest declaration order",
+        "`:hover`",
+        "`:active`",
+        "no public attribute",
+        "selector rewriting",
+        "`:host`",
+        "`::slotted()`",
+        "`@import`",
+        "`@font-face`",
         "state or action",
         "repeat integration",
         "external component",
@@ -425,12 +449,27 @@ fn component_documentation_matches_the_composition_contract() {
     assert!(slot_reference.contains(&format!(
         "| Slot name bytes | {MAX_COMPONENT_SLOT_NAME_BYTES} |"
     )));
+    assert!(style_reference.contains(&format!("at most {MAX_COMPONENT_STYLESHEETS} entries")));
+    assert!(style_reference.contains(&format!(
+        "at most {MAX_COMPONENT_STYLESHEET_FILES_PER_PACKAGE} unique"
+    )));
+    assert!(style_reference.contains(&format!(
+        "at most {MAX_COMPONENT_STYLESHEET_PATH_BYTES} bytes"
+    )));
+    assert!(style_reference.contains(&format!(
+        "at most {} MiB",
+        MAX_COMPONENT_STYLESHEET_BYTES / (1024 * 1024)
+    )));
 
     let manifest = ValidatedManifest::load(root.join("examples/package-graph/shell.json")).unwrap();
     let snapshot = manifest.snapshot();
-    assert_eq!(snapshot.components().definitions().len(), 4);
+    assert_eq!(snapshot.components().definitions().len(), 5);
     assert_eq!(snapshot.components().totals().source_read_count, 2);
     assert_eq!(snapshot.components().totals().source_parse_count, 2);
+    assert_eq!(snapshot.component_styles().sources().len(), 4);
+    assert_eq!(snapshot.component_styles().totals().source_read_count, 4);
+    assert_eq!(snapshot.component_styles().totals().source_parse_count, 4);
+    assert_eq!(snapshot.component_styles().associations().len(), 5);
     assert_eq!(
         snapshot
             .components()
@@ -440,6 +479,7 @@ fn component_documentation_matches_the_composition_contract() {
             .collect::<Vec<_>>(),
         [
             "dev.coastlinesec.htmshell.shared:badge-label",
+            "dev.coastlinesec.htmshell.shared:unstyled-note",
             "dev.coastlinesec.htmshell.controls:status-card",
             "dev.coastlinesec.htmshell.controls:required-frame",
             "dev.coastlinesec.htmshell.controls:projected-label",
@@ -458,6 +498,14 @@ fn component_documentation_matches_the_composition_contract() {
         "\"projections\"",
         "\"projected_nodes\"",
         "\"fallback_nodes\"",
+        "\"styles\"",
+        "\"stylesheets\"",
+        "\"component_stylesheet_sources\"",
+        "\"matching_mode\"",
+        "\"root_style_owner\"",
+        "\"style_scope_definitions\"",
+        "\"style_scope_instances\"",
+        "\"style_owned_nodes\"",
     ] {
         assert!(
             diagnostic.contains(expected),

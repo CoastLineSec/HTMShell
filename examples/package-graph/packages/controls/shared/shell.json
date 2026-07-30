@@ -21,7 +21,14 @@
           "type": "token",
           "default": "ready"
         }
+      ],
+      "styles": [
+        "components/badge-label.css"
       ]
+    },
+    {
+      "name": "unstyled-note",
+      "source": "components/badge-label.html"
     }
   ]
 }

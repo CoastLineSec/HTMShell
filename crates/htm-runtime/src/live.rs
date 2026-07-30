@@ -542,6 +542,7 @@ pub struct LiveDocument {
     projected_component_nodes: Vec<crate::ProjectedNodeProvenance>,
     component_fallback_nodes: Vec<crate::ComponentFallbackNodeProvenance>,
     _style_ownership: Option<StyleOwnership>,
+    _style_activation: Option<StyleActivationMode>,
     source: PathBuf,
     viewport: ViewportSpec,
     document_identity: ExperimentalDocumentIdentity,
@@ -1013,6 +1014,7 @@ impl LiveDocument {
             projected_component_nodes,
             component_fallback_nodes,
             style_ownership,
+            style_activation,
         ) = match (&package_snapshot, prepared_document) {
             (Some(snapshot), Some(prepared)) => {
                 let instantiated =
@@ -1026,6 +1028,7 @@ impl LiveDocument {
                     instantiated.projected_nodes,
                     instantiated.fallback_nodes,
                     Some(instantiated.style_ownership),
+                    Some(instantiated.style_activation),
                 )
             }
             _ => (
@@ -1037,14 +1040,11 @@ impl LiveDocument {
                 Vec::new(),
                 Vec::new(),
                 None,
+                None,
             ),
         };
-        if let Some(ownership) = &style_ownership {
-            activate_style_ownership(
-                &mut document,
-                ownership,
-                &StyleActivationMode::LegacyDocumentGlobal,
-            )?;
+        if let (Some(ownership), Some(activation)) = (&style_ownership, &style_activation) {
+            activate_style_ownership(&mut document, ownership, activation)?;
         }
         document.set_incremental_layout(true);
         validate_document_limits(&document)?;
@@ -1125,6 +1125,7 @@ impl LiveDocument {
             projected_component_nodes,
             component_fallback_nodes,
             _style_ownership: style_ownership,
+            _style_activation: style_activation,
             source,
             viewport,
             document_identity,

@@ -204,11 +204,17 @@ impl OwnedStylesheetSourceId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct OwnedStylesheetSource {
     id: OwnedStylesheetSourceId,
     logical_name: Arc<str>,
-    css: Arc<str>,
+    contents: OwnedStylesheetContents,
+}
+
+#[derive(Debug, Clone)]
+enum OwnedStylesheetContents {
+    Css(Arc<str>),
+    Parsed(DocumentStyleSheet),
 }
 
 impl OwnedStylesheetSource {
@@ -221,12 +227,24 @@ impl OwnedStylesheetSource {
         Self {
             id,
             logical_name: logical_name.into(),
-            css: css.into(),
+            contents: OwnedStylesheetContents::Css(css.into()),
+        }
+    }
+
+    pub(crate) fn from_parsed(
+        id: OwnedStylesheetSourceId,
+        logical_name: impl Into<Arc<str>>,
+        stylesheet: DocumentStyleSheet,
+    ) -> Self {
+        Self {
+            id,
+            logical_name: logical_name.into(),
+            contents: OwnedStylesheetContents::Parsed(stylesheet),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct StylesheetOwnerAssociation {
     owner: StylesheetOwnerId,
     order: u16,
@@ -248,7 +266,7 @@ impl StylesheetOwnerAssociation {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct OwnedAuthorStyles {
     associations: Arc<[StylesheetOwnerAssociation]>,
 }
@@ -273,14 +291,17 @@ impl OwnedAuthorStyles {
                 ));
             }
         }
-        let mut source_text = BTreeMap::<&OwnedStylesheetSourceId, &str>::new();
+        let mut source_text = BTreeMap::<&OwnedStylesheetSourceId, Option<&str>>::new();
         for association in &associations {
-            if let Some(existing) =
-                source_text.insert(&association.source.id, &association.source.css)
-                && existing != &*association.source.css
+            let css = match &association.source.contents {
+                OwnedStylesheetContents::Css(css) => Some(css.as_ref()),
+                OwnedStylesheetContents::Parsed(_) => None,
+            };
+            if let Some(existing) = source_text.insert(&association.source.id, css)
+                && existing != css
             {
                 return Err(RuntimeError::InvalidPackage(
-                    "one stylesheet source identity cannot name different CSS".into(),
+                    "one stylesheet source identity cannot name different content".into(),
                 ));
             }
         }
@@ -290,12 +311,21 @@ impl OwnedAuthorStyles {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub(crate) enum StyleActivationMode {
     #[default]
     LegacyDocumentGlobal,
     #[cfg_attr(not(test), allow(dead_code))]
     OwnershipAware(OwnedAuthorStyles),
+}
+
+impl StyleActivationMode {
+    pub(crate) const fn as_str(&self) -> &'static str {
+        match self {
+            Self::LegacyDocumentGlobal => "legacy-document-global",
+            Self::OwnershipAware(_) => "ownership-aware",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -320,11 +350,12 @@ pub(crate) fn activate_style_ownership(
     let mut parsed_sources = BTreeMap::<OwnedStylesheetSourceId, DocumentStyleSheet>::new();
     for association in author_styles.associations.iter() {
         if !parsed_sources.contains_key(&association.source.id) {
-            let sheet = prepare_author_stylesheet(
-                document,
-                &association.source.css,
-                &association.source.logical_name,
-            )?;
+            let sheet = match &association.source.contents {
+                OwnedStylesheetContents::Css(css) => {
+                    prepare_author_stylesheet(document, css, &association.source.logical_name)?
+                }
+                OwnedStylesheetContents::Parsed(stylesheet) => stylesheet.clone(),
+            };
             parsed_sources.insert(association.source.id.clone(), sheet);
         }
     }
@@ -959,7 +990,10 @@ mod tests {
                 0,
                 source(
                     "gpu-a",
-                    ".shared { width:28px; height:28px; background:rgb(0,0,255); }",
+                    concat!(
+                        ".shared { width:28px; height:28px; background:rgb(0,0,255); }",
+                        ".interactive:hover { background:rgb(255,128,0); }"
+                    ),
                 ),
             ),
             association(
@@ -987,6 +1021,10 @@ mod tests {
         )
         .unwrap();
         instantiated.document.resolve(0.0);
+        let interactive = case_slots(&instantiated.document, "interactive")[0];
+        let (hover_x, hover_y) = center(&instantiated.document, interactive);
+        assert!(instantiated.document.set_hover_to(hover_x, hover_y));
+        instantiated.document.resolve(0.1);
 
         let identities = IdentityRegistry::from_document(&instantiated.document);
         let mut session = CpuRenderSession::default();
@@ -1024,6 +1062,7 @@ mod tests {
             "a-projected",
             "child",
             "b-node",
+            "interactive",
         ];
         let samples = cases
             .into_iter()
