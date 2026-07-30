@@ -11,7 +11,9 @@ use crate::adapter::{
 };
 use crate::identity::{IdentityRegistry, author_slots};
 use crate::model::{CornerRadii, LogicalRect, ViewportSpec};
-use crate::{ExperimentalDocumentIdentity, ExperimentalNodeIdentity, RuntimeError};
+use crate::{
+    ComponentResourceUsage, ExperimentalDocumentIdentity, ExperimentalNodeIdentity, RuntimeError,
+};
 use blitz_dom::node::NodeData;
 use blitz_html::HtmlDocument;
 use serde::{Deserialize, Serialize};
@@ -134,11 +136,12 @@ pub enum ResourceKind {
     RasterImage,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceOwner {
     Process,
     Document(ExperimentalDocumentIdentity),
+    Package { generation: u64, package_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -146,6 +149,7 @@ pub enum ResourceOwner {
 pub enum SceneResourceKey {
     Dom { slot: usize, generation: u64 },
     Process { name: String },
+    ComponentRaster { path: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -295,6 +299,24 @@ pub(crate) fn build_retained_scene(
     revision: SceneRevision,
     viewport: ViewportSpec,
 ) -> Result<RetainedScene, RuntimeError> {
+    build_retained_scene_with_resources(
+        document,
+        identities,
+        document_identity,
+        revision,
+        viewport,
+        &[],
+    )
+}
+
+pub(crate) fn build_retained_scene_with_resources(
+    document: &HtmlDocument,
+    identities: &IdentityRegistry,
+    document_identity: ExperimentalDocumentIdentity,
+    revision: SceneRevision,
+    viewport: ViewportSpec,
+    component_resources: &[ComponentResourceUsage],
+) -> Result<RetainedScene, RuntimeError> {
     let surface = safe_rect(
         0.0,
         0.0,
@@ -360,6 +382,10 @@ pub(crate) fn build_retained_scene(
     });
 
     let mut resources = BTreeMap::new();
+    let component_resources = component_resources
+        .iter()
+        .map(|usage| (usage.node_slot(), usage))
+        .collect::<BTreeMap<_, _>>();
     let mut effective_clips = BTreeMap::new();
     let mut depths = BTreeMap::new();
     let mut ancestor_suppression = BTreeMap::new();
@@ -634,7 +660,9 @@ pub(crate) fn build_retained_scene(
             })
             .unwrap_or_else(|| format!("{:?}", paint_node.style));
 
-        let resource = if let Some(image) = image.as_ref() {
+        let resource = if let Some(usage) = component_resources.get(&slot) {
+            Some(register_component_resource(&mut resources, usage)?)
+        } else if let Some(image) = image.as_ref() {
             let kind = match image.decoded_kind.as_str() {
                 "svg" => ResourceKind::Svg,
                 _ => ResourceKind::RasterImage,
@@ -792,6 +820,44 @@ pub(crate) fn build_retained_scene(
         resources,
         content_fingerprint: fingerprint,
     })
+}
+
+fn register_component_resource(
+    resources: &mut BTreeMap<SceneResourceId, SceneResource>,
+    usage: &ComponentResourceUsage,
+) -> Result<(SceneResourceId, SceneResourceVersion), RuntimeError> {
+    let source = usage.source();
+    let generation = usage.instance().snapshot_generation();
+    let id = SceneResourceId {
+        owner: ResourceOwner::Package {
+            generation: generation.get(),
+            package_id: source.package_id().to_string(),
+        },
+        kind: ResourceKind::RasterImage,
+        key: SceneResourceKey::ComponentRaster {
+            path: source.path().as_str().to_owned(),
+        },
+    };
+    let version = SceneResourceVersion(stable_hash_bytes(
+        source.semantic_version().deterministic_string().as_bytes(),
+    ));
+    let diagnostic_key = source.id().deterministic_string(generation);
+    if diagnostic_key.len() > 4_096 {
+        return Err(RuntimeError::LimitExceeded(
+            "retained component raster key exceeds 4096 bytes".into(),
+        ));
+    }
+    resources.insert(
+        id.clone(),
+        SceneResource {
+            id: id.clone(),
+            version,
+            lifecycle: ResourceLifecycle::Ready,
+            diagnostic_key,
+            byte_len: usize::try_from(source.decoded_bytes()).ok(),
+        },
+    );
+    Ok((id, version))
 }
 
 pub(crate) fn diff_retained_scenes(

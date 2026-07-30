@@ -65,6 +65,23 @@
       "styles": [
         "components/status-card.css",
         "components/status-card-density.css"
+      ],
+      "resources": [
+        {
+          "name": "status-orb",
+          "type": "raster",
+          "source": "assets/status-orb.png"
+        },
+        {
+          "name": "photo-swatch",
+          "type": "raster",
+          "source": "assets/photo-swatch.jpg"
+        },
+        {
+          "name": "alpha-chip",
+          "type": "raster",
+          "source": "assets/alpha-chip.webp"
+        }
       ]
     },
     {
@@ -82,6 +99,13 @@
       ],
       "styles": [
         "components/component-frames.css"
+      ],
+      "resources": [
+        {
+          "name": "status-orb",
+          "type": "raster",
+          "source": "assets/status-orb.png"
+        }
       ]
     },
     {

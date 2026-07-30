@@ -2,7 +2,7 @@
 
 HTMShell schema version 2 packages can export inert, reusable HTML fragments. A component definition is parsed and validated once while an immutable package snapshot candidate is built. An explicit `htm-use` then creates a fresh instance by cloning normalized template nodes. No source text is substituted or reparsed per instance.
 
-Components may declare bounded literal inputs, up to 32 default or named content slots, and up to 16 package-owned stylesheets. They still have no local IDs, local state, implicit actions or service state, repeat integration, or external component-owned resources.
+Components may declare bounded literal inputs, up to 32 default or named content slots, up to 16 package-owned stylesheets, and up to 32 static raster resources. They still have no local IDs, local state, implicit actions or service state, repeat integration, external SVG resources, CSS URL assets, or fonts.
 
 ## Export a definition
 
@@ -41,13 +41,20 @@ Both `shell` and `library` packages may declare an optional ordered `components`
       ],
       "styles": [
         "components/status-card.css"
+      ],
+      "resources": [
+        {
+          "name": "status-icon",
+          "type": "raster",
+          "source": "assets/status-icon.png"
+        }
       ]
     }
   ]
 }
 ```
 
-Each entry has `name`, `source`, an optional ordered `inputs` array, an optional ordered `slots` array, and an optional ordered `styles` array. The manifest owns the public export, input, slot, and stylesheet association tables. A template found in a file is not exported implicitly.
+Each entry has `name`, `source`, an optional ordered `inputs` array, an optional ordered `slots` array, an optional ordered `styles` array, and an optional ordered `resources` array. The manifest owns the public export, input, slot, stylesheet association, and resource association tables. A template found in a file is not exported implicitly.
 
 Only the root shell package owns surfaces and topology. A library component always renders inside the root-owned document that explicitly instantiates it.
 
@@ -73,7 +80,7 @@ A source document contains one or more top-level declarations:
 
 Whitespace, comments, and ordinary parser metadata may surround declarations. Renderable content outside a declaration is invalid. Every manifest export must match exactly one declaration, every declaration must be exported, and duplicate names are invalid. Nested declaration templates and scripts are invalid.
 
-A definition may contain ordinary text and layout elements, ordinary classes, inline SVG without external references, non-resource inline styles, foreground filters, and nested `htm-use` directives. Declared component stylesheets are read and parsed during package candidate validation. Leaving a definition unused creates no surface, document instance, computed-style work, asset load, service demand, renderer resource, frame, or Wayland object.
+A definition may contain ordinary text and layout elements, ordinary classes, inline SVG without external references, non-resource inline styles, foreground filters, declared raster `<img>` elements, and nested `htm-use` directives. Declared component stylesheets and raster sources are read during package candidate validation. Raster sources are also decoded. Leaving a definition unused creates no surface, document instance, prepared resource usage, computed-style work, renderer resource, GPU upload, service demand, frame, or Wayland object.
 
 The component profile rejects:
 
@@ -82,7 +89,7 @@ The component profile rejects:
 - undeclared or duplicate `slot` elements, invalid slot names or routing, nested slot fallback, and slot elements outside component definitions;
 - `id`, `for`, fragment references, and supported ARIA local-reference attributes;
 - scripts, style elements, stylesheet links, `@import`, `url()`, and URL-valued CSS;
-- external images, SVG references, fonts, media, data files, or other component-owned resources.
+- undeclared images, ordinary relative component image paths, SVG references, fonts, media, data files, or other component-owned resources.
 
 Root shell documents retain their existing built-ins, state, actions, repeats, stylesheets, and resources outside component definitions.
 
@@ -235,7 +242,7 @@ Projected nodes retain caller ownership. Root-owned content keeps root state, ac
 
 Template order determines rendered order. At each insertion point, assigned caller nodes appear in their caller order, otherwise fallback nodes appear in definition order. The component host and internal slot/projection boundaries create no layout box, paint, input region, accessibility node, stacking context, or public CSS selector. Projected or fallback children occupy the insertion point directly. This is declarative projection, not Shadow DOM.
 
-Repeat projection, component-local IDs, `::slotted()`, and component-owned resources are not supported. Slot routing is immutable for one prepared package snapshot.
+Repeat projection, component-local IDs, and `::slotted()` are not supported. Slot routing is immutable for one prepared package snapshot.
 
 ## Component stylesheets
 
@@ -261,6 +268,40 @@ Roots with no reachable styled component retain the legacy document-global casca
 Selector isolation does not change the rendered tree. Inherited properties and supported custom properties continue across rendered ancestry from root to component, parent to nested child, and callee containers to projected caller content. Non-inherited properties do not cross. Inline style keeps its existing priority and node ownership. Existing `:hover` and `:active` matching is instance-local; invalidation may conservatively inspect more of the document while preserving scoped results.
 
 Component sheets use the existing HTMShell CSS selector and property profile. `@import`, `@font-face`, any `url()` resource, `:host`, `::slotted()`, shadow-tree selectors, ID selectors, and unsupported CSS reject the complete candidate. No external asset is fetched. The scope is internal metadata: no public attribute, generated class, selector rewriting, layout wrapper, or Shadow DOM is introduced.
+
+## Component raster resources
+
+The optional `resources` array declares definition-owned static raster sources:
+
+```json
+{
+  "name": "status-card",
+  "source": "components/status-card.html",
+  "resources": [
+    {
+      "name": "status-icon",
+      "type": "raster",
+      "source": "assets/status-icon.png"
+    }
+  ]
+}
+```
+
+Component markup consumes the association by logical name:
+
+```html
+<img src="resource:status-icon" alt="">
+```
+
+Names contain 1 through 64 lowercase ASCII bytes and use letters, digits, and single interior hyphens. Paths resolve from the package root that owns the export. They are normalized, package-contained, opened without following symlinks, limited to 512 UTF-8 bytes and 32 components, and must identify a regular file.
+
+PNG, JPEG, and static WebP are supported. GIF, animated WebP, animated PNG, SVG, and other formats reject. An encoded source is at most 8 MiB. Width and height are at most 4,096 pixels, total pixels are at most 16,777,216, one canonical RGBA8 decode is at most 64 MiB, and all decoded component resources in one snapshot are at most 256 MiB.
+
+Every declared source, including one on an unused definition, is eagerly read, validated, and decoded before publication. One owning-package and logical-path source is read and decoded once per candidate, then shared by associations, definitions, instances, roots, and outputs. CPU and Vello consume the same immutable neutral pixels. Vello preparation remains lazy and device-generation-owned.
+
+Definition content and fallback resolve against the callee definition catalog. Nested children use their own catalogs. Assigned slot content keeps caller ownership: root content keeps the root resource pipeline, and parent-component content keeps its parent definition catalog. Projection never grants access to a callee resource. Dependency resource aliases do not exist.
+
+The initial syntax applies only to `<img src>`. It does not add `srcset`, SVG resource references, CSS `url()`, fonts, media, data, resource-reference inputs, animation, network loading, or data URLs. See the [component raster resource reference](../types/HTMShell.Component/Resource.md).
 
 ## Host and identity
 
@@ -297,9 +338,19 @@ All package manifests, component sources, component references, component cycles
 | Unique component stylesheet files per package | 64 |
 | Component stylesheet path | 512 UTF-8 bytes |
 | Component stylesheet file | 1 MiB |
+| Raster resources per component | 32 |
+| Resource associations per package | 4,096 |
+| Unique raster sources per package | 256 |
+| Resource name | 64 ASCII bytes |
+| Resource path | 512 UTF-8 bytes and 32 components |
+| Encoded raster source | 8 MiB |
+| Raster dimensions | 4,096 by 4,096 pixels |
+| Raster pixels | 16,777,216 |
+| Decoded raster | 64 MiB |
+| Snapshot decoded component resources | 256 MiB |
 
 Component references form a separately validated dependency graph. Direct, indirect, and cross-package recursion cannot become current. The dependency-first definition order is deterministic, shared definitions are parsed once, and diamonds reuse one immutable definition.
 
-See the [package graph example](../../examples/package-graph/shell.json), the [local package guide](packages.md), the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference, the [component input reference](../types/HTMShell.Component/Input.md), the [slot reference](../types/HTMShell.Component/Slot.md), and the [component style reference](../types/HTMShell.Component/Style.md).
+See the [package graph example](../../examples/package-graph/shell.json), the [local package guide](packages.md), the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference, the [component input reference](../types/HTMShell.Component/Input.md), the [slot reference](../types/HTMShell.Component/Slot.md), the [component style reference](../types/HTMShell.Component/Style.md), and the [component raster resource reference](../types/HTMShell.Component/Resource.md).
 
-Local ID scoping, host styling, slotted-content selectors, package-global library styles, dynamic state and action bindings, repeat integration, external component resources, and hot reload remain unavailable.
+Local ID scoping, host styling, slotted-content selectors, package-global library styles, dynamic state and action bindings, repeat integration, component external SVG, CSS URL assets, fonts, resource-reference inputs, and hot reload remain unavailable.

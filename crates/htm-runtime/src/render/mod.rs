@@ -19,7 +19,7 @@ pub use gpu::{
     LiveGpuBackendInfo, LiveGpuConfiguration, LiveGpuError, LiveGpuErrorKind, LiveGpuPresenter,
     LiveGpuStatistics, LiveWaylandHandle, PendingLiveGpuFrame,
 };
-pub(crate) use scene::build_retained_scene;
+pub(crate) use scene::{build_retained_scene, build_retained_scene_with_resources};
 
 pub use contract::{
     BackendError, BackendErrorKind, PixelFormat, RenderResult, RenderTarget, Renderer,

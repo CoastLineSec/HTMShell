@@ -222,4 +222,5 @@ pub struct ExperimentRun {
     pub component_slot_projections: Vec<crate::ComponentSlotProjectionRecord>,
     pub projected_component_nodes: Vec<crate::ProjectedNodeProvenance>,
     pub component_fallback_nodes: Vec<crate::ComponentFallbackNodeProvenance>,
+    pub component_resource_usages: Vec<crate::ComponentResourceUsage>,
 }

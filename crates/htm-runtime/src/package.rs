@@ -16,6 +16,15 @@ use crate::component::{
     build_component_catalog, parse_component_input_default, parse_component_source,
     prepare_root_document,
 };
+use crate::component_resource::{
+    ComponentRasterSource, ComponentResourceAssociation, ComponentResourceCatalog,
+    ComponentResourceDeclaration, ComponentResourceKind, ComponentResourceName,
+    ComponentResourcePath, ComponentResourceSourceId, ComponentResourceValidationTotals,
+    MAX_COMPONENT_RASTER_SOURCE_BYTES, MAX_COMPONENT_RESOURCE_ASSOCIATIONS_PER_PACKAGE,
+    MAX_COMPONENT_RESOURCE_DECLARATIONS, MAX_COMPONENT_RESOURCE_PATH_BYTES,
+    MAX_COMPONENT_RESOURCE_PATH_COMPONENTS, MAX_COMPONENT_RESOURCE_SNAPSHOT_DECODED_BYTES,
+    MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE, RasterDecodeErrorKind,
+};
 use crate::component_style::{
     ComponentStyleCatalog, ComponentStyleValidationTotals, ComponentStylesheetAssociation,
     ComponentStylesheetPath, ComponentStylesheetSemanticVersion, ComponentStylesheetSource,
@@ -181,6 +190,35 @@ pub enum PackageErrorKind {
     ComponentStyleScopeActivationInvalid,
     ComponentStyleOwnerAssignmentInvalid,
     ComponentSelectorScopeValidationFailure,
+    InvalidComponentResourceDeclaration,
+    DuplicateComponentResourceName,
+    InvalidComponentResourceName,
+    ReservedComponentResourceName,
+    UnsupportedComponentResourceType,
+    ComponentResourceDeclarationLimit,
+    ComponentResourceAssociationLimit,
+    ComponentResourceUniqueSourceLimit,
+    ComponentResourceSnapshotDecodedByteLimit,
+    InvalidComponentResourcePath,
+    ComponentResourcePathDepthLimit,
+    ComponentResourcePathLengthLimit,
+    ComponentResourceMissing,
+    ComponentResourceSymlink,
+    ComponentResourceSpecialFile,
+    ComponentResourceMutationRace,
+    ComponentResourceSourceTooLarge,
+    ComponentResourceFormatUnsupported,
+    ComponentResourceAnimatedFormatUnsupported,
+    ComponentResourceDimensionsInvalid,
+    ComponentResourceDimensionLimit,
+    ComponentResourcePixelLimit,
+    ComponentResourceDecodedByteLimit,
+    ComponentResourceDecodeFailure,
+    ComponentResourceAssociationInvalid,
+    ComponentResourceReferenceMalformed,
+    ComponentResourceReferenceUnknown,
+    ComponentResourceReferenceWrongOwner,
+    ComponentResourceUsageInvalid,
     DocumentDepthLimit,
     PermissionDenied,
     SpecialFile,
@@ -618,6 +656,7 @@ pub struct PackageSnapshot {
     headless_entry: Option<PackageEntryDocument>,
     components: Arc<ComponentCatalog>,
     component_styles: Arc<ComponentStyleCatalog>,
+    component_resources: Arc<ComponentResourceCatalog>,
     bytes_read: u64,
     measurements: ManifestMeasurements,
 }
@@ -653,6 +692,10 @@ impl PackageSnapshot {
 
     pub fn component_styles(&self) -> &ComponentStyleCatalog {
         &self.component_styles
+    }
+
+    pub fn component_resources(&self) -> &ComponentResourceCatalog {
+        &self.component_resources
     }
 
     pub fn component_definition_id(
@@ -707,8 +750,13 @@ impl PackageSnapshot {
         document_serial: u64,
         config: blitz_dom::DocumentConfig,
     ) -> Result<crate::component::InstantiatedDocument, PackageLoadError> {
-        let mut instantiated =
-            prepared.instantiate(&self.components, self.generation, document_serial, config)?;
+        let mut instantiated = prepared.instantiate(
+            &self.components,
+            &self.component_resources,
+            self.generation,
+            document_serial,
+            config,
+        )?;
         instantiated.style_activation = self
             .component_styles
             .activation_mode(
@@ -752,6 +800,7 @@ pub struct PackageSnapshotCandidate {
     headless_entry: Option<PackageEntryDocument>,
     components: ComponentCatalog,
     component_styles: ComponentStyleCatalog,
+    component_resources: ComponentResourceCatalog,
     bytes_read: u64,
     measurements: ManifestMeasurements,
 }
@@ -834,6 +883,7 @@ impl PackageSnapshotLoader {
             headless_entry: candidate.headless_entry,
             components: Arc::new(candidate.components),
             component_styles: Arc::new(candidate.component_styles),
+            component_resources: Arc::new(candidate.component_resources),
             bytes_read: candidate.bytes_read,
             measurements: candidate.measurements,
         });
@@ -987,6 +1037,8 @@ struct PackageGraphDiagnostic<'a> {
     component_definition_count: usize,
     dependency_first_components: Vec<ComponentDefinitionDiagnostic>,
     component_stylesheet_sources: Vec<ComponentStylesheetSourceDiagnostic>,
+    component_raster_sources: Vec<ComponentRasterSourceDiagnostic>,
+    component_resource_totals: ComponentResourceTotalsDiagnostic,
     prepared_root_documents: Vec<PreparedDocumentDiagnostic<'a>>,
 }
 
@@ -1015,6 +1067,7 @@ struct ComponentExportDiagnostic<'a> {
     inputs: Vec<ComponentInputDeclarationDiagnostic>,
     slots: Vec<ComponentSlotDeclarationDiagnostic>,
     styles: Vec<&'a str>,
+    resources: Vec<ComponentResourceDeclarationDiagnostic<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1034,6 +1087,46 @@ struct ComponentDefinitionDiagnostic {
     slots: Vec<ComponentSlotDefinitionDiagnostic>,
     resolved_references: Vec<ComponentReferenceDiagnostic>,
     stylesheets: Vec<ComponentStylesheetAssociationDiagnostic>,
+    resources: Vec<ComponentResourceAssociationDiagnostic>,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentResourceDeclarationDiagnostic<'a> {
+    name: &'a str,
+    resource_type: &'static str,
+    source: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentRasterSourceDiagnostic {
+    identity: String,
+    package_id: String,
+    path: String,
+    semantic_version: String,
+    format: &'static str,
+    encoded_bytes: u64,
+    width: u32,
+    height: u32,
+    decoded_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentResourceAssociationDiagnostic {
+    identity: String,
+    source_identity: String,
+    name: String,
+    path: String,
+    ordinal: u16,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentResourceTotalsDiagnostic {
+    sources: usize,
+    reads: usize,
+    decodes: usize,
+    associations: usize,
+    encoded_bytes: u64,
+    decoded_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1094,6 +1187,18 @@ struct PreparedDocumentDiagnostic<'a> {
     style_scope_definitions: Vec<String>,
     style_scope_instances: Vec<String>,
     style_owned_nodes: Vec<StyleOwnedNodeDiagnostic>,
+    resource_usages: Vec<ComponentResourceUsageDiagnostic>,
+}
+
+#[derive(Debug, Serialize)]
+struct ComponentResourceUsageDiagnostic {
+    identity: String,
+    instance: String,
+    dom_slot: usize,
+    association: String,
+    name: String,
+    source: String,
+    source_ordinal: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -1182,6 +1287,7 @@ impl<'a> PackageGraphDiagnostic<'a> {
                         style_scope_definitions: diagnostics.style_scope_definitions,
                         style_scope_instances: diagnostics.style_scope_instances,
                         style_owned_nodes: diagnostics.style_owned_nodes,
+                        resource_usages: diagnostics.resource_usages,
                     }
                 })
             }));
@@ -1213,6 +1319,7 @@ impl<'a> PackageGraphDiagnostic<'a> {
                     style_scope_definitions: diagnostics.style_scope_definitions,
                     style_scope_instances: diagnostics.style_scope_instances,
                     style_owned_nodes: diagnostics.style_owned_nodes,
+                    resource_usages: diagnostics.resource_usages,
                 });
             }
         }
@@ -1257,6 +1364,15 @@ impl<'a> PackageGraphDiagnostic<'a> {
                                 .styles()
                                 .iter()
                                 .map(ComponentStylesheetPath::as_str)
+                                .collect(),
+                            resources: export
+                                .resources()
+                                .iter()
+                                .map(|resource| ComponentResourceDeclarationDiagnostic {
+                                    name: resource.name().as_str(),
+                                    resource_type: resource.kind().as_str(),
+                                    source: resource.source().as_str(),
+                                })
                                 .collect(),
                         })
                         .collect(),
@@ -1307,6 +1423,22 @@ impl<'a> PackageGraphDiagnostic<'a> {
                                 ordinal: association.ordinal(),
                             })
                             .collect(),
+                        resources: snapshot
+                            .component_resources()
+                            .associations()
+                            .iter()
+                            .filter(|association| association.definition() == key)
+                            .map(|association| ComponentResourceAssociationDiagnostic {
+                                identity: association.deterministic_id(snapshot.generation()),
+                                source_identity: association
+                                    .source()
+                                    .id()
+                                    .deterministic_string(snapshot.generation()),
+                                name: association.name().to_string(),
+                                path: association.source().path().to_string(),
+                                ordinal: association.ordinal(),
+                            })
+                            .collect(),
                     })
                 })
                 .collect(),
@@ -1324,6 +1456,33 @@ impl<'a> PackageGraphDiagnostic<'a> {
                     selectors: source.selector_count(),
                 })
                 .collect(),
+            component_raster_sources: snapshot
+                .component_resources()
+                .sources()
+                .iter()
+                .map(|source| ComponentRasterSourceDiagnostic {
+                    identity: source.id().deterministic_string(snapshot.generation()),
+                    package_id: source.package_id().to_string(),
+                    path: source.path().to_string(),
+                    semantic_version: source.semantic_version().deterministic_string().to_owned(),
+                    format: source.format().as_str(),
+                    encoded_bytes: source.encoded_bytes(),
+                    width: source.width(),
+                    height: source.height(),
+                    decoded_bytes: source.decoded_bytes(),
+                })
+                .collect(),
+            component_resource_totals: {
+                let totals = snapshot.component_resources().totals();
+                ComponentResourceTotalsDiagnostic {
+                    sources: totals.source_count,
+                    reads: totals.source_read_count,
+                    decodes: totals.source_decode_count,
+                    associations: totals.association_count,
+                    encoded_bytes: totals.encoded_bytes,
+                    decoded_bytes: totals.decoded_bytes,
+                }
+            },
             prepared_root_documents,
         }
     }
@@ -1356,6 +1515,7 @@ struct PreparedComponentDiagnostics {
     style_scope_definitions: Vec<String>,
     style_scope_instances: Vec<String>,
     style_owned_nodes: Vec<StyleOwnedNodeDiagnostic>,
+    resource_usages: Vec<ComponentResourceUsageDiagnostic>,
 }
 
 fn prepared_component_diagnostics(
@@ -1381,6 +1541,7 @@ fn prepared_component_diagnostics(
             style_scope_definitions: Vec::new(),
             style_scope_instances: Vec::new(),
             style_owned_nodes: Vec::new(),
+            resource_usages: Vec::new(),
         };
     };
     let matching_mode = instantiated.style_activation.as_str();
@@ -1467,6 +1628,19 @@ fn prepared_component_diagnostics(
             source_ordinal: consumer.template_source_ordinal(),
         })
         .collect();
+    let resource_usages = instantiated
+        .resource_usages
+        .iter()
+        .map(|usage| ComponentResourceUsageDiagnostic {
+            identity: usage.id().deterministic_string().to_owned(),
+            instance: usage.instance().deterministic_string(),
+            dom_slot: usage.node_slot(),
+            association: usage.association().deterministic_id(snapshot.generation()),
+            name: usage.association().name().to_string(),
+            source: usage.source().path().to_string(),
+            source_ordinal: usage.template_source_ordinal(),
+        })
+        .collect();
     let projections = instantiated
         .slot_projections
         .iter()
@@ -1514,6 +1688,7 @@ fn prepared_component_diagnostics(
         style_scope_definitions,
         style_scope_instances,
         style_owned_nodes,
+        resource_usages,
     }
 }
 
@@ -1535,6 +1710,68 @@ trait ReadOnlyPackageFileSystem: fmt::Debug + Send + Sync {
     fn metadata(&self, path: &Path) -> io::Result<PackageFileMetadata>;
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
     fn read_bounded(&self, path: &Path, max_bytes: u64) -> io::Result<Vec<u8>>;
+
+    fn read_regular_nofollow(
+        &self,
+        package_root: &Path,
+        logical_path: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, SecureReadError> {
+        let mut path = package_root.to_path_buf();
+        let components = logical_path.split('/').collect::<Vec<_>>();
+        for (index, component) in components.iter().enumerate() {
+            path.push(component);
+            let metadata = self.metadata(&path).map_err(SecureReadError::from_io)?;
+            if metadata.kind == PackageFileKind::Symlink {
+                return Err(SecureReadError::Symlink);
+            }
+            let final_component = index + 1 == components.len();
+            if (final_component && metadata.kind != PackageFileKind::File)
+                || (!final_component && metadata.kind != PackageFileKind::Directory)
+            {
+                return Err(SecureReadError::Special);
+            }
+            if final_component && metadata.len > max_bytes {
+                return Err(SecureReadError::TooLarge);
+            }
+        }
+        let before = self.metadata(&path).map_err(SecureReadError::from_io)?;
+        let bytes = self
+            .read_bounded(&path, max_bytes)
+            .map_err(SecureReadError::from_io)?;
+        let after = self.metadata(&path).map_err(SecureReadError::from_io)?;
+        if before.kind != PackageFileKind::File
+            || after.kind != PackageFileKind::File
+            || before.len != after.len
+            || after.len != bytes.len() as u64
+        {
+            return Err(SecureReadError::Mutation);
+        }
+        if bytes.len() as u64 > max_bytes {
+            return Err(SecureReadError::TooLarge);
+        }
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug)]
+enum SecureReadError {
+    Missing(io::Error),
+    Symlink,
+    Special,
+    TooLarge,
+    Mutation,
+    Io(io::Error),
+}
+
+impl SecureReadError {
+    fn from_io(error: io::Error) -> Self {
+        if error.kind() == io::ErrorKind::NotFound {
+            Self::Missing(error)
+        } else {
+            Self::Io(error)
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1570,6 +1807,90 @@ impl ReadOnlyPackageFileSystem for LocalPackageFileSystem {
             .read_to_end(&mut bytes)?;
         Ok(bytes)
     }
+
+    fn read_regular_nofollow(
+        &self,
+        package_root: &Path,
+        logical_path: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, SecureReadError> {
+        use rustix::fs::{FileType, Mode, OFlags, fstat, open, openat};
+
+        let directory_flags =
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+        let mut directory =
+            open(package_root, directory_flags, Mode::empty()).map_err(secure_open_error)?;
+        let mut components = logical_path.split('/').peekable();
+        let mut diagnostic_path = package_root.to_path_buf();
+        while let Some(component) = components.next() {
+            diagnostic_path.push(component);
+            let observed =
+                std::fs::symlink_metadata(&diagnostic_path).map_err(SecureReadError::from_io)?;
+            if observed.file_type().is_symlink() {
+                return Err(SecureReadError::Symlink);
+            }
+            if components.peek().is_some() {
+                if !observed.is_dir() {
+                    return Err(SecureReadError::Special);
+                }
+                directory = openat(&directory, component, directory_flags, Mode::empty())
+                    .map_err(secure_open_error)?;
+                continue;
+            }
+            if !observed.is_file() {
+                return Err(SecureReadError::Special);
+            }
+            let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+            let descriptor =
+                openat(&directory, component, flags, Mode::empty()).map_err(secure_open_error)?;
+            let before = fstat(&descriptor).map_err(secure_stat_error)?;
+            if !FileType::from_raw_mode(before.st_mode).is_file() {
+                return Err(SecureReadError::Special);
+            }
+            let length = u64::try_from(before.st_size).map_err(|_| SecureReadError::TooLarge)?;
+            if length > max_bytes {
+                return Err(SecureReadError::TooLarge);
+            }
+            let file = File::from(descriptor);
+            let mut bytes = Vec::new();
+            (&file)
+                .take(max_bytes.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map_err(SecureReadError::from_io)?;
+            if bytes.len() as u64 > max_bytes {
+                return Err(SecureReadError::TooLarge);
+            }
+            let after = fstat(&file).map_err(secure_stat_error)?;
+            let stable = before.st_dev == after.st_dev
+                && before.st_ino == after.st_ino
+                && before.st_size == after.st_size
+                && before.st_mtime == after.st_mtime
+                && before.st_mtime_nsec == after.st_mtime_nsec
+                && before.st_ctime == after.st_ctime
+                && before.st_ctime_nsec == after.st_ctime_nsec
+                && length == bytes.len() as u64;
+            if !stable {
+                return Err(SecureReadError::Mutation);
+            }
+            return Ok(bytes);
+        }
+        Err(SecureReadError::Missing(io::Error::new(
+            io::ErrorKind::NotFound,
+            "empty secure package path",
+        )))
+    }
+}
+
+fn secure_open_error(error: rustix::io::Errno) -> SecureReadError {
+    if error == rustix::io::Errno::LOOP {
+        SecureReadError::Symlink
+    } else {
+        SecureReadError::from_io(io::Error::from_raw_os_error(error.raw_os_error()))
+    }
+}
+
+fn secure_stat_error(error: rustix::io::Errno) -> SecureReadError {
+    SecureReadError::from_io(io::Error::from_raw_os_error(error.raw_os_error()))
 }
 
 #[derive(Debug)]
@@ -1658,6 +1979,17 @@ struct RawComponentExport {
     slots: Vec<RawComponentSlot>,
     #[serde(default)]
     styles: Vec<serde_json::Value>,
+    #[serde(default)]
+    resources: Vec<RawComponentResource>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawComponentResource {
+    name: String,
+    #[serde(rename = "type")]
+    resource_type: String,
+    source: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2217,6 +2549,7 @@ impl<'a> GraphBuilder<'a> {
                         ExpectedComponentDefinition {
                             inputs: export.inputs().to_vec().into(),
                             slots: export.slots().to_vec().into(),
+                            resources: export.resources().to_vec().into(),
                         },
                     );
             }
@@ -2356,6 +2689,174 @@ impl<'a> GraphBuilder<'a> {
             }
         }
         Ok(ComponentStyleCatalog::new(sources, associations, totals))
+    }
+
+    fn load_component_resource_catalog(
+        &mut self,
+        components: &ComponentCatalog,
+    ) -> Result<ComponentResourceCatalog, PackageLoadError> {
+        let packages = self.ordered.clone();
+        let mut sources = Vec::new();
+        let mut associations = Vec::new();
+        let mut totals = ComponentResourceValidationTotals::default();
+        for package in &packages {
+            let package_associations = package
+                .components()
+                .iter()
+                .try_fold(0usize, |total, export| {
+                    total.checked_add(export.resources().len())
+                })
+                .ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceAssociationLimit,
+                        "component resource association count overflowed",
+                    )
+                })?;
+            if package_associations > MAX_COMPONENT_RESOURCE_ASSOCIATIONS_PER_PACKAGE {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentResourceAssociationLimit,
+                    format!(
+                        "package `{}` declares {package_associations} component resource associations; limit is {MAX_COMPONENT_RESOURCE_ASSOCIATIONS_PER_PACKAGE}",
+                        package.id()
+                    ),
+                )
+                .in_package(package.id().to_string()));
+            }
+            let unique_paths = package
+                .components()
+                .iter()
+                .flat_map(ComponentExport::resources)
+                .map(ComponentResourceDeclaration::source)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if unique_paths.len() > MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentResourceUniqueSourceLimit,
+                    format!(
+                        "package `{}` declares {} unique component raster sources; limit is {MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE}",
+                        package.id(),
+                        unique_paths.len()
+                    ),
+                )
+                .in_package(package.id().to_string()));
+            }
+            let mut loaded = BTreeMap::<ComponentResourcePath, Arc<ComponentRasterSource>>::new();
+            for path in unique_paths {
+                let declaring_component = package
+                    .components()
+                    .iter()
+                    .find(|export| {
+                        export
+                            .resources()
+                            .iter()
+                            .any(|declaration| declaration.source() == &path)
+                    })
+                    .map(ComponentExport::name)
+                    .expect("unique component resource paths come from one declaration");
+                let encoded = self.read_component_raster(package, declaring_component, &path)?;
+                let source_id = ComponentResourceSourceId::new(package.id().clone(), path.clone());
+                let remaining_snapshot_decoded_bytes =
+                    MAX_COMPONENT_RESOURCE_SNAPSHOT_DECODED_BYTES
+                        .checked_sub(totals.decoded_bytes)
+                        .ok_or_else(|| {
+                            PackageLoadError::new(
+                                PackageErrorKind::ComponentResourceSnapshotDecodedByteLimit,
+                                "component raster decoded snapshot-byte accounting underflowed",
+                            )
+                        })?;
+                let source = Arc::new(
+                    ComponentRasterSource::decode(
+                        source_id,
+                        &encoded,
+                        remaining_snapshot_decoded_bytes,
+                    )
+                    .map_err(|error| {
+                        component_raster_decode_error(package, declaring_component, &path, error)
+                    })?,
+                );
+                let next_decoded = totals
+                    .decoded_bytes
+                    .checked_add(source.decoded_bytes())
+                    .ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::ComponentResourceSnapshotDecodedByteLimit,
+                            "component raster snapshot decoded-byte count overflowed",
+                        )
+                    })?;
+                if next_decoded > MAX_COMPONENT_RESOURCE_SNAPSHOT_DECODED_BYTES {
+                    return Err(PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceSnapshotDecodedByteLimit,
+                        format!(
+                            "component raster decoded snapshot bytes exceed {MAX_COMPONENT_RESOURCE_SNAPSHOT_DECODED_BYTES}"
+                        ),
+                    )
+                    .in_package(package.id().to_string())
+                    .at(path.as_str()));
+                }
+                totals.source_count = totals.source_count.saturating_add(1);
+                totals.source_read_count = totals.source_read_count.saturating_add(1);
+                totals.source_decode_count = totals.source_decode_count.saturating_add(1);
+                totals.encoded_bytes = totals.encoded_bytes.saturating_add(encoded.len() as u64);
+                totals.decoded_bytes = next_decoded;
+                loaded.insert(path, Arc::clone(&source));
+                sources.push(source);
+            }
+            for export in package.components() {
+                let definition =
+                    crate::ComponentDefinitionKey::new(package.id().clone(), export.name().clone());
+                if components.definition(&definition).is_none() {
+                    return Err(PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceAssociationInvalid,
+                        format!(
+                            "component resource association targets missing definition `{definition}`"
+                        ),
+                    )
+                    .in_package(package.id().to_string()));
+                }
+                for (ordinal, declaration) in export.resources().iter().enumerate() {
+                    let source = loaded.get(declaration.source()).ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::ComponentResourceAssociationInvalid,
+                            format!(
+                                "component `{}` resource `{}` source was not loaded",
+                                export.name(),
+                                declaration.name()
+                            ),
+                        )
+                        .in_package(package.id().to_string())
+                        .at(declaration.source().as_str())
+                    })?;
+                    associations.push(ComponentResourceAssociation::new(
+                        definition.clone(),
+                        declaration.name().clone(),
+                        Arc::clone(source),
+                        u16::try_from(ordinal)
+                            .expect("component resource declaration limit fits u16"),
+                    ));
+                    totals.association_count = totals.association_count.saturating_add(1);
+                }
+            }
+        }
+        Ok(ComponentResourceCatalog::new(sources, associations, totals))
+    }
+
+    fn read_component_raster(
+        &mut self,
+        package: &ResolvedPackage,
+        component: &ComponentName,
+        path: &ComponentResourcePath,
+    ) -> Result<Vec<u8>, PackageLoadError> {
+        let logical = path.as_str();
+        let bytes = self
+            .file_system
+            .read_regular_nofollow(
+                package.canonical_root(),
+                logical,
+                MAX_COMPONENT_RASTER_SOURCE_BYTES,
+            )
+            .map_err(|error| component_resource_read_error(package, component, path, error))?;
+        self.budget.account(bytes.len())?;
+        Ok(bytes)
     }
 
     fn read_component_stylesheet(
@@ -2556,6 +3057,7 @@ impl<'a> GraphBuilder<'a> {
             )
         })?;
         let components = self.load_component_catalog()?;
+        let component_resources = self.load_component_resource_catalog(&components)?;
         let component_styles = self.load_component_style_catalog(&components)?;
         let root_package = Arc::clone(&self.ordered[root_index]);
         if let Some(manifest) = self.root_topology.as_mut() {
@@ -2592,6 +3094,7 @@ impl<'a> GraphBuilder<'a> {
             headless_entry,
             components,
             component_styles,
+            component_resources,
             bytes_read: self.budget.bytes,
             measurements: ManifestMeasurements {
                 parse_us: self.root_parse_us,
@@ -2752,6 +3255,7 @@ fn build_headless_candidate(
                 headless_entry: Some(entry),
                 components,
                 component_styles: ComponentStyleCatalog::empty(),
+                component_resources: ComponentResourceCatalog::default(),
                 bytes_read: budget.bytes,
                 measurements: ManifestMeasurements::default(),
             })
@@ -2876,7 +3380,10 @@ fn validate_component_exports(
             )
             .in_package(owner.to_string()));
         }
-        exports.push(ComponentExport::new(name, source, inputs, slots, styles));
+        let resources = validate_component_resources(raw_export.resources, owner, &name)?;
+        exports.push(ComponentExport::new(
+            name, source, inputs, slots, styles, resources,
+        ));
     }
     Ok(exports)
 }
@@ -2919,6 +3426,133 @@ fn validate_component_stylesheets(
         styles.push(ComponentStylesheetPath::new(path));
     }
     Ok(styles)
+}
+
+fn validate_component_resources(
+    raw: Vec<RawComponentResource>,
+    owner: &PackageId,
+    component: &ComponentName,
+) -> Result<Vec<ComponentResourceDeclaration>, PackageLoadError> {
+    if raw.len() > MAX_COMPONENT_RESOURCE_DECLARATIONS {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::ComponentResourceDeclarationLimit,
+            format!(
+                "component `{component}` declares {} resources; limit is {MAX_COMPONENT_RESOURCE_DECLARATIONS}",
+                raw.len()
+            ),
+        )
+        .in_package(owner.to_string()));
+    }
+    let mut names = BTreeSet::new();
+    let mut declarations = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let name = ComponentResourceName::parse(&entry.name).map_err(|error| {
+            PackageLoadError::new(
+                error.kind,
+                format!(
+                    "component `{component}` resource name `{}` is invalid: {}",
+                    entry.name, error.message
+                ),
+            )
+            .in_package(owner.to_string())
+        })?;
+        if !names.insert(name.clone()) {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::DuplicateComponentResourceName,
+                format!("component `{component}` repeats resource name `{name}`"),
+            )
+            .in_package(owner.to_string()));
+        }
+        let kind = match entry.resource_type.as_str() {
+            "raster" => ComponentResourceKind::Raster,
+            value => {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::UnsupportedComponentResourceType,
+                    format!(
+                        "component `{component}` resource `{name}` has unsupported type `{value}`"
+                    ),
+                )
+                .in_package(owner.to_string()));
+            }
+        };
+        let source = validate_component_resource_path(&entry.source).map_err(|error| {
+            PackageLoadError::new(
+                error.kind,
+                format!(
+                    "component `{component}` resource `{name}` source is invalid: {}",
+                    error.message
+                ),
+            )
+            .in_package(owner.to_string())
+            .at(entry.source)
+        })?;
+        declarations.push(ComponentResourceDeclaration::new(name, kind, source));
+    }
+    Ok(declarations)
+}
+
+fn validate_component_resource_path(
+    value: &str,
+) -> Result<ComponentResourcePath, PackageLoadError> {
+    if value.is_empty() {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::InvalidComponentResourcePath,
+            "component resource path must not be empty",
+        ));
+    }
+    if value.len() > MAX_COMPONENT_RESOURCE_PATH_BYTES {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::ComponentResourcePathLengthLimit,
+            format!(
+                "component resource path exceeds {MAX_COMPONENT_RESOURCE_PATH_BYTES} UTF-8 bytes"
+            ),
+        ));
+    }
+    if value.contains('\0')
+        || value.contains('\\')
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains('%')
+        || value.contains(':')
+        || value.contains("://")
+        || value.starts_with("//")
+        || value.contains('$')
+    {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::InvalidComponentResourcePath,
+            "component resource path must be a normalized local package-relative path",
+        ));
+    }
+    let path = Path::new(value);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::CurDir
+                    | Component::ParentDir
+                    | Component::RootDir
+                    | Component::Prefix(_)
+            )
+        })
+        || value
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::InvalidComponentResourcePath,
+            "component resource path must be normalized and cannot contain traversal",
+        ));
+    }
+    let depth = value.split('/').count();
+    if depth > MAX_COMPONENT_RESOURCE_PATH_COMPONENTS {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::ComponentResourcePathDepthLimit,
+            format!(
+                "component resource path has {depth} components; limit is {MAX_COMPONENT_RESOURCE_PATH_COMPONENTS}"
+            ),
+        ));
+    }
+    Ok(ComponentResourcePath::new(value.to_owned()))
 }
 
 fn validate_component_stylesheet_path(value: &str) -> Result<String, PackageLoadError> {
@@ -3472,6 +4106,86 @@ fn component_stylesheet_css_error(
         format!(
             "{owner} stylesheet `{path}` at {}:{}: {}",
             error.line, error.column, error.message
+        ),
+    )
+    .in_package(package.id().to_string())
+    .at(path.as_str())
+}
+
+fn component_resource_read_error(
+    package: &ResolvedPackage,
+    component: &ComponentName,
+    path: &ComponentResourcePath,
+    error: SecureReadError,
+) -> PackageLoadError {
+    let base = match error {
+        SecureReadError::Missing(error) => io_package_error(
+            PackageErrorKind::ComponentResourceMissing,
+            "open component raster source",
+            Path::new(path.as_str()),
+            error,
+        ),
+        SecureReadError::Symlink => PackageLoadError::new(
+            PackageErrorKind::ComponentResourceSymlink,
+            "component raster source path contains a symbolic link",
+        ),
+        SecureReadError::Special => PackageLoadError::new(
+            PackageErrorKind::ComponentResourceSpecialFile,
+            "component raster source must be a regular file with directory path components",
+        ),
+        SecureReadError::TooLarge => PackageLoadError::new(
+            PackageErrorKind::ComponentResourceSourceTooLarge,
+            format!(
+                "component raster encoded source exceeds {MAX_COMPONENT_RASTER_SOURCE_BYTES} bytes"
+            ),
+        ),
+        SecureReadError::Mutation => PackageLoadError::new(
+            PackageErrorKind::ComponentResourceMutationRace,
+            "component raster source changed during the bounded read",
+        ),
+        SecureReadError::Io(error) => io_package_error(
+            PackageErrorKind::Io,
+            "read component raster source",
+            Path::new(path.as_str()),
+            error,
+        ),
+    };
+    PackageLoadError::new(
+        base.kind,
+        format!(
+            "component `{component}` resource source `{path}`: {}",
+            base.message
+        ),
+    )
+    .in_package(package.id().to_string())
+    .at(path.as_str())
+}
+
+fn component_raster_decode_error(
+    package: &ResolvedPackage,
+    component: &ComponentName,
+    path: &ComponentResourcePath,
+    error: crate::component_resource::RasterDecodeError,
+) -> PackageLoadError {
+    let kind = match error.kind {
+        RasterDecodeErrorKind::Unsupported => PackageErrorKind::ComponentResourceFormatUnsupported,
+        RasterDecodeErrorKind::Animated => {
+            PackageErrorKind::ComponentResourceAnimatedFormatUnsupported
+        }
+        RasterDecodeErrorKind::Dimensions => PackageErrorKind::ComponentResourceDimensionsInvalid,
+        RasterDecodeErrorKind::DimensionLimit => PackageErrorKind::ComponentResourceDimensionLimit,
+        RasterDecodeErrorKind::PixelLimit => PackageErrorKind::ComponentResourcePixelLimit,
+        RasterDecodeErrorKind::DecodedLimit => PackageErrorKind::ComponentResourceDecodedByteLimit,
+        RasterDecodeErrorKind::SnapshotDecodedLimit => {
+            PackageErrorKind::ComponentResourceSnapshotDecodedByteLimit
+        }
+        RasterDecodeErrorKind::Decode => PackageErrorKind::ComponentResourceDecodeFailure,
+    };
+    PackageLoadError::new(
+        kind,
+        format!(
+            "component `{component}` resource source `{path}`: {}",
+            error.message
         ),
     )
     .in_package(package.id().to_string())
@@ -4419,6 +5133,59 @@ mod tests {
                 .kind(),
             PackageErrorKind::PermissionDenied
         );
+    }
+
+    #[derive(Debug)]
+    struct ModeledSecureReadFileSystem {
+        metadata_calls: AtomicU64,
+        final_kind: PackageFileKind,
+        mutate_after_read: bool,
+    }
+
+    impl ReadOnlyPackageFileSystem for ModeledSecureReadFileSystem {
+        fn metadata(&self, _path: &Path) -> io::Result<PackageFileMetadata> {
+            let call = self.metadata_calls.fetch_add(1, Ordering::Relaxed);
+            let len = if self.mutate_after_read && call >= 2 {
+                2
+            } else {
+                1
+            };
+            Ok(PackageFileMetadata {
+                kind: self.final_kind,
+                len,
+            })
+        }
+
+        fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+            Ok(path.to_path_buf())
+        }
+
+        fn read_bounded(&self, _path: &Path, _max_bytes: u64) -> io::Result<Vec<u8>> {
+            Ok(vec![0])
+        }
+    }
+
+    #[test]
+    fn modeled_special_files_and_mutation_races_reject_secure_reads() {
+        let special = ModeledSecureReadFileSystem {
+            metadata_calls: AtomicU64::new(0),
+            final_kind: PackageFileKind::Special,
+            mutate_after_read: false,
+        };
+        assert!(matches!(
+            special.read_regular_nofollow(Path::new("/modeled"), "asset", 8),
+            Err(SecureReadError::Special)
+        ));
+
+        let mutation = ModeledSecureReadFileSystem {
+            metadata_calls: AtomicU64::new(0),
+            final_kind: PackageFileKind::File,
+            mutate_after_read: true,
+        };
+        assert!(matches!(
+            mutation.read_regular_nofollow(Path::new("/modeled"), "asset", 8),
+            Err(SecureReadError::Mutation)
+        ));
     }
 
     #[cfg(unix)]

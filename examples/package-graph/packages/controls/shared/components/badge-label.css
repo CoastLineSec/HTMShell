@@ -1,3 +1,8 @@
+.package-badge-icon {
+  width: 16px;
+  height: 16px;
+}
+
 .package-badge {
   color: #b8c9ff;
   font-size: 0.85rem;

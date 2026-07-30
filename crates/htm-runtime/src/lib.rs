@@ -5,6 +5,7 @@ mod builtin;
 mod clock;
 mod collection;
 mod component;
+mod component_resource;
 mod component_style;
 mod error;
 mod identity;
@@ -83,6 +84,18 @@ pub use component::{
     MAX_COMPONENT_SLOT_NAME_BYTES, MAX_COMPONENT_SLOTS, MAX_COMPONENT_SOURCE_BYTES,
     MAX_COMPONENT_SOURCE_NODES, PreparedDocument, PreparedDocumentStats, ProjectedNodeProvenance,
     ResolvedComponentInput, ResolvedComponentInputs, SlotProjectionSource,
+};
+pub use component_resource::{
+    ComponentRasterFormat, ComponentRasterSource, ComponentResourceAssociation,
+    ComponentResourceCatalog, ComponentResourceDeclaration, ComponentResourceKind,
+    ComponentResourceName, ComponentResourcePath, ComponentResourceSemanticVersion,
+    ComponentResourceSourceId, ComponentResourceUsage, ComponentResourceUsageId,
+    ComponentResourceValidationTotals, MAX_COMPONENT_RASTER_DECODED_BYTES,
+    MAX_COMPONENT_RASTER_HEIGHT, MAX_COMPONENT_RASTER_PIXELS, MAX_COMPONENT_RASTER_SOURCE_BYTES,
+    MAX_COMPONENT_RASTER_WIDTH, MAX_COMPONENT_RESOURCE_ASSOCIATIONS_PER_PACKAGE,
+    MAX_COMPONENT_RESOURCE_DECLARATIONS, MAX_COMPONENT_RESOURCE_NAME_BYTES,
+    MAX_COMPONENT_RESOURCE_PATH_BYTES, MAX_COMPONENT_RESOURCE_PATH_COMPONENTS,
+    MAX_COMPONENT_RESOURCE_SNAPSHOT_DECODED_BYTES, MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE,
 };
 pub use component_style::{
     ComponentStyleCatalog, ComponentStyleValidationTotals, ComponentStylesheetAssociation,

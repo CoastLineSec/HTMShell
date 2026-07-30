@@ -10,6 +10,11 @@
   border-radius: 12px;
 }
 
+.required-frame-icon {
+  width: 20px;
+  height: 20px;
+}
+
 .projected-label {
   color: #dce6ff;
 }

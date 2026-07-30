@@ -58,6 +58,13 @@ Schema version 2 replaces the root `id` with package metadata and may add local 
       "source": "components/status-card.html",
       "styles": [
         "components/status-card.css"
+      ],
+      "resources": [
+        {
+          "name": "status-icon",
+          "type": "raster",
+          "source": "assets/status-icon.png"
+        }
       ]
     }
   ],
@@ -82,7 +89,7 @@ Schema version 2 replaces the root `id` with package metadata and may add local 
 }
 ```
 
-The `package.id` uses the bounded reverse-DNS syntax, `package.kind` must be `shell` at the root, and `package.version` is optional SemVer 2.0.0 metadata. The existing surface fields and constraints are identical. The optional ordered `components` array contains `name`, `source`, optional literal `inputs`, optional content `slots`, and optional package-owned `styles`. See [`HTMShell.Package`](../HTMShell.Package/README.md) for dependency fields and graph rules and [`HTMShell.Component`](../HTMShell.Component/README.md) for component syntax.
+The `package.id` uses the bounded reverse-DNS syntax, `package.kind` must be `shell` at the root, and `package.version` is optional SemVer 2.0.0 metadata. The existing surface fields and constraints are identical. The optional ordered `components` array contains `name`, `source`, optional literal `inputs`, optional content `slots`, optional package-owned `styles`, and optional named `resources`. The initial resource type is `raster`, consumed by component-owned `<img src="resource:name">`. See [`HTMShell.Package`](../HTMShell.Package/README.md) for dependency fields and graph rules and [`HTMShell.Component`](../HTMShell.Component/README.md) for component syntax.
 
 Shared surface fields:
 
@@ -101,6 +108,6 @@ The manifest is limited to 256 KiB. Document paths cannot be absolute, remote, o
 
 Dimensions are logical pixels. Scale is compositor-provided and cannot be selected by the manifest. Output names are not manifest selectors.
 
-Manifest hot reload, dynamic component bindings, host and slotted selectors, package-global library styles, component-owned external resources, persistent output selection, scale overrides, additional surface kinds, and more than one panel or overlay template are unavailable. Component exports may declare up to 32 default or named slots and 16 scoped stylesheet paths.
+Manifest hot reload, dynamic component bindings, host and slotted selectors, package-global library styles, component external SVG, CSS URL assets, fonts, persistent output selection, scale overrides, additional surface kinds, and more than one panel or overlay template are unavailable. Component exports may declare up to 32 default or named slots, 16 scoped stylesheet paths, and 32 static raster resources.
 
 See the tracked [static panel manifest](../../../examples/static-panel/shell.json), [`PanelSurface`](PanelSurface.md), and [`OverlaySurface`](OverlaySurface.md).

@@ -23,6 +23,7 @@ HTMShell is an experimental native shell runtime authored with local HTML, CSS, 
 - [`HTMShell.Package`](types/HTMShell.Package/README.md)
 - [`HTMShell.Component`](types/HTMShell.Component/README.md)
   - [Component styles](types/HTMShell.Component/Style.md)
+  - [Component raster resources](types/HTMShell.Component/Resource.md)
 - [`HTMShell.Elements`](types/HTMShell.Elements/README.md)
 - [`HTMShell.State`](types/HTMShell.State/README.md)
 - [`HTMShell.Actions`](types/HTMShell.Actions/README.md)

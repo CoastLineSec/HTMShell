@@ -93,7 +93,7 @@ Projection changes placement, not ownership.
 
 Root-document content retains root state, action, ID, reference, package, resource, stylesheet, and semantic ownership. Content originating in a parent component retains that parent component instance, nearest `input.*` host, and component stylesheet scope. Projected content never gains callee inputs, callee selector ownership, or the callee package resource base.
 
-Fallback belongs to the callee definition. It is cloned per callee instance, uses callee literal inputs and component stylesheets, and remains subject to the component static profile. It cannot load component-owned external resources or declare component-local IDs.
+Fallback belongs to the callee definition. It is cloned per callee instance, uses callee literal inputs, component stylesheets, and declared raster resource catalog, and remains subject to the component static profile. It cannot use ordinary relative images, external SVG, CSS URL assets, fonts, or component-local IDs.
 
 Repeat and contextual-repeat declarations cannot cross a projection boundary.
 
@@ -126,6 +126,6 @@ Declaration, template matching, required content, direct-child routing, caller s
 
 Assigned nodes count once. Fallback nodes count only when fallback is selected.
 
-Component-local IDs, `::slotted()`, repeat projection, component-owned resources, dynamic slot switching, and hot reload are unavailable.
+Component-local IDs, `::slotted()`, repeat projection, component external SVG resources, CSS URL assets, resource-reference inputs, dynamic slot switching, and hot reload are unavailable. Declared raster images are supported on component-owned `<img src="resource:name">` nodes and keep the caller or callee ownership described above.
 
-See [components](../../guide/components.md), [`HTMShell.Component`](README.md), [component inputs](Input.md), and [component styles](Style.md).
+See [components](../../guide/components.md), [`HTMShell.Component`](README.md), [component inputs](Input.md), [component styles](Style.md), and [component raster resources](Resource.md).

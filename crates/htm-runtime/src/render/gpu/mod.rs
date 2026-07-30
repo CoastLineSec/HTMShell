@@ -2401,11 +2401,13 @@ mod tests {
         };
         let mut hybrid_plan = proof_plan(surface_c, None);
         let image_id = SceneResourceId {
-            owner: ResourceOwner::Document(hybrid_plan.document),
-            kind: ResourceKind::RasterImage,
-            key: SceneResourceKey::Dom {
-                slot: 2,
+            owner: ResourceOwner::Package {
                 generation: 7,
+                package_id: "org.example.controls".into(),
+            },
+            kind: ResourceKind::RasterImage,
+            key: SceneResourceKey::ComponentRaster {
+                path: "assets/status-icon.png".into(),
             },
         };
         {
@@ -2416,7 +2418,7 @@ mod tests {
                 id: image_id,
                 version: SceneResourceVersion(1),
                 lifecycle: ResourceLifecycle::Ready,
-                diagnostic_key: "hybrid-proof".into(),
+                diagnostic_key: "component-raster-hybrid-proof".into(),
                 byte_len: Some(16),
             });
         }

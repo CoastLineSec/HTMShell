@@ -541,6 +541,7 @@ pub struct LiveDocument {
     component_slot_projections: Vec<crate::ComponentSlotProjectionRecord>,
     projected_component_nodes: Vec<crate::ProjectedNodeProvenance>,
     component_fallback_nodes: Vec<crate::ComponentFallbackNodeProvenance>,
+    component_resource_usages: Vec<crate::ComponentResourceUsage>,
     _style_ownership: Option<StyleOwnership>,
     _style_activation: Option<StyleActivationMode>,
     source: PathBuf,
@@ -1013,6 +1014,7 @@ impl LiveDocument {
             component_slot_projections,
             projected_component_nodes,
             component_fallback_nodes,
+            component_resource_usages,
             style_ownership,
             style_activation,
         ) = match (&package_snapshot, prepared_document) {
@@ -1027,12 +1029,14 @@ impl LiveDocument {
                     instantiated.slot_projections,
                     instantiated.projected_nodes,
                     instantiated.fallback_nodes,
+                    instantiated.resource_usages,
                     Some(instantiated.style_ownership),
                     Some(instantiated.style_activation),
                 )
             }
             _ => (
                 HtmlDocument::from_html(&html, config),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -1124,6 +1128,7 @@ impl LiveDocument {
             component_slot_projections,
             projected_component_nodes,
             component_fallback_nodes,
+            component_resource_usages,
             _style_ownership: style_ownership,
             _style_activation: style_activation,
             source,
@@ -1364,7 +1369,7 @@ impl LiveDocument {
     ) -> Result<Option<LiveGpuPreparedFrame>, RuntimeError> {
         self.validate_render_request(request)?;
         let started = Instant::now();
-        let Some(prepared) = self.render_session.prepare_document(
+        let Some(prepared) = self.render_session.prepare_document_with_resources(
             &mut self.document,
             &self.identities,
             self.document_identity,
@@ -1379,6 +1384,7 @@ impl LiveDocument {
             request.scale_denominator,
             FrameReasonSet::new(),
             false,
+            &self.component_resource_usages,
         )?
         else {
             return Ok(None);
@@ -1465,7 +1471,7 @@ impl LiveDocument {
         if force {
             reasons.insert(FrameReason::ExplicitInvalidation);
         }
-        let Some(frame) = self.render_session.render_document(
+        let Some(frame) = self.render_session.render_document_with_resources(
             &mut self.document,
             &self.identities,
             self.document_identity,
@@ -1477,6 +1483,7 @@ impl LiveDocument {
             request.scale_denominator,
             reasons,
             force,
+            &self.component_resource_usages,
         )?
         else {
             return Ok(None);
@@ -1646,6 +1653,10 @@ impl LiveDocument {
 
     pub fn component_fallback_nodes(&self) -> &[crate::ComponentFallbackNodeProvenance] {
         &self.component_fallback_nodes
+    }
+
+    pub fn component_resource_usages(&self) -> &[crate::ComponentResourceUsage] {
+        &self.component_resource_usages
     }
 
     pub fn source(&self) -> &Path {

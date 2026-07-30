@@ -4,11 +4,12 @@ use super::cpu_effects::{
 use super::{
     BackendError, BackendErrorKind, DamageRegion, FramePlan, FrameReason, FrameReasonSet,
     PixelFormat, RenderResult, RenderSurfaceId, RenderTarget, Renderer, RetainedScene,
-    SceneChangeKind, SceneRevision, build_retained_scene, logical_damage_to_physical,
+    SceneChangeKind, SceneRevision, build_retained_scene_with_resources,
+    logical_damage_to_physical,
 };
 use crate::identity::IdentityRegistry;
 use crate::model::ViewportSpec;
-use crate::{ExperimentalDocumentIdentity, RuntimeError};
+use crate::{ComponentResourceUsage, ExperimentalDocumentIdentity, RuntimeError};
 use anyrender::{PaintScene, Scene, render_to_buffer};
 use anyrender_vello_cpu::VelloCpuImageRenderer;
 use blitz_html::HtmlDocument;
@@ -258,8 +259,78 @@ impl CpuRenderSession {
         physical_height: u32,
         scale_numerator: u32,
         scale_denominator: u32,
+        reasons: FrameReasonSet,
+        force: bool,
+    ) -> Result<Option<PreparedRender>, RuntimeError> {
+        self.prepare_document_with_resources(
+            document,
+            identities,
+            document_identity,
+            viewport,
+            surface,
+            physical_width,
+            physical_height,
+            scale_numerator,
+            scale_denominator,
+            reasons,
+            force,
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_document_with_resources(
+        &mut self,
+        document: &mut HtmlDocument,
+        identities: &IdentityRegistry,
+        document_identity: ExperimentalDocumentIdentity,
+        viewport: ViewportSpec,
+        surface: RenderSurfaceId,
+        physical_width: u32,
+        physical_height: u32,
+        scale_numerator: u32,
+        scale_denominator: u32,
+        reasons: FrameReasonSet,
+        force: bool,
+        component_resources: &[ComponentResourceUsage],
+    ) -> Result<Option<CpuFrame>, RuntimeError> {
+        let Some(prepared) = self.prepare_document_with_resources(
+            document,
+            identities,
+            document_identity,
+            viewport,
+            surface,
+            physical_width,
+            physical_height,
+            scale_numerator,
+            scale_denominator,
+            reasons,
+            force,
+            component_resources,
+        )?
+        else {
+            return Ok(None);
+        };
+        let frame = self.render_prepared_cpu(&prepared)?;
+        self.accept_prepared(&prepared);
+        Ok(Some(frame))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_document_with_resources(
+        &mut self,
+        document: &mut HtmlDocument,
+        identities: &IdentityRegistry,
+        document_identity: ExperimentalDocumentIdentity,
+        viewport: ViewportSpec,
+        surface: RenderSurfaceId,
+        physical_width: u32,
+        physical_height: u32,
+        scale_numerator: u32,
+        scale_denominator: u32,
         mut reasons: FrameReasonSet,
         force: bool,
+        component_resources: &[ComponentResourceUsage],
     ) -> Result<Option<PreparedRender>, RuntimeError> {
         if scale_numerator == 0 || scale_denominator == 0 {
             return Err(RuntimeError::InvalidPackage(
@@ -269,12 +340,13 @@ impl CpuRenderSession {
         self.next_revision = self.next_revision.checked_add(1).ok_or_else(|| {
             RuntimeError::LimitExceeded("retained scene revision exhausted".into())
         })?;
-        let candidate = build_retained_scene(
+        let candidate = build_retained_scene_with_resources(
             document,
             identities,
             document_identity,
             SceneRevision(self.next_revision),
             viewport,
+            component_resources,
         )?;
         let previous = self.current_scene.as_deref();
         let delta = super::scene::diff_retained_scenes(previous, &candidate);

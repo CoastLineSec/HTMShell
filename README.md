@@ -54,5 +54,6 @@ optional SemVer metadata, and bounded offline library dependency graphs.
 Only the root shell package creates panel and overlay surfaces. Shell and
 library packages may export inert static HTML components with explicit,
 deterministic instantiation, literal inputs, bounded default or named content
-slots, and package-owned scoped stylesheets. Component-owned external
-resources and hot reload are not yet available.
+slots, package-owned scoped stylesheets, and declared static raster resources.
+External SVG, CSS URL assets, component fonts, and hot reload are not yet
+available.

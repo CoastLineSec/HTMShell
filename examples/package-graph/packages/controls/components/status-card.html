@@ -3,7 +3,7 @@
   <article class="graph-status-card">
     <header class="graph-status-heading">
       <slot name="icon">
-        <span class="slot-icon-fallback">●</span>
+        <img class="slot-icon-fallback" src="resource:status-orb" alt="">
       </slot>
       <h2>
         <span data-htm-element="state-text" data-htm-bind="input.label"></span>
@@ -30,6 +30,10 @@
       input-label="Nested through a direct library alias"
       input-tone="active"></htm-use>
     <htm-use component="shared.unstyled-note"></htm-use>
+    <div class="component-raster-strip">
+      <img src="resource:photo-swatch" alt="">
+      <img src="resource:alpha-chip" alt="">
+    </div>
     <p class="slot-before">Projected content:</p>
     <slot>
       <p class="slot-fallback">No caller content was supplied.</p>
@@ -43,6 +47,7 @@
 
 <template data-htm-component="required-frame">
   <section class="required-frame">
+    <img class="required-frame-icon" src="resource:status-orb" alt="">
     <slot name="heading">
       <strong>Required content</strong>
     </slot>

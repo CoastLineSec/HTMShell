@@ -24,6 +24,13 @@
       ],
       "styles": [
         "components/badge-label.css"
+      ],
+      "resources": [
+        {
+          "name": "badge-icon",
+          "type": "raster",
+          "source": "assets/badge-icon.png"
+        }
       ]
     },
     {

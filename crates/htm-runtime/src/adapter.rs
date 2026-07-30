@@ -121,6 +121,7 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
     let component_fallback_nodes = instantiated.fallback_nodes;
     let style_ownership = instantiated.style_ownership;
     let style_activation = instantiated.style_activation;
+    let component_resource_usages = instantiated.resource_usages;
     activate_style_ownership(&mut document, &style_ownership, &style_activation)?;
     document.set_incremental_layout(true);
     validate_document_limits(&document)?;
@@ -145,6 +146,7 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
                 options.viewport,
                 physical_width,
                 physical_height,
+                &component_resource_usages,
             )
         })
         .transpose()?;
@@ -224,6 +226,7 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
                     options.viewport,
                     physical_width,
                     physical_height,
+                    &component_resource_usages,
                 )
             })
             .transpose()?;
@@ -276,6 +279,7 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
                     options.viewport,
                     physical_width,
                     physical_height,
+                    &component_resource_usages,
                 )
             })
             .transpose()?;
@@ -311,6 +315,7 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
         component_slot_projections,
         projected_component_nodes,
         component_fallback_nodes,
+        component_resource_usages,
     })
 }
 
@@ -421,12 +426,13 @@ fn render_png_retained(
     viewport: ViewportSpec,
     physical_width: u32,
     physical_height: u32,
+    component_resources: &[crate::ComponentResourceUsage],
 ) -> Result<Vec<u8>, RuntimeError> {
     let scale_numerator = (f64::from(viewport.scale_factor) * 120.0).round() as u32;
     let mut reasons = FrameReasonSet::new();
     reasons.insert(FrameReason::ExplicitInvalidation);
     let frame = session
-        .render_document(
+        .render_document_with_resources(
             document,
             identities,
             document_identity,
@@ -441,6 +447,7 @@ fn render_png_retained(
             120,
             reasons,
             true,
+            component_resources,
         )?
         .ok_or_else(|| {
             RuntimeError::InvalidPackage(
@@ -681,7 +688,10 @@ pub(crate) fn text_diagnostic(node: &Node) -> Option<TextDiagnostic> {
 
 pub(crate) fn image_diagnostic(node: &Node) -> Option<ImageDiagnostic> {
     let element = node.element_data()?;
-    let source = element.attr(blitz_dom::local_name!("src"))?.to_owned();
+    let source = element
+        .attr(blitz_dom::local_name!("src"))
+        .map(str::to_owned)
+        .or_else(|| element.image_data().map(|_| "component-raster".to_owned()))?;
     let decoded_kind = match element.image_data() {
         Some(ImageData::Raster(_)) => "raster",
         Some(ImageData::Svg(_)) => "svg",

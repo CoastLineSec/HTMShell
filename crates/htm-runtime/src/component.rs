@@ -1,11 +1,14 @@
-use crate::ComponentStylesheetPath;
 use crate::package::{
     PackageAlias, PackageErrorKind, PackageId, PackageLoadError, PackageSchemaSource,
     PackageSnapshotGeneration, ResolvedPackage,
 };
 use crate::style_owner::{StyleActivationMode, StyleOwnedNodeKind, StyleOwnerId, StyleOwnership};
+use crate::{
+    ComponentResourceCatalog, ComponentResourceDeclaration, ComponentResourceName,
+    ComponentResourceUsage, ComponentStylesheetPath,
+};
 use crate::{NumericValue, StateToken, StateValueFormat};
-use blitz_dom::node::NodeData;
+use blitz_dom::node::{ImageData, NodeData, RasterImageData, SpecialElementData};
 use blitz_dom::{Attribute, DocumentConfig, LocalName, QualName, ns};
 use blitz_html::HtmlDocument;
 use cssparser::{Parser, ParserInput, Token};
@@ -770,6 +773,7 @@ pub struct ComponentExport {
     inputs: Arc<[ComponentInputDeclaration]>,
     slots: Arc<[ComponentSlotDeclaration]>,
     styles: Arc<[ComponentStylesheetPath]>,
+    resources: Arc<[ComponentResourceDeclaration]>,
 }
 
 impl ComponentExport {
@@ -779,6 +783,7 @@ impl ComponentExport {
         inputs: Vec<ComponentInputDeclaration>,
         slots: Vec<ComponentSlotDeclaration>,
         styles: Vec<ComponentStylesheetPath>,
+        resources: Vec<ComponentResourceDeclaration>,
     ) -> Self {
         Self {
             name,
@@ -786,6 +791,7 @@ impl ComponentExport {
             inputs: inputs.into(),
             slots: slots.into(),
             styles: styles.into(),
+            resources: resources.into(),
         }
     }
 
@@ -807,6 +813,10 @@ impl ComponentExport {
 
     pub fn styles(&self) -> &[ComponentStylesheetPath] {
         &self.styles
+    }
+
+    pub fn resources(&self) -> &[ComponentResourceDeclaration] {
+        &self.resources
     }
 
     pub fn default_slot(&self) -> Option<&ComponentSlotDeclaration> {
@@ -995,6 +1005,11 @@ pub(crate) enum ComponentTemplateNode {
         children: Arc<[ComponentTemplateNode]>,
         source_ordinal: u32,
     },
+    ResourceImage {
+        name: ComponentResourceName,
+        attributes: Vec<Attribute>,
+        source_ordinal: u32,
+    },
     Text {
         value: String,
         source_ordinal: u32,
@@ -1143,6 +1158,11 @@ pub(crate) enum UnresolvedTemplateNode {
         children: Vec<UnresolvedTemplateNode>,
         source_ordinal: u32,
     },
+    ResourceImage {
+        name: ComponentResourceName,
+        attributes: Vec<Attribute>,
+        source_ordinal: u32,
+    },
     Text {
         value: String,
         source_ordinal: u32,
@@ -1210,6 +1230,7 @@ impl PreparedDocument {
     pub(crate) fn instantiate(
         &self,
         catalog: &ComponentCatalog,
+        resources: &ComponentResourceCatalog,
         generation: PackageSnapshotGeneration,
         document_serial: u64,
         config: DocumentConfig,
@@ -1218,6 +1239,7 @@ impl PreparedDocument {
         document.mutate().remove_and_drop_all_children(0);
         let mut state = InstantiationState {
             catalog,
+            resources,
             generation,
             document_serial,
             style_ownership: StyleOwnership::new(generation, document_serial, 0),
@@ -1227,6 +1249,7 @@ impl PreparedDocument {
             slot_projections: Vec::new(),
             projected_nodes: Vec::new(),
             fallback_nodes: Vec::new(),
+            resource_usages: Vec::new(),
             projection_node_ordinals: BTreeMap::new(),
         };
         let children = instantiate_nodes(
@@ -1261,6 +1284,7 @@ impl PreparedDocument {
             fallback_nodes: state.fallback_nodes,
             style_ownership: state.style_ownership,
             style_activation: StyleActivationMode::LegacyDocumentGlobal,
+            resource_usages: state.resource_usages,
         })
     }
 }
@@ -1567,10 +1591,12 @@ pub(crate) struct InstantiatedDocument {
     pub fallback_nodes: Vec<ComponentFallbackNodeProvenance>,
     pub style_ownership: StyleOwnership,
     pub style_activation: StyleActivationMode,
+    pub resource_usages: Vec<ComponentResourceUsage>,
 }
 
 struct InstantiationState<'a> {
     catalog: &'a ComponentCatalog,
+    resources: &'a ComponentResourceCatalog,
     generation: PackageSnapshotGeneration,
     document_serial: u64,
     style_ownership: StyleOwnership,
@@ -1580,6 +1606,7 @@ struct InstantiationState<'a> {
     slot_projections: Vec<ComponentSlotProjectionRecord>,
     projected_nodes: Vec<ProjectedNodeProvenance>,
     fallback_nodes: Vec<ComponentFallbackNodeProvenance>,
+    resource_usages: Vec<ComponentResourceUsage>,
     projection_node_ordinals: BTreeMap<ComponentSlotProjectionId, u32>,
 }
 
@@ -1587,6 +1614,7 @@ struct InstantiationState<'a> {
 pub(crate) struct ExpectedComponentDefinition {
     pub inputs: Arc<[ComponentInputDeclaration]>,
     pub slots: Arc<[ComponentSlotDeclaration]>,
+    pub resources: Arc<[ComponentResourceDeclaration]>,
 }
 
 pub(crate) fn parse_component_source(
@@ -1684,6 +1712,7 @@ pub(crate) fn parse_component_source(
                     definition_name: &name,
                     inputs: &expected_definition.inputs,
                     slots: &expected_definition.slots,
+                    resources: &expected_definition.resources,
                 };
                 let mut located_slots = BTreeSet::new();
                 let children = node
@@ -1920,6 +1949,7 @@ struct ComponentNormalizationContext<'a> {
     definition_name: &'a ComponentName,
     inputs: &'a [ComponentInputDeclaration],
     slots: &'a [ComponentSlotDeclaration],
+    resources: &'a [ComponentResourceDeclaration],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1945,6 +1975,7 @@ fn normalize_component_node(
         definition_name,
         inputs,
         slots,
+        resources,
     } = context;
     *count = count.checked_add(1).ok_or_else(|| {
         component_error(
@@ -2101,6 +2132,47 @@ fn normalize_component_node(
                     reference,
                     supplied_inputs,
                     children,
+                    source_ordinal,
+                });
+            }
+            if tag == "img" {
+                validate_static_component_element(
+                    element,
+                    owner,
+                    logical_source,
+                    mode == ComponentContentMode::InvocationDirect,
+                )?;
+                if element_attr(element, "srcset").is_some() {
+                    return Err(component_error(
+                        PackageErrorKind::ComponentResourceReferenceMalformed,
+                        owner,
+                        logical_source,
+                        "component raster images do not support `srcset`",
+                    ));
+                }
+                let reference = element_attr(element, "src").ok_or_else(|| {
+                    component_error(
+                        PackageErrorKind::ComponentResourceReferenceMalformed,
+                        owner,
+                        logical_source,
+                        "component raster image requires `src=\"resource:<name>\"`",
+                    )
+                })?;
+                let name = parse_component_resource_reference(reference, owner, logical_source)?;
+                if !resources
+                    .iter()
+                    .any(|declaration| declaration.name() == &name)
+                {
+                    return Err(component_error(
+                        PackageErrorKind::ComponentResourceReferenceUnknown,
+                        owner,
+                        logical_source,
+                        format!("component `{definition_name}` does not declare resource `{name}`"),
+                    ));
+                }
+                return Ok(UnresolvedTemplateNode::ResourceImage {
+                    name,
+                    attributes: attributes_without_slot_and_src(element),
                     source_ordinal,
                 });
             }
@@ -2292,6 +2364,16 @@ fn normalize_root_node(
                     source_ordinal,
                 });
             }
+            if tag == "img"
+                && element_attr(element, "src").is_some_and(|value| value.starts_with("resource:"))
+            {
+                return Err(component_error(
+                    PackageErrorKind::ComponentResourceReferenceWrongOwner,
+                    owner.id(),
+                    logical_path,
+                    "`resource:` image references are available only in their declaring component definition",
+                ));
+            }
             if element_attr(element, BIND_ATTRIBUTE)
                 .is_some_and(|value| value.starts_with("input."))
             {
@@ -2451,6 +2533,46 @@ fn attributes_without_slot(element: &blitz_dom::ElementData) -> Vec<Attribute> {
         .collect()
 }
 
+fn attributes_without_slot_and_src(element: &blitz_dom::ElementData) -> Vec<Attribute> {
+    element
+        .attrs()
+        .iter()
+        .filter(|attribute| !matches!(attribute.name.local.as_ref(), "slot" | "src" | "srcset"))
+        .cloned()
+        .collect()
+}
+
+fn parse_component_resource_reference(
+    value: &str,
+    owner: &PackageId,
+    logical_source: &str,
+) -> Result<ComponentResourceName, PackageLoadError> {
+    let Some(name) = value.strip_prefix("resource:") else {
+        return Err(component_error(
+            PackageErrorKind::ComponentResourceReferenceMalformed,
+            owner,
+            logical_source,
+            "component raster image source must use `resource:<name>`",
+        ));
+    };
+    if name.is_empty() || name.contains(['/', '?', '#', '%', ':']) || value.contains("//") {
+        return Err(component_error(
+            PackageErrorKind::ComponentResourceReferenceMalformed,
+            owner,
+            logical_source,
+            "component raster reference must contain one unescaped logical resource name",
+        ));
+    }
+    ComponentResourceName::parse(name).map_err(|_| {
+        component_error(
+            PackageErrorKind::ComponentResourceReferenceMalformed,
+            owner,
+            logical_source,
+            "component raster reference contains an invalid logical resource name",
+        )
+    })
+}
+
 fn validate_component_input_consumer(
     element: &blitz_dom::ElementData,
     children: &[UnresolvedTemplateNode],
@@ -2499,6 +2621,7 @@ fn validate_component_input_consumer(
         matches!(
             node,
             UnresolvedTemplateNode::Element { .. }
+                | UnresolvedTemplateNode::ResourceImage { .. }
                 | UnresolvedTemplateNode::Use { .. }
                 | UnresolvedTemplateNode::InputConsumer { .. }
         )
@@ -2648,7 +2771,6 @@ fn validate_static_component_element(
         "script"
             | "style"
             | "link"
-            | "img"
             | "image"
             | "iframe"
             | "object"
@@ -2743,7 +2865,8 @@ fn validate_static_component_element(
                 | "background"
                 | "action"
                 | "formaction"
-        ) {
+        ) && !(tag == "img" && name == "src" && value.starts_with("resource:"))
+        {
             return Err(component_error(
                 PackageErrorKind::ComponentResourceNotSupported,
                 owner,
@@ -2927,6 +3050,7 @@ fn locate_unresolved_slot(
                 }
             }
             UnresolvedTemplateNode::Text { .. } | UnresolvedTemplateNode::Comment { .. } => {}
+            UnresolvedTemplateNode::ResourceImage { .. } => {}
         }
     }
     None
@@ -2959,7 +3083,8 @@ fn unresolved_slot_version(
                 }
                 UnresolvedTemplateNode::Use { .. }
                 | UnresolvedTemplateNode::Text { .. }
-                | UnresolvedTemplateNode::Comment { .. } => {}
+                | UnresolvedTemplateNode::Comment { .. }
+                | UnresolvedTemplateNode::ResourceImage { .. } => {}
             }
         }
         false
@@ -2999,6 +3124,14 @@ fn serialize_unresolved_nodes(nodes: &[UnresolvedTemplateNode], output: &mut Str
                 output.push(';');
                 serialize_unresolved_nodes(children, output);
                 output.push_str("/e;");
+            }
+            UnresolvedTemplateNode::ResourceImage {
+                name, attributes, ..
+            } => {
+                output.push_str("r:");
+                output.push_str(name.as_str());
+                serialize_attributes(attributes, output);
+                output.push(';');
             }
             UnresolvedTemplateNode::Text { value, .. } => {
                 output.push_str("t:");
@@ -3054,6 +3187,25 @@ fn serialize_unresolved_nodes(nodes: &[UnresolvedTemplateNode], output: &mut Str
                 output.push_str("/i;");
             }
         }
+    }
+}
+
+fn serialize_attributes(attributes: &[Attribute], output: &mut String) {
+    let mut attributes = attributes
+        .iter()
+        .map(|attribute| {
+            (
+                attribute.name.local.as_ref().to_owned(),
+                attribute.value.to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    attributes.sort();
+    for (name, value) in attributes {
+        output.push(':');
+        output.push_str(&name);
+        output.push('=');
+        output.push_str(&value);
     }
 }
 
@@ -3179,6 +3331,14 @@ fn serialize_component_nodes(nodes: &[ComponentTemplateNode], output: &mut Strin
                 serialize_component_nodes(children, output);
                 output.push_str("/e;");
             }
+            ComponentTemplateNode::ResourceImage {
+                name, attributes, ..
+            } => {
+                output.push_str("r:");
+                output.push_str(name.as_str());
+                serialize_attributes(attributes, output);
+                output.push(';');
+            }
             ComponentTemplateNode::Text { value, .. } => {
                 output.push_str("t:");
                 output.push_str(&value.len().to_string());
@@ -3267,6 +3427,15 @@ fn resolve_nodes(
                 name,
                 attributes,
                 children: resolve_nodes(children, owner, context)?.into(),
+                source_ordinal,
+            }),
+            UnresolvedTemplateNode::ResourceImage {
+                name,
+                attributes,
+                source_ordinal,
+            } => Ok(ComponentTemplateNode::ResourceImage {
+                name,
+                attributes,
                 source_ordinal,
             }),
             UnresolvedTemplateNode::Use {
@@ -3605,6 +3774,7 @@ fn validate_prepared_expansion(
                 ComponentTemplateNode::Element { children, .. } => {
                     visit(children, state, depth, path, active_projections)?;
                 }
+                ComponentTemplateNode::ResourceImage { .. } => {}
                 ComponentTemplateNode::InputConsumer { children, .. } => {
                     // Materialization always appends one canonical value text node.
                     add_expanded(state, 1)?;
@@ -3794,6 +3964,56 @@ fn instantiate_nodes(
                     state,
                 )?;
                 document.mutate().append_children(slot, &child_slots);
+                created.push(slot);
+            }
+            ComponentTemplateNode::ResourceImage {
+                name,
+                attributes,
+                source_ordinal,
+            } => {
+                let instance = context.instance.ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceUsageInvalid,
+                        "component raster usage has no component instance",
+                    )
+                })?;
+                let association = state
+                    .resources
+                    .association(instance.definition(), name)
+                    .cloned()
+                    .ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::ComponentResourceReferenceUnknown,
+                            format!(
+                                "component definition `{}` lost resource `{name}` during instantiation",
+                                instance.definition()
+                            ),
+                        )
+                    })?;
+                let slot = document.mutate().create_element(
+                    QualName::new(None, ns!(html), LocalName::from("img")),
+                    attributes.clone(),
+                );
+                let source = association.source();
+                document
+                    .get_node_mut(slot)
+                    .and_then(blitz_dom::node::Node::element_data_mut)
+                    .expect("created image node remains an element")
+                    .special_data =
+                    SpecialElementData::Image(Box::new(ImageData::Raster(RasterImageData::new(
+                        source.width(),
+                        source.height(),
+                        Arc::clone(source.rgba8()),
+                    ))));
+                record_descendant(context.instance, *source_ordinal, slot, placement, state);
+                state.resource_usages.push(ComponentResourceUsage::new(
+                    state.generation,
+                    state.document_serial,
+                    instance.clone(),
+                    slot,
+                    association,
+                    *source_ordinal,
+                ));
                 created.push(slot);
             }
             ComponentTemplateNode::InputConsumer {

@@ -28,7 +28,20 @@
 }
 
 .slot-icon-fallback {
-  color: #7cc4ff;
+  width: 22px;
+  height: 22px;
+}
+
+.component-raster-strip {
+  display: flex;
+  gap: 8px;
+}
+
+.component-raster-strip img {
+  width: 42px;
+  height: 28px;
+  border-radius: 7px;
+  filter: contrast(1.04) drop-shadow(0 2px 4px rgba(4, 8, 18, 0.45));
 }
 
 .slot-before,

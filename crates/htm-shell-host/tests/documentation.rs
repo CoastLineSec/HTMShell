@@ -5,9 +5,14 @@ use htm_runtime::{
     MAX_COMPONENT_EXPORTS_PER_PACKAGE, MAX_COMPONENT_INPUT_ATTRIBUTES,
     MAX_COMPONENT_INPUT_LITERAL_BYTES, MAX_COMPONENT_INPUT_NAME_BYTES,
     MAX_COMPONENT_INPUT_STRING_BYTES, MAX_COMPONENT_INPUTS, MAX_COMPONENT_INSTANCES_PER_DOCUMENT,
-    MAX_COMPONENT_NAME_BYTES, MAX_COMPONENT_NESTING_DEPTH, MAX_COMPONENT_REFERENCES_PER_DOCUMENT,
-    MAX_COMPONENT_SLOT_NAME_BYTES, MAX_COMPONENT_SLOTS, MAX_COMPONENT_SOURCE_BYTES,
-    MAX_COMPONENT_SOURCE_NODES, MAX_COMPONENT_STYLESHEET_BYTES,
+    MAX_COMPONENT_NAME_BYTES, MAX_COMPONENT_NESTING_DEPTH, MAX_COMPONENT_RASTER_DECODED_BYTES,
+    MAX_COMPONENT_RASTER_HEIGHT, MAX_COMPONENT_RASTER_PIXELS, MAX_COMPONENT_RASTER_SOURCE_BYTES,
+    MAX_COMPONENT_RASTER_WIDTH, MAX_COMPONENT_REFERENCES_PER_DOCUMENT,
+    MAX_COMPONENT_RESOURCE_ASSOCIATIONS_PER_PACKAGE, MAX_COMPONENT_RESOURCE_DECLARATIONS,
+    MAX_COMPONENT_RESOURCE_NAME_BYTES, MAX_COMPONENT_RESOURCE_PATH_BYTES,
+    MAX_COMPONENT_RESOURCE_PATH_COMPONENTS, MAX_COMPONENT_RESOURCE_SNAPSHOT_DECODED_BYTES,
+    MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE, MAX_COMPONENT_SLOT_NAME_BYTES, MAX_COMPONENT_SLOTS,
+    MAX_COMPONENT_SOURCE_BYTES, MAX_COMPONENT_SOURCE_NODES, MAX_COMPONENT_STYLESHEET_BYTES,
     MAX_COMPONENT_STYLESHEET_FILES_PER_PACKAGE, MAX_COMPONENT_STYLESHEET_PATH_BYTES,
     MAX_COMPONENT_STYLESHEETS, MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT,
     MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
@@ -93,6 +98,18 @@ fn read_joined(files: &[PathBuf]) -> String {
 
 fn documented_name(text: &str, name: &str) -> bool {
     text.contains(&format!("`{name}`")) || text.lines().any(|line| line.trim() == name)
+}
+
+fn formatted_decimal(value: u64) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            formatted.push(',');
+        }
+        formatted.push(digit);
+    }
+    formatted
 }
 
 fn markdown_targets(text: &str) -> Vec<&str> {
@@ -188,8 +205,13 @@ fn public_documentation_links_and_example_paths_resolve() {
         "examples/package-graph/packages/controls/components/status-card.css",
         "examples/package-graph/packages/controls/components/status-card-density.css",
         "examples/package-graph/packages/controls/components/component-frames.css",
+        "examples/package-graph/assets/root-projected.png",
+        "examples/package-graph/packages/controls/assets/status-orb.png",
+        "examples/package-graph/packages/controls/assets/photo-swatch.jpg",
+        "examples/package-graph/packages/controls/assets/alpha-chip.webp",
         "examples/package-graph/packages/controls/shared/components/badge-label.html",
         "examples/package-graph/packages/controls/shared/components/badge-label.css",
+        "examples/package-graph/packages/controls/shared/assets/badge-icon.png",
     ] {
         assert!(
             root.join(path).is_file(),
@@ -292,10 +314,12 @@ fn component_documentation_matches_the_composition_contract() {
         fs::read_to_string(root.join("docs/types/HTMShell.Component/Slot.md")).unwrap();
     let style_reference =
         fs::read_to_string(root.join("docs/types/HTMShell.Component/Style.md")).unwrap();
+    let resource_reference =
+        fs::read_to_string(root.join("docs/types/HTMShell.Component/Resource.md")).unwrap();
     let manifest_reference =
         fs::read_to_string(root.join("docs/types/HTMShell/ShellManifest.md")).unwrap();
     let public = format!(
-        "{package_guide}\n{guide}\n{reference}\n{input_reference}\n{slot_reference}\n{style_reference}\n{manifest_reference}"
+        "{package_guide}\n{guide}\n{reference}\n{input_reference}\n{slot_reference}\n{style_reference}\n{resource_reference}\n{manifest_reference}"
     );
 
     for statement in [
@@ -356,9 +380,21 @@ fn component_documentation_matches_the_composition_contract() {
         "`::slotted()`",
         "`@import`",
         "`@font-face`",
+        "`resources`",
+        "resource:speaker-icon",
+        "static WebP",
+        "Animated content is rejected",
+        "straight-alpha RGBA8",
+        "opened without following symbolic links",
+        "unused component definitions",
+        "definition-owned image",
+        "Fallback content",
+        "Assigned slot content retains caller ownership",
+        "Dependency package aliases are not resource lookup paths",
+        "device generation",
         "state or action",
         "repeat integration",
-        "external component",
+        "external SVG",
         "hot reload",
         "Headless and live",
         "Multi-output",
@@ -400,11 +436,7 @@ fn component_documentation_matches_the_composition_contract() {
             "Expanded nodes per prepared document",
         ),
     ] {
-        let documented_value = if value >= 1_000 {
-            format!("{},{:03}", value / 1_000, value % 1_000)
-        } else {
-            value.to_string()
-        };
+        let documented_value = formatted_decimal(value);
         assert!(
             guide.contains(&format!("| {label} | {documented_value}")),
             "component guide does not match source limit {label}={value}"
@@ -429,11 +461,7 @@ fn component_documentation_matches_the_composition_contract() {
             "String input bytes",
         ),
     ] {
-        let documented_value = if value >= 1_000 {
-            format!("{},{:03}", value / 1_000, value % 1_000)
-        } else {
-            value.to_string()
-        };
+        let documented_value = formatted_decimal(value);
         assert!(
             input_reference.contains(&format!("| {label} | {documented_value}")),
             "component input reference does not match source limit {label}={value}"
@@ -460,6 +488,54 @@ fn component_documentation_matches_the_composition_contract() {
         "at most {} MiB",
         MAX_COMPONENT_STYLESHEET_BYTES / (1024 * 1024)
     )));
+    for (value, label) in [
+        (
+            MAX_COMPONENT_RESOURCE_DECLARATIONS as u64,
+            "Resource declarations per component",
+        ),
+        (
+            MAX_COMPONENT_RESOURCE_ASSOCIATIONS_PER_PACKAGE as u64,
+            "Resource associations per package",
+        ),
+        (
+            MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE as u64,
+            "Unique raster source files per package",
+        ),
+        (
+            MAX_COMPONENT_RESOURCE_NAME_BYTES as u64,
+            "Logical resource name",
+        ),
+        (
+            MAX_COMPONENT_RESOURCE_PATH_BYTES as u64,
+            "Logical source path",
+        ),
+        (
+            MAX_COMPONENT_RESOURCE_PATH_COMPONENTS as u64,
+            "Source path components",
+        ),
+        (MAX_COMPONENT_RASTER_WIDTH as u64, "Raster width"),
+        (MAX_COMPONENT_RASTER_HEIGHT as u64, "Raster height"),
+        (MAX_COMPONENT_RASTER_PIXELS, "Raster pixels"),
+    ] {
+        let documented_value = formatted_decimal(value);
+        assert!(
+            resource_reference.contains(&format!("| {label} | {documented_value}")),
+            "component resource reference does not match source limit {label}={value}"
+        );
+    }
+    for (value, label) in [
+        (MAX_COMPONENT_RASTER_SOURCE_BYTES, "Encoded source file"),
+        (MAX_COMPONENT_RASTER_DECODED_BYTES, "One decoded raster"),
+        (
+            MAX_COMPONENT_RESOURCE_SNAPSHOT_DECODED_BYTES,
+            "Decoded component resources per snapshot",
+        ),
+    ] {
+        assert!(
+            resource_reference.contains(&format!("| {label} | {} MiB |", value / (1024 * 1024))),
+            "component resource reference does not match source limit {label}={value}"
+        );
+    }
 
     let manifest = ValidatedManifest::load(root.join("examples/package-graph/shell.json")).unwrap();
     let snapshot = manifest.snapshot();
@@ -470,6 +546,13 @@ fn component_documentation_matches_the_composition_contract() {
     assert_eq!(snapshot.component_styles().totals().source_read_count, 4);
     assert_eq!(snapshot.component_styles().totals().source_parse_count, 4);
     assert_eq!(snapshot.component_styles().associations().len(), 5);
+    assert_eq!(snapshot.component_resources().sources().len(), 4);
+    assert_eq!(snapshot.component_resources().totals().source_read_count, 4);
+    assert_eq!(
+        snapshot.component_resources().totals().source_decode_count,
+        4
+    );
+    assert_eq!(snapshot.component_resources().associations().len(), 5);
     assert_eq!(
         snapshot
             .components()
@@ -506,6 +589,15 @@ fn component_documentation_matches_the_composition_contract() {
         "\"style_scope_definitions\"",
         "\"style_scope_instances\"",
         "\"style_owned_nodes\"",
+        "\"resources\"",
+        "\"component_raster_sources\"",
+        "\"component_resource_totals\"",
+        "\"resource_usages\"",
+        "\"semantic_version\"",
+        "\"format\"",
+        "\"encoded_bytes\"",
+        "\"decoded_bytes\"",
+        "\"association\"",
     ] {
         assert!(
             diagnostic.contains(expected),

@@ -2,7 +2,7 @@
 
 **Kind:** Declarative composition | **Status:** Experimental
 
-`HTMShell.Component` describes manifest-owned inert templates, literal typed inputs, bounded default and named content slots, scoped package-owned stylesheets, explicit references, and deterministic component uses in schema version 2 packages.
+`HTMShell.Component` describes manifest-owned inert templates, literal typed inputs, bounded default and named content slots, scoped package-owned stylesheets, declared static raster resources, explicit references, and deterministic component uses in schema version 2 packages.
 
 ## Component definition
 
@@ -33,13 +33,20 @@ A package exports a definition from its ordered manifest `components` table:
       ],
       "styles": [
         "components/status-card.css"
+      ],
+      "resources": [
+        {
+          "name": "status-icon",
+          "type": "raster",
+          "source": "assets/status-icon.png"
+        }
       ]
     }
   ]
 }
 ```
 
-The entry has `name`, `source`, an optional ordered `inputs` array, an optional ordered `slots` array with up to 32 unique declarations, and an optional ordered `styles` array with up to 16 package-owned stylesheet paths. Shell and library packages may export definitions. Schema version 1 and manifestless headless packages cannot.
+The entry has `name`, `source`, an optional ordered `inputs` array, an optional ordered `slots` array with up to 32 unique declarations, an optional ordered `styles` array with up to 16 package-owned stylesheet paths, and an optional ordered `resources` array with up to 32 named raster declarations. Shell and library packages may export definitions. Schema version 1 and manifestless headless packages cannot.
 
 The source declares the exported definition exactly once:
 
@@ -104,11 +111,11 @@ A definition belongs to one immutable package snapshot. Its logical identity con
 
 An instance identity additionally contains its document generation, parent component instance when nested, invocation position, and finite host role. Descendant provenance contains the instance identity, template source-node ordinal, and fresh DOM slot generation. Separate uses and separate outputs cannot alias identities. Input and slot content have separate deterministic semantic versions and never define instance or descendant identity.
 
-Library definitions do not own or create surfaces. Package validation reads declared stylesheets, but an unused definition creates no live style scope, native-service demand, state subscription, action lookup, asset load, external resource, renderer object, or Wayland object.
+Library definitions do not own or create surfaces. Package validation reads declared stylesheets and eagerly reads and decodes declared raster sources. An unused definition creates no live style scope, resource usage, native-service demand, state subscription, action lookup, renderer object, GPU upload, frame, or Wayland object.
 
 ## Content profile
 
-Definitions may contain ordinary static HTML geometry and text, classes, non-resource inline styles, self-contained inline SVG, nested component uses, and manifest-associated component stylesheets.
+Definitions may contain ordinary static HTML geometry and text, classes, non-resource inline styles, self-contained inline SVG, nested component uses, manifest-associated component stylesheets, and manifest-associated raster images referenced as `<img src="resource:name">`.
 
 Definitions cannot contain:
 
@@ -117,7 +124,7 @@ Definitions cannot contain:
 - undeclared or duplicate slots, invalid named routing, nested `slot` attributes, and invocation children without a matching slot;
 - component-local IDs or local-reference attributes;
 - scripts, component style elements, stylesheet links, `@import`, or `url()`;
-- external images, SVG references, fonts, media, or other component-owned resources.
+- undeclared or ordinary relative images, SVG resource references, fonts, media, or other component-owned resources.
 
 The existing `state-text`, `state-token`, and `state-value` declarations may consume compatible values from the nearest `input.*` host namespace. They do not create process-global state subscriptions or native-service demand. See [component inputs](Input.md).
 
@@ -125,7 +132,9 @@ Up to 32 standard-like default or named `slot` insertion points are available wh
 
 Component styles match only definition and fallback nodes owned by the same component instance. Root styles, nested component styles, and projected caller styles retain separate ownership. Inheritance follows rendered ancestry across those selector boundaries. Roots without a reachable styled component retain legacy global matching. See [component styles](Style.md).
 
-`:host`, `::slotted()`, Shadow DOM, package-global library styles, dynamic bindings, local state, action exports, repeat integration, external component resources, and hot reload are unavailable.
+Declared PNG, JPEG, and static WebP sources are eagerly decoded once per immutable package candidate and shared by definitions, instances, headless and live documents, and outputs. Definition and fallback images use the callee catalog. Assigned content retains the caller resource owner. See [component raster resources](Resource.md).
+
+`:host`, `::slotted()`, Shadow DOM, package-global library styles, dynamic bindings, local state, action exports, repeat integration, external SVG, CSS URL assets, fonts, resource-reference inputs, and hot reload are unavailable.
 
 ## Limits and errors
 
@@ -147,9 +156,19 @@ Component styles match only definition and fallback nodes owned by the same comp
 | Unique stylesheet files per package | 64 |
 | Stylesheet path | 512 UTF-8 bytes |
 | Stylesheet file | 1 MiB |
+| Raster resources per component | 32 |
+| Resource associations per package | 4,096 |
+| Unique raster sources per package | 256 |
+| Resource name | 64 ASCII bytes |
+| Resource path | 512 UTF-8 bytes and 32 components |
+| Encoded raster | 8 MiB |
+| Raster dimensions | 4,096 by 4,096 pixels |
+| Raster pixels | 16,777,216 |
+| Decoded raster | 64 MiB |
+| Snapshot decoded raster resources | 256 MiB |
 
 All definitions, dependencies, and root invocations validate in the package-candidate transaction. Missing or duplicate declarations, invalid names, invalid sources, unknown references, cycles, forbidden content, and limit failures reject the candidate. No partial definition table or subtree is published, and a failed replacement retains the last successfully published snapshot.
 
 Headless and live loading use the same immutable definitions and prepared root documents. Multi-output live loading shares definition data but creates output-local document, instance, descendant, scene, and surface identities.
 
-See [components](../../guide/components.md), [component inputs](Input.md), [slots](Slot.md), [component styles](Style.md), [local packages](../../guide/packages.md), and [`HTMShell.Package`](../HTMShell.Package/README.md).
+See [components](../../guide/components.md), [component inputs](Input.md), [slots](Slot.md), [component styles](Style.md), [component raster resources](Resource.md), [local packages](../../guide/packages.md), and [`HTMShell.Package`](../HTMShell.Package/README.md).

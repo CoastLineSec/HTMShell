@@ -94,6 +94,9 @@ pub(super) fn collect_effect_plans(scene: &RetainedScene) -> Vec<CpuEffectPlan> 
                     filtered_bounds,
                     ..
                 } => {
+                    if filtered_bounds.width <= 0.0 || filtered_bounds.height <= 0.0 {
+                        return None;
+                    }
                     let execution = if list.is_visual_identity() {
                         CpuEffectExecution::Identity
                     } else if list.functions.iter().all(|effect| {
