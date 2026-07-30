@@ -15,10 +15,10 @@ publish = false
 [workspace.dependencies]
 anyrender = { version = "=0.11.0" }
 anyrender_vello_cpu = { version = "=0.14.0", default-features = false }
-blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "389e3762fc0ac19f6de7c0cec7201d0c8bde393a", default-features = false, features = ["incremental", "svg", "system-fonts"] }
-blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "389e3762fc0ac19f6de7c0cec7201d0c8bde393a", default-features = false }
-blitz-paint = { git = "https://github.com/DioxusLabs/blitz", rev = "389e3762fc0ac19f6de7c0cec7201d0c8bde393a", default-features = false, features = ["svg"] }
-blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "389e3762fc0ac19f6de7c0cec7201d0c8bde393a", default-features = false }
+blitz-dom = { git = "https://github.com/CoastLineSec/blitz", rev = "74b51b07ac0562b8de7a52bc6c1ba4511706af93", default-features = false, features = ["incremental", "svg", "system-fonts"] }
+blitz-html = { git = "https://github.com/CoastLineSec/blitz", rev = "74b51b07ac0562b8de7a52bc6c1ba4511706af93", default-features = false }
+blitz-paint = { git = "https://github.com/CoastLineSec/blitz", rev = "74b51b07ac0562b8de7a52bc6c1ba4511706af93", default-features = false, features = ["svg"] }
+blitz-traits = { git = "https://github.com/CoastLineSec/blitz", rev = "74b51b07ac0562b8de7a52bc6c1ba4511706af93", default-features = false }
 cssparser = "=0.37.0"
 dbus = { version = "=0.9.12", default-features = false }
 kurbo = "=0.13.1"

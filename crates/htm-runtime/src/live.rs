@@ -15,6 +15,7 @@ use crate::render::{
     CpuRenderSession, DamageRegion, FramePlan, FrameReason, FrameReasonSet, RenderSurfaceId,
 };
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
+use crate::style_owner::{StyleActivationMode, StyleOwnership, activate_style_ownership};
 use crate::{
     ExperimentalDocumentIdentity, ExperimentalNodeIdentity, MAX_CLONED_NODES_PER_DOCUMENT,
     MAX_CLONED_NODES_PER_REPEAT, MAX_ITEMS_PER_REPEAT, NumericValue, PipeWireDocumentDemand,
@@ -540,6 +541,7 @@ pub struct LiveDocument {
     component_slot_projections: Vec<crate::ComponentSlotProjectionRecord>,
     projected_component_nodes: Vec<crate::ProjectedNodeProvenance>,
     component_fallback_nodes: Vec<crate::ComponentFallbackNodeProvenance>,
+    _style_ownership: Option<StyleOwnership>,
     source: PathBuf,
     viewport: ViewportSpec,
     document_identity: ExperimentalDocumentIdentity,
@@ -1010,6 +1012,7 @@ impl LiveDocument {
             component_slot_projections,
             projected_component_nodes,
             component_fallback_nodes,
+            style_ownership,
         ) = match (&package_snapshot, prepared_document) {
             (Some(snapshot), Some(prepared)) => {
                 let instantiated =
@@ -1022,6 +1025,7 @@ impl LiveDocument {
                     instantiated.slot_projections,
                     instantiated.projected_nodes,
                     instantiated.fallback_nodes,
+                    Some(instantiated.style_ownership),
                 )
             }
             _ => (
@@ -1032,8 +1036,16 @@ impl LiveDocument {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                None,
             ),
         };
+        if let Some(ownership) = &style_ownership {
+            activate_style_ownership(
+                &mut document,
+                ownership,
+                &StyleActivationMode::LegacyDocumentGlobal,
+            )?;
+        }
         document.set_incremental_layout(true);
         validate_document_limits(&document)?;
         let html_parse_ms = elapsed_ms(parse_started);
@@ -1112,6 +1124,7 @@ impl LiveDocument {
             component_slot_projections,
             projected_component_nodes,
             component_fallback_nodes,
+            _style_ownership: style_ownership,
             source,
             viewport,
             document_identity,

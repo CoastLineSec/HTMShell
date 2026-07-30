@@ -2,6 +2,7 @@ use crate::package::{
     PackageAlias, PackageErrorKind, PackageId, PackageLoadError, PackageSchemaSource,
     PackageSnapshotGeneration, ResolvedPackage,
 };
+use crate::style_owner::{StyleOwnedNodeKind, StyleOwnerId, StyleOwnership};
 use crate::{NumericValue, StateToken, StateValueFormat};
 use blitz_dom::node::NodeData;
 use blitz_dom::{Attribute, DocumentConfig, LocalName, QualName, ns};
@@ -1197,6 +1198,7 @@ impl PreparedDocument {
             catalog,
             generation,
             document_serial,
+            style_ownership: StyleOwnership::new(generation, document_serial, 0),
             instances: Vec::with_capacity(self.stats.component_instances),
             descendants: Vec::new(),
             input_consumers: Vec::new(),
@@ -1218,6 +1220,15 @@ impl PreparedDocument {
             &mut state,
         )?;
         document.mutate().append_children(0, &children);
+        state
+            .style_ownership
+            .validate_complete(&document)
+            .map_err(|error| {
+                PackageLoadError::new(
+                    PackageErrorKind::ComponentSlotCallerScopeInvalid,
+                    error.to_string(),
+                )
+            })?;
         Ok(InstantiatedDocument {
             document,
             instances: state.instances,
@@ -1226,6 +1237,7 @@ impl PreparedDocument {
             slot_projections: state.slot_projections,
             projected_nodes: state.projected_nodes,
             fallback_nodes: state.fallback_nodes,
+            style_ownership: state.style_ownership,
         })
     }
 }
@@ -1530,12 +1542,14 @@ pub(crate) struct InstantiatedDocument {
     pub slot_projections: Vec<ComponentSlotProjectionRecord>,
     pub projected_nodes: Vec<ProjectedNodeProvenance>,
     pub fallback_nodes: Vec<ComponentFallbackNodeProvenance>,
+    pub style_ownership: StyleOwnership,
 }
 
 struct InstantiationState<'a> {
     catalog: &'a ComponentCatalog,
     generation: PackageSnapshotGeneration,
     document_serial: u64,
+    style_ownership: StyleOwnership,
     instances: Vec<ComponentInstanceRecord>,
     descendants: Vec<ComponentDescendantProvenance>,
     input_consumers: Vec<ComponentInputConsumerRecord>,
@@ -4051,6 +4065,19 @@ fn record_descendant(
     placement: Option<ProjectionPlacement<'_>>,
     state: &mut InstantiationState<'_>,
 ) {
+    let owner = current_instance
+        .map(StyleOwnerId::component)
+        .unwrap_or_else(|| state.style_ownership.root_owner().clone());
+    let kind = match placement {
+        Some(ProjectionPlacement::Assigned(_)) => StyleOwnedNodeKind::CallerProjected,
+        Some(ProjectionPlacement::Fallback(_)) => StyleOwnedNodeKind::ComponentFallback,
+        None if current_instance.is_none() => StyleOwnedNodeKind::RootDocument,
+        None if current_instance.is_some_and(|instance| instance.invocation_path.len() > 1) => {
+            StyleOwnedNodeKind::NestedComponent
+        }
+        None => StyleOwnedNodeKind::ComponentDefinition,
+    };
+    state.style_ownership.record(slot, owner, kind);
     if let Some(instance_id) = current_instance {
         state.descendants.push(ComponentDescendantProvenance {
             instance_id: instance_id.clone(),

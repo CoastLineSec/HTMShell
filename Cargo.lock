@@ -189,7 +189,7 @@ dependencies = [
 [[package]]
 name = "blitz-dom"
 version = "0.3.0-beta.1"
-source = "git+https://github.com/DioxusLabs/blitz?rev=389e3762fc0ac19f6de7c0cec7201d0c8bde393a#389e3762fc0ac19f6de7c0cec7201d0c8bde393a"
+source = "git+https://github.com/CoastLineSec/blitz?rev=74b51b07ac0562b8de7a52bc6c1ba4511706af93#74b51b07ac0562b8de7a52bc6c1ba4511706af93"
 dependencies = [
  "app_units",
  "atomic_refcell",
@@ -198,7 +198,7 @@ dependencies = [
  "color",
  "cssparser",
  "cursor-icon",
- "debug_timer 0.1.3 (git+https://github.com/DioxusLabs/blitz?rev=389e3762fc0ac19f6de7c0cec7201d0c8bde393a)",
+ "debug_timer 0.1.3 (git+https://github.com/CoastLineSec/blitz?rev=74b51b07ac0562b8de7a52bc6c1ba4511706af93)",
  "euclid",
  "html-escape",
  "image",
@@ -229,7 +229,7 @@ dependencies = [
 [[package]]
 name = "blitz-html"
 version = "0.3.0-beta.1"
-source = "git+https://github.com/DioxusLabs/blitz?rev=389e3762fc0ac19f6de7c0cec7201d0c8bde393a#389e3762fc0ac19f6de7c0cec7201d0c8bde393a"
+source = "git+https://github.com/CoastLineSec/blitz?rev=74b51b07ac0562b8de7a52bc6c1ba4511706af93#74b51b07ac0562b8de7a52bc6c1ba4511706af93"
 dependencies = [
  "blitz-dom",
  "blitz-traits",
@@ -240,7 +240,7 @@ dependencies = [
 [[package]]
 name = "blitz-paint"
 version = "0.3.0-beta.1"
-source = "git+https://github.com/DioxusLabs/blitz?rev=389e3762fc0ac19f6de7c0cec7201d0c8bde393a#389e3762fc0ac19f6de7c0cec7201d0c8bde393a"
+source = "git+https://github.com/CoastLineSec/blitz?rev=74b51b07ac0562b8de7a52bc6c1ba4511706af93#74b51b07ac0562b8de7a52bc6c1ba4511706af93"
 dependencies = [
  "anyrender",
  "anyrender_svg",
@@ -260,7 +260,7 @@ dependencies = [
 [[package]]
 name = "blitz-traits"
 version = "0.3.0-beta.1"
-source = "git+https://github.com/DioxusLabs/blitz?rev=389e3762fc0ac19f6de7c0cec7201d0c8bde393a#389e3762fc0ac19f6de7c0cec7201d0c8bde393a"
+source = "git+https://github.com/CoastLineSec/blitz?rev=74b51b07ac0562b8de7a52bc6c1ba4511706af93#74b51b07ac0562b8de7a52bc6c1ba4511706af93"
 dependencies = [
  "atomic_refcell",
  "bitflags 2.13.1",
@@ -559,7 +559,7 @@ checksum = "da220af51a1a335e9a930beaaef53d261e41ea9eecfb3d973a3ddae1a7284b9c"
 [[package]]
 name = "debug_timer"
 version = "0.1.3"
-source = "git+https://github.com/DioxusLabs/blitz?rev=389e3762fc0ac19f6de7c0cec7201d0c8bde393a#389e3762fc0ac19f6de7c0cec7201d0c8bde393a"
+source = "git+https://github.com/CoastLineSec/blitz?rev=74b51b07ac0562b8de7a52bc6c1ba4511706af93#74b51b07ac0562b8de7a52bc6c1ba4511706af93"
 
 [[package]]
 name = "derive_more"
@@ -2611,7 +2611,7 @@ dependencies = [
 [[package]]
 name = "stylo_taffy"
 version = "0.3.0-beta.1"
-source = "git+https://github.com/DioxusLabs/blitz?rev=389e3762fc0ac19f6de7c0cec7201d0c8bde393a#389e3762fc0ac19f6de7c0cec7201d0c8bde393a"
+source = "git+https://github.com/CoastLineSec/blitz?rev=74b51b07ac0562b8de7a52bc6c1ba4511706af93#74b51b07ac0562b8de7a52bc6c1ba4511706af93"
 dependencies = [
  "stylo",
  "stylo_atoms",

@@ -18,6 +18,7 @@ mod package;
 mod render;
 mod resource;
 mod scene;
+mod style_owner;
 mod stylesheet;
 
 pub use adapter::{run_package, run_package_with_options};
@@ -122,7 +123,7 @@ pub use render::{
     LiveGpuStatistics, LiveWaylandHandle, PendingLiveGpuFrame, RenderSurfaceId,
 };
 
-pub const BLITZ_REVISION: &str = "389e3762fc0ac19f6de7c0cec7201d0c8bde393a";
+pub const BLITZ_REVISION: &str = "74b51b07ac0562b8de7a52bc6c1ba4511706af93";
 pub const DIAGNOSTIC_SCHEMA_VERSION: &str = "htmshell.experimental-diagnostic.v1";
 pub const INCREMENTAL_SNAPSHOT_SCHEMA_VERSION: &str = "htmshell.experimental-scene-snapshot.v1";
 pub const INCREMENTAL_DIFF_SCHEMA_VERSION: &str = "htmshell.experimental-scene-diff.v1";

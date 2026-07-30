@@ -8,6 +8,7 @@ use crate::model::{
 };
 use crate::render::{CpuRenderSession, FrameReason, FrameReasonSet, RenderSurfaceId};
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
+use crate::style_owner::{StyleActivationMode, activate_style_ownership};
 use crate::{BLITZ_REVISION, DIAGNOSTIC_SCHEMA_VERSION};
 use blitz_dom::node::ImageData;
 use blitz_dom::{Document, DocumentConfig, Node, StyleThreading};
@@ -118,6 +119,12 @@ fn run_inner(package: &Path, options: ExperimentOptions) -> Result<ExperimentRun
     let component_slot_projections = instantiated.slot_projections;
     let projected_component_nodes = instantiated.projected_nodes;
     let component_fallback_nodes = instantiated.fallback_nodes;
+    let style_ownership = instantiated.style_ownership;
+    activate_style_ownership(
+        &mut document,
+        &style_ownership,
+        &StyleActivationMode::LegacyDocumentGlobal,
+    )?;
     document.set_incremental_layout(true);
     validate_document_limits(&document)?;
     let html_parse_ms = elapsed_ms(parse_started);

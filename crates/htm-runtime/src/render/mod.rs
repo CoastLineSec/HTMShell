@@ -12,6 +12,8 @@ mod gpu;
 mod scene;
 
 pub(crate) use cpu::{CpuRenderSession, PreparedRender};
+#[cfg(all(feature = "gpu-renderer", test))]
+pub(crate) use gpu::{BackendInfo, render_prepared_for_test};
 #[cfg(feature = "gpu-renderer")]
 pub use gpu::{
     LiveGpuBackendInfo, LiveGpuConfiguration, LiveGpuError, LiveGpuErrorKind, LiveGpuPresenter,

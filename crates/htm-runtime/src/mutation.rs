@@ -13,6 +13,7 @@ use crate::model::{DiagnosticMessage, ViewportSpec};
 use crate::render::{CpuRenderSession, FrameReason, FrameReasonSet, RenderSurfaceId};
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
 use crate::scene::{build_scene_snapshot, diff_scenes};
+use crate::style_owner::{StyleActivationMode, activate_style_ownership};
 use crate::stylesheet::{load_candidate_css, prepare_author_stylesheet, replace_author_stylesheet};
 use blitz_dom::{
     Attribute, DocumentConfig, LocalName, Namespace, NodeData, QualName, StyleThreading, ns,
@@ -85,6 +86,12 @@ fn run_inner(package: &Path) -> Result<IncrementalExperimentRun, RuntimeError> {
     let component_instances = instantiated.instances;
     let component_descendants = instantiated.descendants;
     let component_input_consumers = instantiated.input_consumers;
+    let style_ownership = instantiated.style_ownership;
+    activate_style_ownership(
+        &mut document,
+        &style_ownership,
+        &StyleActivationMode::LegacyDocumentGlobal,
+    )?;
     document.set_incremental_layout(true);
     validate_document_limits(&document)?;
     let parse_ms = elapsed_ms(parse_started);

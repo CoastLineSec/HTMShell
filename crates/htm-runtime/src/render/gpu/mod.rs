@@ -1111,6 +1111,22 @@ impl OffscreenRenderer {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn render_prepared_for_test(
+    prepared: &super::PreparedRender,
+    force_software_adapter: bool,
+) -> Result<(Vec<u8>, bool, Option<BackendInfo>), BackendError> {
+    let mut renderer = OffscreenRenderer::new(force_software_adapter);
+    let target = RenderTarget {
+        width: prepared.plan.physical_width,
+        height: prepared.plan.physical_height,
+        pixel_format: PixelFormat::PremultipliedRgba8,
+    };
+    let info = renderer.backend_info().cloned();
+    let (pixels, path) = renderer.render(&prepared.plan, target, prepared.prepared.clone())?;
+    Ok((pixels, path == RenderPath::Gpu, info))
+}
+
 fn merge_coverage(left: GpuCoverage, right: GpuCoverage) -> GpuCoverage {
     use GpuCoverage::{CpuFrameFallback, HybridResource, Native, Unsupported};
     match (left, right) {
