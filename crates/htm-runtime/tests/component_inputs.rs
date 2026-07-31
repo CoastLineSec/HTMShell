@@ -141,6 +141,7 @@ fn input_name_and_type_grammars_are_exact() {
         ("token", ComponentInputType::Token),
         ("color", ComponentInputType::Color),
         ("length", ComponentInputType::Length),
+        ("resource-reference", ComponentInputType::ResourceReference),
     ] {
         assert_eq!(ComponentInputType::parse(value).unwrap(), expected);
     }

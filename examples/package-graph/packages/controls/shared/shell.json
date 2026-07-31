@@ -41,6 +41,24 @@
     {
       "name": "unstyled-note",
       "source": "components/badge-label.html"
+    },
+    {
+      "name": "resource-image",
+      "source": "components/badge-label.html",
+      "inputs": [
+        {
+          "name": "icon",
+          "type": "resource-reference",
+          "resourceTypes": [
+            "raster",
+            "svg"
+          ],
+          "required": true
+        }
+      ],
+      "styles": [
+        "components/badge-label.css"
+      ]
     }
   ]
 }

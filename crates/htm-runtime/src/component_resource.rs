@@ -415,6 +415,18 @@ pub struct ComponentResourceAssociation {
     ordinal: u16,
 }
 
+impl PartialEq for ComponentResourceAssociation {
+    fn eq(&self, other: &Self) -> bool {
+        self.definition == other.definition
+            && self.name == other.name
+            && self.source.id() == other.source.id()
+            && self.source.semantic_version() == other.source.semantic_version()
+            && self.ordinal == other.ordinal
+    }
+}
+
+impl Eq for ComponentResourceAssociation {}
+
 impl ComponentResourceAssociation {
     pub(crate) fn new(
         definition: ComponentDefinitionKey,
@@ -459,6 +471,135 @@ impl ComponentResourceAssociation {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SurfaceResourceOwner {
+    package_id: PackageId,
+    surface_id: Arc<str>,
+}
+
+impl SurfaceResourceOwner {
+    pub(crate) fn new(package_id: PackageId, surface_id: impl Into<Arc<str>>) -> Self {
+        Self {
+            package_id,
+            surface_id: surface_id.into(),
+        }
+    }
+
+    pub fn package_id(&self) -> &PackageId {
+        &self.package_id
+    }
+
+    pub fn surface_id(&self) -> &str {
+        &self.surface_id
+    }
+
+    pub fn deterministic_string(&self) -> String {
+        format!("surface:{}:{}", self.package_id, self.surface_id)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SurfaceResourceAssociation {
+    owner: SurfaceResourceOwner,
+    name: ComponentResourceName,
+    source: Arc<ComponentResourceSource>,
+    ordinal: u16,
+}
+
+impl PartialEq for SurfaceResourceAssociation {
+    fn eq(&self, other: &Self) -> bool {
+        self.owner == other.owner
+            && self.name == other.name
+            && self.source.id() == other.source.id()
+            && self.source.semantic_version() == other.source.semantic_version()
+            && self.ordinal == other.ordinal
+    }
+}
+
+impl Eq for SurfaceResourceAssociation {}
+
+impl SurfaceResourceAssociation {
+    pub(crate) fn new(
+        owner: SurfaceResourceOwner,
+        name: ComponentResourceName,
+        source: Arc<ComponentResourceSource>,
+        ordinal: u16,
+    ) -> Self {
+        Self {
+            owner,
+            name,
+            source,
+            ordinal,
+        }
+    }
+
+    pub fn owner(&self) -> &SurfaceResourceOwner {
+        &self.owner
+    }
+
+    pub fn name(&self) -> &ComponentResourceName {
+        &self.name
+    }
+
+    pub fn source(&self) -> &Arc<ComponentResourceSource> {
+        &self.source
+    }
+
+    pub fn ordinal(&self) -> u16 {
+        self.ordinal
+    }
+
+    pub fn deterministic_id(&self, generation: PackageSnapshotGeneration) -> String {
+        format!(
+            "surface-{}-association:{}:{}:{}:{}@{}",
+            self.source.kind().as_str(),
+            self.owner.deterministic_string(),
+            self.name,
+            self.source.path(),
+            self.ordinal,
+            generation.get()
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceOriginAssociation {
+    Component(ComponentResourceAssociation),
+    Surface(SurfaceResourceAssociation),
+}
+
+impl ResourceOriginAssociation {
+    pub fn source(&self) -> &Arc<ComponentResourceSource> {
+        match self {
+            Self::Component(association) => association.source(),
+            Self::Surface(association) => association.source(),
+        }
+    }
+
+    pub fn name(&self) -> &ComponentResourceName {
+        match self {
+            Self::Component(association) => association.name(),
+            Self::Surface(association) => association.name(),
+        }
+    }
+
+    pub fn deterministic_id(&self, generation: PackageSnapshotGeneration) -> String {
+        match self {
+            Self::Component(association) => association.deterministic_id(generation),
+            Self::Surface(association) => association.deterministic_id(generation),
+        }
+    }
+
+    pub fn owner_diagnostic(&self) -> String {
+        match self {
+            Self::Component(association) => {
+                format!("component:{}", association.definition())
+            }
+            Self::Surface(association) => association.owner().deterministic_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ComponentResourceValidationTotals {
     pub source_count: usize,
@@ -477,8 +618,11 @@ pub struct ComponentResourceValidationTotals {
 pub struct ComponentResourceCatalog {
     sources: Arc<[Arc<ComponentResourceSource>]>,
     associations: Arc<[ComponentResourceAssociation]>,
+    surface_associations: Arc<[SurfaceResourceAssociation]>,
     by_definition_and_name:
         BTreeMap<(ComponentDefinitionKey, ComponentResourceName), ComponentResourceAssociation>,
+    by_surface_and_name:
+        BTreeMap<(SurfaceResourceOwner, ComponentResourceName), SurfaceResourceAssociation>,
     totals: ComponentResourceValidationTotals,
 }
 
@@ -486,6 +630,7 @@ impl ComponentResourceCatalog {
     pub(crate) fn new(
         sources: Vec<Arc<ComponentResourceSource>>,
         associations: Vec<ComponentResourceAssociation>,
+        surface_associations: Vec<SurfaceResourceAssociation>,
         totals: ComponentResourceValidationTotals,
     ) -> Self {
         let by_definition_and_name = associations
@@ -498,10 +643,22 @@ impl ComponentResourceCatalog {
                 )
             })
             .collect();
+        let by_surface_and_name = surface_associations
+            .iter()
+            .cloned()
+            .map(|association| {
+                (
+                    (association.owner.clone(), association.name.clone()),
+                    association,
+                )
+            })
+            .collect();
         Self {
             sources: sources.into(),
             associations: associations.into(),
+            surface_associations: surface_associations.into(),
             by_definition_and_name,
+            by_surface_and_name,
             totals,
         }
     }
@@ -514,6 +671,10 @@ impl ComponentResourceCatalog {
         &self.associations
     }
 
+    pub fn surface_associations(&self) -> &[SurfaceResourceAssociation] {
+        &self.surface_associations
+    }
+
     pub fn association(
         &self,
         definition: &ComponentDefinitionKey,
@@ -521,6 +682,14 @@ impl ComponentResourceCatalog {
     ) -> Option<&ComponentResourceAssociation> {
         self.by_definition_and_name
             .get(&(definition.clone(), name.clone()))
+    }
+
+    pub fn surface_association(
+        &self,
+        owner: &SurfaceResourceOwner,
+        name: &ComponentResourceName,
+    ) -> Option<&SurfaceResourceAssociation> {
+        self.by_surface_and_name.get(&(owner.clone(), name.clone()))
     }
 
     pub fn totals(&self) -> &ComponentResourceValidationTotals {
@@ -542,7 +711,8 @@ pub struct ComponentResourceUsage {
     id: ComponentResourceUsageId,
     instance: ComponentInstanceId,
     node_slot: usize,
-    association: ComponentResourceAssociation,
+    origin: ResourceOriginAssociation,
+    input_value_id: Option<Arc<str>>,
     template_source_ordinal: u32,
 }
 
@@ -555,21 +725,78 @@ impl ComponentResourceUsage {
         association: ComponentResourceAssociation,
         template_source_ordinal: u32,
     ) -> Self {
-        let id = ComponentResourceUsageId(Arc::from(format!(
-            "component-{}-usage:{}:{}:{}:{}:{}@{}",
-            association.source().kind().as_str(),
+        Self::from_origin(
+            generation,
             document_serial,
-            instance.deterministic_string(),
+            instance,
             node_slot,
-            association.name(),
+            ResourceOriginAssociation::Component(association),
+            None,
             template_source_ordinal,
-            generation.get()
-        )));
+        )
+    }
+
+    pub(crate) fn from_input(
+        generation: PackageSnapshotGeneration,
+        document_serial: u64,
+        instance: ComponentInstanceId,
+        node_slot: usize,
+        origin: ResourceOriginAssociation,
+        input_value_id: Arc<str>,
+        template_source_ordinal: u32,
+    ) -> Self {
+        Self::from_origin(
+            generation,
+            document_serial,
+            instance,
+            node_slot,
+            origin,
+            Some(input_value_id),
+            template_source_ordinal,
+        )
+    }
+
+    fn from_origin(
+        generation: PackageSnapshotGeneration,
+        document_serial: u64,
+        instance: ComponentInstanceId,
+        node_slot: usize,
+        origin: ResourceOriginAssociation,
+        input_value_id: Option<Arc<str>>,
+        template_source_ordinal: u32,
+    ) -> Self {
+        let id = if let Some(input_value_id) = &input_value_id {
+            ComponentResourceUsageId(Arc::from(format!(
+                "component-{}-input-usage:{}:{}:{}:{}:{}:{}:{}:{}@{}",
+                origin.source().kind().as_str(),
+                document_serial,
+                instance.deterministic_string(),
+                node_slot,
+                origin.deterministic_id(generation),
+                origin.source().id().deterministic_string(generation),
+                origin.source().semantic_version().deterministic_string(),
+                input_value_id,
+                template_source_ordinal,
+                generation.get()
+            )))
+        } else {
+            ComponentResourceUsageId(Arc::from(format!(
+                "component-{}-usage:{}:{}:{}:{}:{}@{}",
+                origin.source().kind().as_str(),
+                document_serial,
+                instance.deterministic_string(),
+                node_slot,
+                origin.name(),
+                template_source_ordinal,
+                generation.get()
+            )))
+        };
         Self {
             id,
             instance,
             node_slot,
-            association,
+            origin,
+            input_value_id,
             template_source_ordinal,
         }
     }
@@ -586,12 +813,16 @@ impl ComponentResourceUsage {
         self.node_slot
     }
 
-    pub fn association(&self) -> &ComponentResourceAssociation {
-        &self.association
+    pub fn origin(&self) -> &ResourceOriginAssociation {
+        &self.origin
     }
 
     pub fn source(&self) -> &Arc<ComponentResourceSource> {
-        self.association.source()
+        self.origin.source()
+    }
+
+    pub fn input_value_id(&self) -> Option<&str> {
+        self.input_value_id.as_deref()
     }
 
     pub fn template_source_ordinal(&self) -> u32 {

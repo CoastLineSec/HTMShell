@@ -25,14 +25,38 @@
       "outputs": "all",
       "edge": "top",
       "thickness": 52,
-      "reserveSpace": true
+      "reserveSpace": true,
+      "resources": [
+        {
+          "name": "surface-photo",
+          "type": "raster",
+          "source": "assets/root-projected.png"
+        },
+        {
+          "name": "surface-symbol",
+          "type": "svg",
+          "source": "assets/surface-symbol.svg"
+        }
+      ]
     },
     {
       "id": "overlay",
       "kind": "overlay",
       "document": "overlay.html",
       "outputs": "all",
-      "initiallyOpen": false
+      "initiallyOpen": false,
+      "resources": [
+        {
+          "name": "surface-photo",
+          "type": "raster",
+          "source": "assets/root-projected.png"
+        },
+        {
+          "name": "surface-symbol",
+          "type": "svg",
+          "source": "assets/surface-symbol.svg"
+        }
+      ]
     }
   ]
 }

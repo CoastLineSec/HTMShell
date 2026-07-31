@@ -10,11 +10,11 @@ use std::time::Instant;
 
 use crate::component::{
     ComponentCatalog, ComponentExport, ComponentInputDeclaration, ComponentInputName,
-    ComponentInputType, ComponentName, ComponentSlotDeclaration, ComponentSlotName,
-    ComponentValidationTotals, ExpectedComponentDefinition, MAX_COMPONENT_EXPORTS_PER_PACKAGE,
-    MAX_COMPONENT_INPUTS, MAX_COMPONENT_SLOTS, MAX_COMPONENT_SOURCE_BYTES, PreparedDocument,
-    build_component_catalog, parse_component_input_default, parse_component_source,
-    prepare_root_document,
+    ComponentInputType, ComponentName, ComponentResourceKindSet, ComponentSlotDeclaration,
+    ComponentSlotName, ComponentValidationTotals, ExpectedComponentDefinition,
+    MAX_COMPONENT_EXPORTS_PER_PACKAGE, MAX_COMPONENT_INPUTS, MAX_COMPONENT_SLOTS,
+    MAX_COMPONENT_SOURCE_BYTES, PreparedDocument, build_component_catalog,
+    parse_component_input_default, parse_component_source, prepare_root_document,
 };
 use crate::component_resource::{
     ComponentResourceAssociation, ComponentResourceCatalog, ComponentResourceDeclaration,
@@ -24,7 +24,7 @@ use crate::component_resource::{
     MAX_COMPONENT_RESOURCE_DECLARATIONS, MAX_COMPONENT_RESOURCE_PATH_BYTES,
     MAX_COMPONENT_RESOURCE_PATH_COMPONENTS, MAX_COMPONENT_RESOURCE_SNAPSHOT_DECODED_BYTES,
     MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE, MAX_COMPONENT_SVG_SOURCE_BYTES,
-    RasterDecodeErrorKind,
+    RasterDecodeErrorKind, SurfaceResourceAssociation, SurfaceResourceOwner,
 };
 use crate::component_style::{
     ComponentStyleCatalog, ComponentStyleValidationTotals, ComponentStylesheetAssociation,
@@ -146,7 +146,31 @@ pub enum PackageErrorKind {
     ComponentInputBindingNotSupported,
     ComponentStateReferenceInputNotSupported,
     ComponentActionReferenceInputNotSupported,
-    ComponentResourceReferenceInputNotSupported,
+    InvalidComponentResourceReferenceInputDeclaration,
+    ComponentResourceReferenceKindsMissing,
+    ComponentResourceReferenceKindDuplicate,
+    ComponentResourceReferenceKindUnsupported,
+    ComponentResourceReferenceDefaultForbidden,
+    ComponentResourceReferenceRequiredFlagInvalid,
+    ComponentResourceReferenceAssignmentMissing,
+    ComponentResourceReferenceAssignmentMalformed,
+    ComponentResourceReferenceDirectResourceUnknown,
+    ComponentResourceReferenceDirectResourceWrongOwner,
+    ComponentResourceReferenceDirectResourceWrongKind,
+    ComponentResourceReferenceForwardingSourceUnknown,
+    ComponentResourceReferenceForwardingSourceWrongType,
+    ComponentResourceReferenceForwardingKindsIncompatible,
+    ComponentResourceReferenceForwardingDepth,
+    ComponentResourceReferenceConsumerMalformed,
+    ComponentResourceReferenceConsumerUnknown,
+    ComponentResourceReferenceConsumerWrongType,
+    ComponentResourceReferenceValueInvalid,
+    ComponentResourceReferenceValueLimit,
+    ComponentResourceReferenceUsageInvalid,
+    InvalidSurfaceResourceDeclaration,
+    DuplicateSurfaceResourceName,
+    SurfaceResourceDeclarationLimit,
+    SurfaceResourceAssociationInvalid,
     InvalidComponentSlotDeclaration,
     InvalidComponentSlotName,
     UnsupportedNamedComponentSlot,
@@ -502,6 +526,8 @@ pub enum SurfacePreset {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceTemplate {
     id: String,
+    resource_owner: SurfaceResourceOwner,
+    resources: Arc<[ComponentResourceDeclaration]>,
     document: PathBuf,
     canonical_document: PathBuf,
     html: Arc<str>,
@@ -514,6 +540,14 @@ pub struct SurfaceTemplate {
 impl SurfaceTemplate {
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    pub fn resource_owner(&self) -> &SurfaceResourceOwner {
+        &self.resource_owner
+    }
+
+    pub fn resources(&self) -> &[ComponentResourceDeclaration] {
+        &self.resources
     }
 
     pub fn document(&self) -> &Path {
@@ -1081,6 +1115,7 @@ struct PackageGraphDiagnostic<'a> {
     component_stylesheet_sources: Vec<ComponentStylesheetSourceDiagnostic>,
     component_raster_sources: Vec<ComponentRasterSourceDiagnostic>,
     component_svg_sources: Vec<ComponentSvgSourceDiagnostic>,
+    surface_resource_associations: Vec<SurfaceResourceAssociationDiagnostic>,
     component_resource_totals: ComponentResourceTotalsDiagnostic,
     prepared_root_documents: Vec<PreparedDocumentDiagnostic<'a>>,
 }
@@ -1119,6 +1154,7 @@ struct ComponentInputDeclarationDiagnostic {
     input_type: &'static str,
     required: bool,
     default: Option<String>,
+    resource_types: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1171,6 +1207,17 @@ struct ComponentSvgSourceDiagnostic {
 #[derive(Debug, Serialize)]
 struct ComponentResourceAssociationDiagnostic {
     identity: String,
+    source_identity: String,
+    name: String,
+    resource_type: &'static str,
+    path: String,
+    ordinal: u16,
+}
+
+#[derive(Debug, Serialize)]
+struct SurfaceResourceAssociationDiagnostic {
+    identity: String,
+    owner: String,
     source_identity: String,
     name: String,
     resource_type: &'static str,
@@ -1242,6 +1289,7 @@ struct PreparedDocumentDiagnostic<'a> {
     referenced_definitions: usize,
     expanded_nodes: usize,
     maximum_nesting_depth: usize,
+    resource_reference_values: usize,
     instance_paths: &'a [String],
     inputs: Vec<ComponentInstanceInputDiagnostic>,
     consumers: Vec<ComponentInputConsumerDiagnostic>,
@@ -1266,6 +1314,8 @@ struct ComponentResourceUsageDiagnostic {
     resource_type: &'static str,
     source: String,
     source_ordinal: u32,
+    original_owner: String,
+    input_value: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1319,6 +1369,10 @@ struct ComponentInputValueDiagnostic {
     input_type: &'static str,
     value: String,
     provenance: crate::ComponentInputProvenance,
+    resource_source_identity: Option<String>,
+    resource_semantic_version: Option<String>,
+    resource_owner: Option<String>,
+    forwarding: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1343,6 +1397,7 @@ impl<'a> PackageGraphDiagnostic<'a> {
                         referenced_definitions: stats.referenced_definitions,
                         expanded_nodes: stats.expanded_nodes,
                         maximum_nesting_depth: stats.maximum_nesting_depth,
+                        resource_reference_values: stats.resource_reference_values,
                         instance_paths: prepared.logical_instance_paths(),
                         inputs: diagnostics.inputs,
                         consumers: diagnostics.consumers,
@@ -1375,6 +1430,7 @@ impl<'a> PackageGraphDiagnostic<'a> {
                     referenced_definitions: stats.referenced_definitions,
                     expanded_nodes: stats.expanded_nodes,
                     maximum_nesting_depth: stats.maximum_nesting_depth,
+                    resource_reference_values: stats.resource_reference_values,
                     instance_paths: prepared.logical_instance_paths(),
                     inputs: diagnostics.inputs,
                     consumers: diagnostics.consumers,
@@ -1574,6 +1630,23 @@ impl<'a> PackageGraphDiagnostic<'a> {
                     })
                 })
                 .collect(),
+            surface_resource_associations: snapshot
+                .component_resources()
+                .surface_associations()
+                .iter()
+                .map(|association| SurfaceResourceAssociationDiagnostic {
+                    identity: association.deterministic_id(snapshot.generation()),
+                    owner: association.owner().deterministic_string(),
+                    source_identity: association
+                        .source()
+                        .id()
+                        .deterministic_string(snapshot.generation()),
+                    name: association.name().to_string(),
+                    resource_type: association.source().kind().as_str(),
+                    path: association.source().path().to_string(),
+                    ordinal: association.ordinal(),
+                })
+                .collect(),
             component_resource_totals: {
                 let totals = snapshot.component_resources().totals();
                 ComponentResourceTotalsDiagnostic {
@@ -1614,6 +1687,12 @@ fn input_declaration_diagnostics(
             default: declaration
                 .default()
                 .map(crate::ComponentInputValue::canonical_string),
+            resource_types: declaration
+                .resource_types()
+                .into_iter()
+                .flat_map(ComponentResourceKindSet::canonical_kinds)
+                .map(ComponentResourceKind::as_str)
+                .collect(),
         })
         .collect()
 }
@@ -1720,11 +1799,41 @@ fn prepared_component_diagnostics(
                 .inputs()
                 .values()
                 .iter()
-                .map(|input| ComponentInputValueDiagnostic {
-                    name: input.declaration().name().to_string(),
-                    input_type: input.declaration().input_type().as_str(),
-                    value: input.value().canonical_string(),
-                    provenance: input.provenance(),
+                .map(|input| {
+                    let resource = match input.value() {
+                        crate::ComponentInputValue::ResourceReference(resource) => Some(resource),
+                        _ => None,
+                    };
+                    ComponentInputValueDiagnostic {
+                        name: input.declaration().name().to_string(),
+                        input_type: input.declaration().input_type().as_str(),
+                        value: input.value().canonical_string(),
+                        provenance: input.provenance(),
+                        resource_source_identity: resource.map(|resource| {
+                            resource
+                                .source()
+                                .id()
+                                .deterministic_string(snapshot.generation())
+                        }),
+                        resource_semantic_version: resource.map(|resource| {
+                            resource
+                                .source()
+                                .semantic_version()
+                                .deterministic_string()
+                                .to_owned()
+                        }),
+                        resource_owner: resource
+                            .map(|resource| resource.origin().owner_diagnostic()),
+                        forwarding: resource
+                            .map(|resource| {
+                                resource
+                                    .forwarding_provenance()
+                                    .iter()
+                                    .map(ToString::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    }
                 })
                 .collect(),
         })
@@ -1749,11 +1858,13 @@ fn prepared_component_diagnostics(
             identity: usage.id().deterministic_string().to_owned(),
             instance: usage.instance().deterministic_string(),
             dom_slot: usage.node_slot(),
-            association: usage.association().deterministic_id(snapshot.generation()),
-            name: usage.association().name().to_string(),
+            association: usage.origin().deterministic_id(snapshot.generation()),
+            name: usage.origin().name().to_string(),
             resource_type: usage.source().kind().as_str(),
             source: usage.source().path().to_string(),
             source_ordinal: usage.template_source_ordinal(),
+            original_owner: usage.origin().owner_diagnostic(),
+            input_value: usage.input_value_id().map(str::to_owned),
         })
         .collect();
     let projections = instantiated
@@ -2115,6 +2226,8 @@ struct RawComponentInput {
     input_type: String,
     required: Option<bool>,
     default: Option<serde_json::Value>,
+    #[serde(rename = "resourceTypes")]
+    resource_types: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2140,6 +2253,8 @@ struct RawPanelTemplate {
     edge: RawPanelEdge,
     thickness: u32,
     reserve_space: bool,
+    #[serde(default)]
+    resources: Vec<RawComponentResource>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2149,6 +2264,8 @@ struct RawOverlayTemplate {
     document: String,
     outputs: RawOutputScope,
     initially_open: bool,
+    #[serde(default)]
+    resources: Vec<RawComponentResource>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2417,7 +2534,13 @@ impl<'a> GraphBuilder<'a> {
         }
         validate_v1_id("manifest id", &raw.id)?;
         let package_id = PackageId::compatibility(format!("local.{}", raw.id))?;
-        let topology = self.validate_topology(raw.version, &raw.id, raw.surfaces, package_root)?;
+        let topology = self.validate_topology(
+            raw.version,
+            &raw.id,
+            &package_id,
+            raw.surfaces,
+            package_root,
+        )?;
         Ok(ParsedPackage {
             id: package_id,
             kind: PackageKind::Shell,
@@ -2462,9 +2585,13 @@ impl<'a> GraphBuilder<'a> {
         let dependencies = validate_dependencies(raw.dependencies, &id)?;
         let components = validate_component_exports(raw.components, &id)?;
         let topology = match (kind, raw.surfaces) {
-            (PackageKind::Shell, Some(surfaces)) => {
-                Some(self.validate_topology(raw.version, id.as_str(), surfaces, package_root)?)
-            }
+            (PackageKind::Shell, Some(surfaces)) => Some(self.validate_topology(
+                raw.version,
+                id.as_str(),
+                &id,
+                surfaces,
+                package_root,
+            )?),
             (PackageKind::Shell, None) => {
                 return Err(PackageLoadError::new(
                     PackageErrorKind::RootTopologyFailure,
@@ -2497,6 +2624,7 @@ impl<'a> GraphBuilder<'a> {
         &mut self,
         schema: u32,
         shell_id: &str,
+        package_id: &PackageId,
         raw_surfaces: Vec<RawSurfaceTemplate>,
         package_root: &Path,
     ) -> Result<ShellManifest, PackageLoadError> {
@@ -2520,7 +2648,7 @@ impl<'a> GraphBuilder<'a> {
         let mut overlay_count = 0usize;
         let mut surfaces = Vec::with_capacity(raw_surfaces.len());
         for raw_surface in raw_surfaces {
-            let (id, document, outputs, preset) = match raw_surface {
+            let (id, document, outputs, preset, raw_resources) = match raw_surface {
                 RawSurfaceTemplate::Panel(panel) => {
                     panel_count += 1;
                     if panel.thickness == 0 || panel.thickness > MAX_PANEL_THICKNESS {
@@ -2543,6 +2671,7 @@ impl<'a> GraphBuilder<'a> {
                             thickness: panel.thickness,
                             reserve_space: panel.reserve_space,
                         }),
+                        panel.resources,
                     )
                 }
                 RawSurfaceTemplate::Overlay(overlay) => {
@@ -2554,6 +2683,7 @@ impl<'a> GraphBuilder<'a> {
                         SurfacePreset::Overlay(OverlayTemplate {
                             initially_open: overlay.initially_open,
                         }),
+                        overlay.resources,
                     )
                 }
             };
@@ -2564,6 +2694,14 @@ impl<'a> GraphBuilder<'a> {
                     format!("duplicate surface id `{id}`"),
                 ));
             }
+            if schema != SCHEMA_V2 && !raw_resources.is_empty() {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::InvalidSurfaceResourceDeclaration,
+                    "surface resources require a schema-v2 shell package",
+                )
+                .in_package(package_id.to_string()));
+            }
+            let resources = validate_surface_resources(raw_resources, package_id, &id)?;
             let relative = validate_document_path(&id, &document)?;
             let requested = package_root.join(&relative);
             let canonical_document =
@@ -2592,6 +2730,8 @@ impl<'a> GraphBuilder<'a> {
             )?;
             let namespace = format!("htmshell-{shell_id}-{id}");
             surfaces.push(SurfaceTemplate {
+                resource_owner: SurfaceResourceOwner::new(package_id.clone(), id.clone()),
+                resources: resources.into(),
                 id,
                 document: relative,
                 canonical_document,
@@ -2811,11 +2951,28 @@ impl<'a> GraphBuilder<'a> {
         components: &ComponentCatalog,
     ) -> Result<ComponentResourceCatalog, PackageLoadError> {
         let packages = self.ordered.clone();
+        let surface_catalogs = self
+            .root_topology
+            .as_ref()
+            .map(|manifest| {
+                manifest
+                    .surfaces
+                    .iter()
+                    .map(|surface| {
+                        (
+                            surface.resource_owner().clone(),
+                            surface.resources().to_vec(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let mut sources = Vec::new();
         let mut associations = Vec::new();
+        let mut surface_associations = Vec::new();
         let mut totals = ComponentResourceValidationTotals::default();
         for package in &packages {
-            let package_associations = package
+            let component_associations = package
                 .components()
                 .iter()
                 .try_fold(0usize, |total, export| {
@@ -2825,6 +2982,29 @@ impl<'a> GraphBuilder<'a> {
                     PackageLoadError::new(
                         PackageErrorKind::ComponentResourceAssociationLimit,
                         "component resource association count overflowed",
+                    )
+                })?;
+            let local_surface_catalogs = surface_catalogs
+                .iter()
+                .filter(|(owner, _)| owner.package_id() == package.id())
+                .collect::<Vec<_>>();
+            let surface_association_count = local_surface_catalogs
+                .iter()
+                .try_fold(0usize, |total, (_, declarations)| {
+                    total.checked_add(declarations.len())
+                })
+                .ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceAssociationLimit,
+                        "surface resource association count overflowed",
+                    )
+                })?;
+            let package_associations = component_associations
+                .checked_add(surface_association_count)
+                .ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceAssociationLimit,
+                        "package resource association count overflowed",
                     )
                 })?;
             if package_associations > MAX_COMPONENT_RESOURCE_ASSOCIATIONS_PER_PACKAGE {
@@ -2842,6 +3022,12 @@ impl<'a> GraphBuilder<'a> {
                 .iter()
                 .flat_map(ComponentExport::resources)
                 .map(|declaration| (declaration.kind(), declaration.source().clone()))
+                .chain(
+                    local_surface_catalogs
+                        .iter()
+                        .flat_map(|(_, declarations)| declarations.iter())
+                        .map(|declaration| (declaration.kind(), declaration.source().clone())),
+                )
                 .collect::<BTreeSet<_>>();
             if unique_sources.len() > MAX_COMPONENT_RESOURCE_SOURCES_PER_PACKAGE {
                 return Err(PackageLoadError::new(
@@ -2859,19 +3045,32 @@ impl<'a> GraphBuilder<'a> {
                 Arc<ComponentResourceSource>,
             >::new();
             for (kind, path) in unique_sources {
-                let (declaring_component, declaring_resource_name) = package
-                    .components()
-                    .iter()
-                    .find_map(|export| {
-                        export.resources().iter().find_map(|declaration| {
-                            (declaration.kind() == kind && declaration.source() == &path)
-                                .then_some((export.name(), declaration.name()))
-                        })
+                let component_declaration = package.components().iter().find_map(|export| {
+                    export.resources().iter().find_map(|declaration| {
+                        (declaration.kind() == kind && declaration.source() == &path)
+                            .then_some((export.name(), declaration.name()))
                     })
-                    .expect("unique component resource paths come from one declaration");
+                });
+                let surface_declaration =
+                    local_surface_catalogs
+                        .iter()
+                        .find_map(|(owner, declarations)| {
+                            declarations.iter().find_map(|declaration| {
+                                (declaration.kind() == kind && declaration.source() == &path)
+                                    .then_some((owner.surface_id(), declaration.name()))
+                            })
+                        });
+                let (declaring_owner, declaring_resource_name) =
+                    if let Some((component, name)) = component_declaration {
+                        (format!("component `{component}`"), name)
+                    } else if let Some((surface, name)) = surface_declaration {
+                        (format!("surface `{surface}`"), name)
+                    } else {
+                        unreachable!("unique resource paths come from one declaration")
+                    };
                 let encoded = self.read_component_resource(
                     package,
-                    declaring_component,
+                    &declaring_owner,
                     declaring_resource_name,
                     kind,
                     &path,
@@ -2897,7 +3096,7 @@ impl<'a> GraphBuilder<'a> {
                         .map_err(|error| {
                             component_raster_decode_error(
                                 package,
-                                declaring_component,
+                                &declaring_owner,
                                 declaring_resource_name,
                                 &path,
                                 error,
@@ -2919,7 +3118,7 @@ impl<'a> GraphBuilder<'a> {
                         .map_err(|error| {
                             component_svg_parse_error(
                                 package,
-                                declaring_component,
+                                &declaring_owner,
                                 declaring_resource_name,
                                 &path,
                                 error,
@@ -3055,14 +3254,51 @@ impl<'a> GraphBuilder<'a> {
                         })?;
                 }
             }
+            for (owner, declarations) in local_surface_catalogs {
+                for (ordinal, declaration) in declarations.iter().enumerate() {
+                    let source = loaded
+                        .get(&(declaration.kind(), declaration.source().clone()))
+                        .ok_or_else(|| {
+                            PackageLoadError::new(
+                                PackageErrorKind::SurfaceResourceAssociationInvalid,
+                                format!(
+                                    "surface `{}` resource `{}` source was not loaded",
+                                    owner.surface_id(),
+                                    declaration.name()
+                                ),
+                            )
+                            .in_package(package.id().to_string())
+                            .at(declaration.source().as_str())
+                        })?;
+                    surface_associations.push(SurfaceResourceAssociation::new(
+                        (*owner).clone(),
+                        declaration.name().clone(),
+                        Arc::clone(source),
+                        u16::try_from(ordinal)
+                            .expect("surface resource declaration limit fits u16"),
+                    ));
+                    totals.association_count =
+                        totals.association_count.checked_add(1).ok_or_else(|| {
+                            PackageLoadError::new(
+                                PackageErrorKind::ComponentResourceAssociationLimit,
+                                "surface resource association count overflowed",
+                            )
+                        })?;
+                }
+            }
         }
-        Ok(ComponentResourceCatalog::new(sources, associations, totals))
+        Ok(ComponentResourceCatalog::new(
+            sources,
+            associations,
+            surface_associations,
+            totals,
+        ))
     }
 
     fn read_component_resource(
         &mut self,
         package: &ResolvedPackage,
-        component: &ComponentName,
+        owner_label: &str,
         resource_name: &ComponentResourceName,
         kind: ComponentResourceKind,
         path: &ComponentResourcePath,
@@ -3078,7 +3314,7 @@ impl<'a> GraphBuilder<'a> {
             .map_err(|error| {
                 component_resource_read_error(
                     package,
-                    component,
+                    owner_label,
                     resource_name,
                     kind,
                     path,
@@ -3298,6 +3534,9 @@ impl<'a> GraphBuilder<'a> {
                     &path_to_logical(surface.document()),
                     &root_package,
                     &components,
+                    &component_resources,
+                    Some(surface.resource_owner()),
+                    surface.resources(),
                 )?;
                 prepared.select_style_matching_mode(
                     component_styles.has_reachable_styles(prepared.referenced_definition_keys()),
@@ -3311,6 +3550,9 @@ impl<'a> GraphBuilder<'a> {
                 &path_to_logical(entry.logical_path()),
                 &root_package,
                 &components,
+                &component_resources,
+                None,
+                &[],
             )?;
             prepared.select_style_matching_mode(
                 component_styles.has_reachable_styles(prepared.referenced_definition_keys()),
@@ -3470,11 +3712,15 @@ fn build_headless_candidate(
                 components: Vec::new(),
             });
             let components = ComponentCatalog::empty();
+            let component_resources = ComponentResourceCatalog::default();
             let prepared = Arc::new(prepare_root_document(
                 entry.html(),
                 "index.html",
                 &package,
                 &components,
+                &component_resources,
+                None,
+                &[],
             )?);
             let mut entry = entry;
             entry.prepared_document = Some(prepared);
@@ -3486,7 +3732,7 @@ fn build_headless_candidate(
                 headless_entry: Some(entry),
                 components,
                 component_styles: ComponentStyleCatalog::empty(),
-                component_resources: ComponentResourceCatalog::default(),
+                component_resources,
                 bytes_read: budget.bytes,
                 measurements: ManifestMeasurements::default(),
             })
@@ -3723,6 +3969,68 @@ fn validate_component_resources(
     Ok(declarations)
 }
 
+fn validate_surface_resources(
+    raw: Vec<RawComponentResource>,
+    owner: &PackageId,
+    surface: &str,
+) -> Result<Vec<ComponentResourceDeclaration>, PackageLoadError> {
+    if raw.len() > MAX_COMPONENT_RESOURCE_DECLARATIONS {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::SurfaceResourceDeclarationLimit,
+            format!(
+                "surface `{surface}` declares {} resources; limit is {MAX_COMPONENT_RESOURCE_DECLARATIONS}",
+                raw.len()
+            ),
+        )
+        .in_package(owner.to_string()));
+    }
+    let mut names = BTreeSet::new();
+    let mut declarations = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let name = ComponentResourceName::parse(&entry.name).map_err(|error| {
+            PackageLoadError::new(
+                PackageErrorKind::InvalidSurfaceResourceDeclaration,
+                format!(
+                    "surface `{surface}` resource name `{}` is invalid: {}",
+                    entry.name, error.message
+                ),
+            )
+            .in_package(owner.to_string())
+        })?;
+        if !names.insert(name.clone()) {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::DuplicateSurfaceResourceName,
+                format!("surface `{surface}` repeats resource name `{name}`"),
+            )
+            .in_package(owner.to_string()));
+        }
+        let kind = match entry.resource_type.as_str() {
+            "raster" => ComponentResourceKind::Raster,
+            "svg" => ComponentResourceKind::Svg,
+            value => {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::UnsupportedComponentResourceType,
+                    format!("surface `{surface}` resource `{name}` has unsupported type `{value}`"),
+                )
+                .in_package(owner.to_string()));
+            }
+        };
+        let source = validate_component_resource_path(&entry.source).map_err(|error| {
+            PackageLoadError::new(
+                error.kind,
+                format!(
+                    "surface `{surface}` resource `{name}` source is invalid: {}",
+                    error.message
+                ),
+            )
+            .in_package(owner.to_string())
+            .at(entry.source)
+        })?;
+        declarations.push(ComponentResourceDeclaration::new(name, kind, source));
+    }
+    Ok(declarations)
+}
+
 fn validate_component_resource_path(
     value: &str,
 ) -> Result<ComponentResourcePath, PackageLoadError> {
@@ -3894,6 +4202,78 @@ fn validate_component_inputs(
                 .in_package(owner.to_string())
                 .at(format!("component {component} input {name}"))
         })?;
+        let resource_types = if input_type == ComponentInputType::ResourceReference {
+            let raw_kinds = input.resource_types.ok_or_else(|| {
+                PackageLoadError::new(
+                    PackageErrorKind::ComponentResourceReferenceKindsMissing,
+                    format!("resource-reference component input `{name}` requires `resourceTypes`"),
+                )
+                .in_package(owner.to_string())
+            })?;
+            if raw_kinds.is_empty() {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentResourceReferenceKindsMissing,
+                    format!(
+                        "resource-reference component input `{name}` requires an accepted kind"
+                    ),
+                )
+                .in_package(owner.to_string()));
+            }
+            let mut kinds = BTreeSet::new();
+            for raw_kind in raw_kinds {
+                let kind = match raw_kind.as_str() {
+                    "raster" => ComponentResourceKind::Raster,
+                    "svg" => ComponentResourceKind::Svg,
+                    value => {
+                        return Err(PackageLoadError::new(
+                            PackageErrorKind::ComponentResourceReferenceKindUnsupported,
+                            format!(
+                                "resource-reference component input `{name}` has unsupported resource kind `{value}`"
+                            ),
+                        )
+                        .in_package(owner.to_string()));
+                    }
+                };
+                if !kinds.insert(kind) {
+                    return Err(PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceReferenceKindDuplicate,
+                        format!(
+                            "resource-reference component input `{name}` repeats resource kind `{}`",
+                            kind.as_str()
+                        ),
+                    )
+                    .in_package(owner.to_string()));
+                }
+            }
+            if input.required != Some(true) {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentResourceReferenceRequiredFlagInvalid,
+                    format!(
+                        "resource-reference component input `{name}` requires `required: true`"
+                    ),
+                )
+                .in_package(owner.to_string()));
+            }
+            if input.default.is_some() {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentResourceReferenceDefaultForbidden,
+                    format!("resource-reference component input `{name}` cannot declare a default"),
+                )
+                .in_package(owner.to_string()));
+            }
+            Some(ComponentResourceKindSet::new(kinds))
+        } else {
+            if input.resource_types.is_some() {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::InvalidComponentInputDeclaration,
+                    format!(
+                        "component input `{name}` may use `resourceTypes` only with `type: \"resource-reference\"`"
+                    ),
+                )
+                .in_package(owner.to_string()));
+            }
+            None
+        };
         let required = input.required.unwrap_or(false);
         if required && input.default.is_some() {
             return Err(PackageLoadError::new(
@@ -3920,7 +4300,11 @@ fn validate_component_inputs(
                     .at(format!("component {component} input {name}"))
             })?;
         declarations.push(ComponentInputDeclaration::new(
-            name, input_type, required, default,
+            name,
+            input_type,
+            required,
+            default,
+            resource_types,
         ));
     }
     Ok(declarations)
@@ -4346,7 +4730,7 @@ fn component_stylesheet_css_error(
 
 fn component_resource_read_error(
     package: &ResolvedPackage,
-    component: &ComponentName,
+    owner_label: &str,
     resource_name: &ComponentResourceName,
     resource_kind: ComponentResourceKind,
     path: &ComponentResourcePath,
@@ -4394,7 +4778,7 @@ fn component_resource_read_error(
     PackageLoadError::new(
         base.kind,
         format!(
-            "component `{component}` {resource_label} resource `{resource_name}` source `{path}`: {}",
+            "{owner_label} {resource_label} resource `{resource_name}` source `{path}`: {}",
             base.message
         ),
     )
@@ -4404,7 +4788,7 @@ fn component_resource_read_error(
 
 fn component_svg_parse_error(
     package: &ResolvedPackage,
-    component: &ComponentName,
+    owner_label: &str,
     resource_name: &ComponentResourceName,
     path: &ComponentResourcePath,
     error: ComponentSvgError,
@@ -4475,7 +4859,7 @@ fn component_svg_parse_error(
     PackageLoadError::new(
         kind,
         format!(
-            "component `{component}` SVG resource `{resource_name}` source `{path}` at {}:{}: {}",
+            "{owner_label} SVG resource `{resource_name}` source `{path}` at {}:{}: {}",
             error.line, error.column, error.message
         ),
     )
@@ -4485,7 +4869,7 @@ fn component_svg_parse_error(
 
 fn component_raster_decode_error(
     package: &ResolvedPackage,
-    component: &ComponentName,
+    owner_label: &str,
     resource_name: &ComponentResourceName,
     path: &ComponentResourcePath,
     error: crate::component_resource::RasterDecodeError,
@@ -4507,7 +4891,7 @@ fn component_raster_decode_error(
     PackageLoadError::new(
         kind,
         format!(
-            "component `{component}` raster resource `{resource_name}` source `{path}`: {}",
+            "{owner_label} raster resource `{resource_name}` source `{path}`: {}",
             error.message
         ),
     )

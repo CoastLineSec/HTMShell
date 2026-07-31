@@ -1,11 +1,12 @@
+use crate::component_resource::{ResourceOriginAssociation, SurfaceResourceOwner};
 use crate::package::{
     PackageAlias, PackageErrorKind, PackageId, PackageLoadError, PackageSchemaSource,
     PackageSnapshotGeneration, ResolvedPackage,
 };
 use crate::style_owner::{StyleActivationMode, StyleOwnedNodeKind, StyleOwnerId, StyleOwnership};
 use crate::{
-    ComponentResourceCatalog, ComponentResourceDeclaration, ComponentResourceName,
-    ComponentResourceUsage, ComponentStylesheetPath,
+    ComponentResourceCatalog, ComponentResourceDeclaration, ComponentResourceKind,
+    ComponentResourceName, ComponentResourceUsage, ComponentStylesheetPath,
 };
 use crate::{NumericValue, StateToken, StateValueFormat};
 use blitz_dom::node::{ImageData, NodeData, RasterImageData, SpecialElementData, SvgImageData};
@@ -37,6 +38,7 @@ pub const MAX_COMPONENT_INPUT_NAME_BYTES: usize = 64;
 pub const MAX_COMPONENT_INPUT_STRING_BYTES: usize = 4_096;
 pub const MAX_COMPONENT_INPUT_LITERAL_BYTES: usize = 16 * 1_024;
 pub const MAX_COMPONENT_INPUT_ATTRIBUTES: usize = 64;
+pub const MAX_RESOURCE_REFERENCE_VALUES_PER_PREPARED_ROOT: usize = 16_384;
 pub const MAX_COMPONENT_SLOTS: usize = 32;
 pub const MAX_COMPONENT_SLOT_NAME_BYTES: usize = 64;
 
@@ -122,6 +124,8 @@ pub enum ComponentInputType {
     Token,
     Color,
     Length,
+    #[serde(rename = "resource-reference")]
+    ResourceReference,
 }
 
 impl ComponentInputType {
@@ -133,6 +137,7 @@ impl ComponentInputType {
             "token" => Ok(Self::Token),
             "color" => Ok(Self::Color),
             "length" => Ok(Self::Length),
+            "resource-reference" => Ok(Self::ResourceReference),
             "state-reference" => Err(PackageLoadError::new(
                 PackageErrorKind::ComponentStateReferenceInputNotSupported,
                 "state-reference component inputs are not supported",
@@ -140,10 +145,6 @@ impl ComponentInputType {
             "action-reference" => Err(PackageLoadError::new(
                 PackageErrorKind::ComponentActionReferenceInputNotSupported,
                 "action-reference component inputs are not supported",
-            )),
-            "resource-reference" => Err(PackageLoadError::new(
-                PackageErrorKind::ComponentResourceReferenceInputNotSupported,
-                "resource-reference component inputs are not supported",
             )),
             _ => Err(PackageLoadError::new(
                 PackageErrorKind::UnsupportedComponentInputType,
@@ -160,7 +161,119 @@ impl ComponentInputType {
             Self::Token => "token",
             Self::Color => "color",
             Self::Length => "length",
+            Self::ResourceReference => "resource-reference",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComponentResourceKindSet(u8);
+
+impl ComponentResourceKindSet {
+    const RASTER: u8 = 1;
+    const SVG: u8 = 2;
+
+    pub fn new(kinds: impl IntoIterator<Item = ComponentResourceKind>) -> Self {
+        let mut bits = 0;
+        for kind in kinds {
+            bits |= match kind {
+                ComponentResourceKind::Raster => Self::RASTER,
+                ComponentResourceKind::Svg => Self::SVG,
+            };
+        }
+        Self(bits)
+    }
+
+    pub fn contains(self, kind: ComponentResourceKind) -> bool {
+        self.0
+            & match kind {
+                ComponentResourceKind::Raster => Self::RASTER,
+                ComponentResourceKind::Svg => Self::SVG,
+            }
+            != 0
+    }
+
+    pub fn is_subset_of(self, other: Self) -> bool {
+        self.0 & !other.0 == 0
+    }
+
+    pub fn canonical_kinds(self) -> impl Iterator<Item = ComponentResourceKind> {
+        [ComponentResourceKind::Raster, ComponentResourceKind::Svg]
+            .into_iter()
+            .filter(move |kind| self.contains(*kind))
+    }
+
+    pub fn canonical_string(self) -> String {
+        self.canonical_kinds()
+            .map(ComponentResourceKind::as_str)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ComponentResourceReferenceValue {
+    id: Arc<str>,
+    source: Arc<crate::ComponentResourceSource>,
+    origin: ResourceOriginAssociation,
+    forwarding: Arc<[Arc<str>]>,
+}
+
+impl ComponentResourceReferenceValue {
+    fn new(
+        id: Arc<str>,
+        source: Arc<crate::ComponentResourceSource>,
+        origin: ResourceOriginAssociation,
+        forwarding: Arc<[Arc<str>]>,
+    ) -> Self {
+        Self {
+            id,
+            source,
+            origin,
+            forwarding,
+        }
+    }
+
+    pub fn deterministic_id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn source(&self) -> &Arc<crate::ComponentResourceSource> {
+        &self.source
+    }
+
+    pub(crate) fn origin(&self) -> &ResourceOriginAssociation {
+        &self.origin
+    }
+
+    pub(crate) fn forwarding_provenance(&self) -> &[Arc<str>] {
+        &self.forwarding
+    }
+}
+
+impl PartialEq for ComponentResourceReferenceValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for ComponentResourceReferenceValue {}
+
+impl PartialOrd for ComponentResourceReferenceValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ComponentResourceReferenceValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+
+impl std::hash::Hash for ComponentResourceReferenceValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.id, state);
     }
 }
 
@@ -246,6 +359,7 @@ pub enum ComponentInputValue {
     Token(StateToken),
     Color(ComponentColor),
     Length(ComponentLength),
+    ResourceReference(Arc<ComponentResourceReferenceValue>),
 }
 
 impl ComponentInputValue {
@@ -257,6 +371,7 @@ impl ComponentInputValue {
             Self::Token(_) => ComponentInputType::Token,
             Self::Color(_) => ComponentInputType::Color,
             Self::Length(_) => ComponentInputType::Length,
+            Self::ResourceReference(_) => ComponentInputType::ResourceReference,
         }
     }
 
@@ -268,6 +383,7 @@ impl ComponentInputValue {
             Self::Token(value) => value.as_str().to_owned(),
             Self::Color(value) => value.canonical(),
             Self::Length(value) => value.canonical(),
+            Self::ResourceReference(value) => value.deterministic_id().to_owned(),
         }
     }
 }
@@ -278,6 +394,7 @@ pub struct ComponentInputDeclaration {
     input_type: ComponentInputType,
     required: bool,
     default: Option<ComponentInputValue>,
+    resource_types: Option<ComponentResourceKindSet>,
 }
 
 impl ComponentInputDeclaration {
@@ -286,12 +403,14 @@ impl ComponentInputDeclaration {
         input_type: ComponentInputType,
         required: bool,
         default: Option<ComponentInputValue>,
+        resource_types: Option<ComponentResourceKindSet>,
     ) -> Self {
         Self {
             name,
             input_type,
             required,
             default,
+            resource_types,
         }
     }
 
@@ -309,6 +428,10 @@ impl ComponentInputDeclaration {
 
     pub fn default(&self) -> Option<&ComponentInputValue> {
         self.default.as_ref()
+    }
+
+    pub fn resource_types(&self) -> Option<ComponentResourceKindSet> {
+        self.resource_types
     }
 }
 
@@ -364,10 +487,6 @@ impl ResolvedComponentInputs {
         }
     }
 
-    fn for_instance(&self) -> Self {
-        Self::new(self.values.to_vec())
-    }
-
     pub fn values(&self) -> &[ResolvedComponentInput] {
         &self.values
     }
@@ -396,6 +515,92 @@ impl ResolvedComponentInputs {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DirectResourceBindingOwner {
+    Component(ComponentDefinitionKey),
+    Surface(SurfaceResourceOwner),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ComponentInputBindingValue {
+    Literal(ComponentInputValue),
+    DirectResource {
+        owner: DirectResourceBindingOwner,
+        name: ComponentResourceName,
+        kind: ComponentResourceKind,
+    },
+    ForwardedResource {
+        input: ComponentInputName,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComponentInputBinding {
+    declaration: ComponentInputDeclaration,
+    value: ComponentInputBindingValue,
+    provenance: ComponentInputProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ComponentInputBindings {
+    values: Arc<[ComponentInputBinding]>,
+    version: ComponentInputVersion,
+}
+
+impl ComponentInputBindings {
+    fn new(values: Vec<ComponentInputBinding>) -> Self {
+        let mut serialized = String::from("component-input-bindings-v1;");
+        for value in &values {
+            serialized.push_str(value.declaration.name().as_str());
+            serialized.push(':');
+            serialized.push_str(value.declaration.input_type().as_str());
+            serialized.push(':');
+            if let Some(kinds) = value.declaration.resource_types() {
+                serialized.push_str(&kinds.canonical_string());
+            }
+            serialized.push(':');
+            match &value.value {
+                ComponentInputBindingValue::Literal(literal) => {
+                    serialized.push_str("literal:");
+                    serialized.push_str(&literal.canonical_string());
+                }
+                ComponentInputBindingValue::DirectResource { owner, name, kind } => {
+                    serialized.push_str("direct:");
+                    match owner {
+                        DirectResourceBindingOwner::Component(definition) => {
+                            serialized.push_str(&definition.deterministic_string());
+                        }
+                        DirectResourceBindingOwner::Surface(surface) => {
+                            serialized.push_str(&surface.deterministic_string());
+                        }
+                    }
+                    serialized.push(':');
+                    serialized.push_str(name.as_str());
+                    serialized.push(':');
+                    serialized.push_str(kind.as_str());
+                }
+                ComponentInputBindingValue::ForwardedResource { input } => {
+                    serialized.push_str("forward:");
+                    serialized.push_str(input.as_str());
+                }
+            }
+            serialized.push(';');
+        }
+        Self {
+            values: values.into(),
+            version: ComponentInputVersion(serialized.into()),
+        }
+    }
+
+    fn values(&self) -> &[ComponentInputBinding] {
+        &self.values
+    }
+
+    fn version(&self) -> &ComponentInputVersion {
+        &self.version
+    }
+}
+
 pub(crate) fn parse_component_input_default(
     input_type: ComponentInputType,
     value: &serde_json::Value,
@@ -412,6 +617,12 @@ pub(crate) fn parse_component_input_default(
             | ComponentInputType::Length,
             serde_json::Value::String(value),
         ) => value.clone(),
+        (ComponentInputType::ResourceReference, _) => {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::ComponentResourceReferenceDefaultForbidden,
+                "resource-reference component inputs cannot declare defaults",
+            ));
+        }
         _ => {
             return Err(PackageLoadError::new(
                 PackageErrorKind::InvalidComponentInputDefault,
@@ -484,6 +695,10 @@ fn parse_component_input_literal(
             .map_err(|message| {
                 PackageLoadError::new(PackageErrorKind::InvalidComponentInputLiteral, message)
             }),
+        ComponentInputType::ResourceReference => Err(PackageLoadError::new(
+            PackageErrorKind::ComponentResourceReferenceAssignmentMalformed,
+            "resource-reference inputs require a typed `resource:` or `input:` assignment",
+        )),
     }
 }
 
@@ -1010,6 +1225,11 @@ pub(crate) enum ComponentTemplateNode {
         attributes: Vec<Attribute>,
         source_ordinal: u32,
     },
+    InputResourceImage {
+        input: ComponentInputName,
+        attributes: Vec<Attribute>,
+        source_ordinal: u32,
+    },
     Text {
         value: String,
         source_ordinal: u32,
@@ -1020,7 +1240,7 @@ pub(crate) enum ComponentTemplateNode {
     Host {
         reference: ComponentReference,
         target: ComponentDefinitionKey,
-        inputs: ResolvedComponentInputs,
+        inputs: ComponentInputBindings,
         projections: Arc<[ComponentProjectionPlan]>,
         source_ordinal: u32,
     },
@@ -1050,6 +1270,7 @@ pub struct ComponentDefinition {
     resolved_references: Arc<[(ComponentReference, ComponentDefinitionKey)]>,
     inputs: Arc<[ComponentInputDeclaration]>,
     slots: Arc<[ComponentSlotDefinition]>,
+    resources: Arc<[ComponentResourceDeclaration]>,
 }
 
 impl ComponentDefinition {
@@ -1079,6 +1300,10 @@ impl ComponentDefinition {
 
     pub fn slots(&self) -> &[ComponentSlotDefinition] {
         &self.slots
+    }
+
+    pub fn resources(&self) -> &[ComponentResourceDeclaration] {
+        &self.resources
     }
 
     pub fn default_slot(&self) -> Option<&ComponentSlotDefinition> {
@@ -1142,6 +1367,7 @@ pub(crate) struct UnresolvedComponentDefinition {
     pub source_node_count: usize,
     pub inputs: Arc<[ComponentInputDeclaration]>,
     pub slots: Arc<[ComponentSlotDeclaration]>,
+    pub resources: Arc<[ComponentResourceDeclaration]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1160,6 +1386,11 @@ pub(crate) enum UnresolvedTemplateNode {
     },
     ResourceImage {
         name: ComponentResourceName,
+        attributes: Vec<Attribute>,
+        source_ordinal: u32,
+    },
+    InputResourceImage {
+        input: ComponentInputName,
         attributes: Vec<Attribute>,
         source_ordinal: u32,
     },
@@ -1196,6 +1427,8 @@ pub(crate) enum UnresolvedTemplateNode {
 pub struct PreparedDocument {
     logical_path: String,
     nodes: Arc<[ComponentTemplateNode]>,
+    resource_reference_origins:
+        Arc<BTreeMap<PreparedResourceReferenceBindingKey, ResourceOriginAssociation>>,
     stats: PreparedDocumentStats,
     logical_instance_paths: Arc<[String]>,
     referenced_definition_keys: Arc<[ComponentDefinitionKey]>,
@@ -1240,6 +1473,7 @@ impl PreparedDocument {
         let mut state = InstantiationState {
             catalog,
             resources,
+            prepared_resource_origins: &self.resource_reference_origins,
             generation,
             document_serial,
             style_ownership: StyleOwnership::new(generation, document_serial, 0),
@@ -1250,6 +1484,7 @@ impl PreparedDocument {
             projected_nodes: Vec::new(),
             fallback_nodes: Vec::new(),
             resource_usages: Vec::new(),
+            resource_reference_values: 0,
             projection_node_ordinals: BTreeMap::new(),
         };
         let children = instantiate_nodes(
@@ -1289,12 +1524,28 @@ impl PreparedDocument {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct PreparedResourceReferenceBindingKey {
+    invocation_path: Arc<[u32]>,
+    input: ComponentInputName,
+}
+
+impl PreparedResourceReferenceBindingKey {
+    fn new(invocation_path: &[u32], input: ComponentInputName) -> Self {
+        Self {
+            invocation_path: invocation_path.into(),
+            input,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PreparedDocumentStats {
     pub component_instances: usize,
     pub referenced_definitions: usize,
     pub expanded_nodes: usize,
     pub maximum_nesting_depth: usize,
+    pub resource_reference_values: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1597,6 +1848,8 @@ pub(crate) struct InstantiatedDocument {
 struct InstantiationState<'a> {
     catalog: &'a ComponentCatalog,
     resources: &'a ComponentResourceCatalog,
+    prepared_resource_origins:
+        &'a BTreeMap<PreparedResourceReferenceBindingKey, ResourceOriginAssociation>,
     generation: PackageSnapshotGeneration,
     document_serial: u64,
     style_ownership: StyleOwnership,
@@ -1607,7 +1860,156 @@ struct InstantiationState<'a> {
     projected_nodes: Vec<ProjectedNodeProvenance>,
     fallback_nodes: Vec<ComponentFallbackNodeProvenance>,
     resource_usages: Vec<ComponentResourceUsage>,
+    resource_reference_values: usize,
     projection_node_ordinals: BTreeMap<ComponentSlotProjectionId, u32>,
+}
+
+fn resolve_instance_input_bindings(
+    bindings: &ComponentInputBindings,
+    caller_inputs: Option<&ResolvedComponentInputs>,
+    instance: &ComponentInstanceId,
+    invocation_source_ordinal: u32,
+    state: &mut InstantiationState<'_>,
+) -> Result<ResolvedComponentInputs, PackageLoadError> {
+    let mut resolved = Vec::with_capacity(bindings.values().len());
+    for binding in bindings.values() {
+        let value = match &binding.value {
+            ComponentInputBindingValue::Literal(value) => value.clone(),
+            ComponentInputBindingValue::DirectResource { name, kind, .. } => {
+                let key = PreparedResourceReferenceBindingKey::new(
+                    &instance.invocation_path,
+                    binding.declaration.name().clone(),
+                );
+                let origin = state
+                    .prepared_resource_origins
+                    .get(&key)
+                    .cloned()
+                    .ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceReferenceValueInvalid,
+                        format!(
+                            "resource-reference input `{}` has no prepared direct resource `{name}`",
+                            binding.declaration.name()
+                        ),
+                    )
+                })?;
+                if origin.source().kind() != *kind
+                    || !binding
+                        .declaration
+                        .resource_types()
+                        .is_some_and(|accepted| accepted.contains(*kind))
+                {
+                    return Err(PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceReferenceDirectResourceWrongKind,
+                        format!(
+                            "resource-reference input `{}` direct resource kind changed during instantiation",
+                            binding.declaration.name()
+                        ),
+                    ));
+                }
+                let id: Arc<str> = Arc::from(format!(
+                    "resource-input-direct:{}:{}:{}:{}:{}@{}",
+                    state.document_serial,
+                    instance.deterministic_string(),
+                    binding.declaration.name(),
+                    origin.deterministic_id(state.generation),
+                    invocation_source_ordinal,
+                    state.generation.get()
+                ));
+                ComponentInputValue::ResourceReference(Arc::new(
+                    ComponentResourceReferenceValue::new(
+                        id,
+                        Arc::clone(origin.source()),
+                        origin,
+                        Arc::from([]),
+                    ),
+                ))
+            }
+            ComponentInputBindingValue::ForwardedResource { input } => {
+                let caller = caller_inputs
+                    .and_then(|inputs| inputs.get(input))
+                    .and_then(|value| match value {
+                        ComponentInputValue::ResourceReference(value) => Some(Arc::clone(value)),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::ComponentResourceReferenceForwardingSourceUnknown,
+                            format!(
+                                "forwarded resource-reference input `{input}` has no concrete caller value"
+                            ),
+                        )
+                    })?;
+                let actual_kind = caller.source().kind();
+                if !binding
+                    .declaration
+                    .resource_types()
+                    .is_some_and(|accepted| accepted.contains(actual_kind))
+                {
+                    return Err(PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceReferenceForwardingKindsIncompatible,
+                        format!(
+                            "forwarded resource kind `{}` is incompatible with input `{}`",
+                            actual_kind.as_str(),
+                            binding.declaration.name()
+                        ),
+                    ));
+                }
+                let id: Arc<str> = Arc::from(format!(
+                    "resource-input-forward:{}:{}:{}:{}:{}@{}",
+                    caller.deterministic_id(),
+                    state.document_serial,
+                    instance.deterministic_string(),
+                    binding.declaration.name(),
+                    invocation_source_ordinal,
+                    state.generation.get()
+                ));
+                let mut forwarding = caller.forwarding_provenance().to_vec();
+                if forwarding.len() >= MAX_COMPONENT_NESTING_DEPTH {
+                    return Err(PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceReferenceForwardingDepth,
+                        format!(
+                            "resource-reference forwarding exceeds {MAX_COMPONENT_NESTING_DEPTH} hops"
+                        ),
+                    ));
+                }
+                forwarding.push(Arc::clone(&id));
+                ComponentInputValue::ResourceReference(Arc::new(
+                    ComponentResourceReferenceValue::new(
+                        id,
+                        Arc::clone(caller.source()),
+                        caller.origin().clone(),
+                        forwarding.into(),
+                    ),
+                ))
+            }
+        };
+        if matches!(value, ComponentInputValue::ResourceReference(_)) {
+            state.resource_reference_values = state
+                .resource_reference_values
+                .checked_add(1)
+                .ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceReferenceValueLimit,
+                        "resource-reference value count overflowed",
+                    )
+                })?;
+            if state.resource_reference_values > MAX_RESOURCE_REFERENCE_VALUES_PER_PREPARED_ROOT {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentResourceReferenceValueLimit,
+                    format!(
+                        "prepared root exceeds {MAX_RESOURCE_REFERENCE_VALUES_PER_PREPARED_ROOT} resource-reference values"
+                    ),
+                ));
+            }
+        }
+        resolved.push(ResolvedComponentInput {
+            declaration: binding.declaration.clone(),
+            value,
+            provenance: binding.provenance,
+        });
+    }
+    Ok(ResolvedComponentInputs::new(resolved))
 }
 
 #[derive(Debug, Clone)]
@@ -1762,6 +2164,7 @@ pub(crate) fn parse_component_source(
                         source_node_count,
                         inputs: Arc::clone(&expected_definition.inputs),
                         slots: Arc::clone(&expected_definition.slots),
+                        resources: Arc::clone(&expected_definition.resources),
                     },
                 );
             }
@@ -1814,6 +2217,10 @@ pub(crate) fn build_component_catalog(
         .iter()
         .map(|definition| (definition.key.clone(), Arc::clone(&definition.inputs)))
         .collect();
+    let resource_declarations: BTreeMap<_, _> = unresolved
+        .iter()
+        .map(|definition| (definition.key.clone(), Arc::clone(&definition.resources)))
+        .collect();
     let slot_definitions: BTreeMap<_, _> = unresolved
         .iter()
         .map(|definition| {
@@ -1852,16 +2259,13 @@ pub(crate) fn build_component_catalog(
             packages: &package_by_id,
             available: &available,
             input_declarations: &input_declarations,
+            resource_declarations: &resource_declarations,
             slot_definitions: &slot_definitions,
             dependencies: &mut dependencies,
             dependency_set: &mut dependency_set,
             references: &mut references,
         };
-        let nodes = resolve_nodes(
-            unresolved.nodes,
-            &unresolved.key.package_id,
-            &mut resolution,
-        )?;
+        let nodes = resolve_nodes(unresolved.nodes, &unresolved.key, &mut resolution)?;
         let slots = slot_definitions
             .get(&unresolved.key)
             .cloned()
@@ -1877,6 +2281,7 @@ pub(crate) fn build_component_catalog(
             resolved_references: references.into(),
             inputs: unresolved.inputs,
             slots,
+            resources: unresolved.resources,
         }));
     }
     let order = component_dependency_order(&definitions, &indices)?;
@@ -1893,6 +2298,9 @@ pub(crate) fn prepare_root_document(
     logical_path: &str,
     owner: &ResolvedPackage,
     catalog: &ComponentCatalog,
+    resources: &ComponentResourceCatalog,
+    surface_owner: Option<&SurfaceResourceOwner>,
+    surface_resources: &[ComponentResourceDeclaration],
 ) -> Result<PreparedDocument, PackageLoadError> {
     reject_duplicate_control_attributes(html, logical_path)?;
     let document = HtmlDocument::from_html(html, parser_config());
@@ -1900,6 +2308,13 @@ pub(crate) fn prepare_root_document(
     let mut state = RootNormalizationState {
         ordinal: 0,
         inside_template: false,
+    };
+    let context = RootNormalizationContext {
+        logical_path,
+        owner,
+        catalog,
+        surface_owner,
+        surface_resources,
     };
     let nodes = document
         .get_node(0)
@@ -1910,19 +2325,18 @@ pub(crate) fn prepare_root_document(
             normalize_root_node(
                 &document,
                 *child,
-                logical_path,
-                owner,
-                catalog,
+                context,
                 &mut state,
                 RootContentMode::Ordinary,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let (stats, logical_instance_paths, referenced_definition_keys) =
-        validate_prepared_expansion(&nodes, catalog, logical_path)?;
+    let (stats, logical_instance_paths, referenced_definition_keys, resource_reference_origins) =
+        validate_prepared_expansion(&nodes, catalog, resources, logical_path)?;
     Ok(PreparedDocument {
         logical_path: logical_path.to_owned(),
         nodes: nodes.into(),
+        resource_reference_origins: Arc::new(resource_reference_origins),
         stats,
         logical_instance_paths: logical_instance_paths.into(),
         referenced_definition_keys: referenced_definition_keys.into(),
@@ -1940,6 +2354,15 @@ enum RootContentMode {
     Ordinary,
     InvocationDirect,
     InvocationNested,
+}
+
+#[derive(Clone, Copy)]
+struct RootNormalizationContext<'a> {
+    logical_path: &'a str,
+    owner: &'a ResolvedPackage,
+    catalog: &'a ComponentCatalog,
+    surface_owner: Option<&'a SurfaceResourceOwner>,
+    surface_resources: &'a [ComponentResourceDeclaration],
 }
 
 #[derive(Clone, Copy)]
@@ -2155,9 +2578,48 @@ fn normalize_component_node(
                         PackageErrorKind::ComponentResourceReferenceMalformed,
                         owner,
                         logical_source,
-                        "component raster image requires `src=\"resource:<name>\"`",
+                        "component image requires `src=\"resource:<name>\"` or `src=\"input:<name>\"`",
                     )
                 })?;
+                if reference.starts_with("input:") {
+                    let input = parse_component_input_reference(reference, owner, logical_source)
+                        .map_err(|error| {
+                        component_error(
+                            PackageErrorKind::ComponentResourceReferenceConsumerMalformed,
+                            owner,
+                            logical_source,
+                            error.to_string(),
+                        )
+                    })?;
+                    let declaration = inputs
+                        .iter()
+                        .find(|declaration| declaration.name() == &input)
+                        .ok_or_else(|| {
+                            component_error(
+                                PackageErrorKind::ComponentResourceReferenceConsumerUnknown,
+                                owner,
+                                logical_source,
+                                format!(
+                                    "component `{definition_name}` does not declare input `{input}`"
+                                ),
+                            )
+                        })?;
+                    if declaration.input_type() != ComponentInputType::ResourceReference {
+                        return Err(component_error(
+                            PackageErrorKind::ComponentResourceReferenceConsumerWrongType,
+                            owner,
+                            logical_source,
+                            format!(
+                                "component `{definition_name}` input `{input}` is not resource-reference typed"
+                            ),
+                        ));
+                    }
+                    return Ok(UnresolvedTemplateNode::InputResourceImage {
+                        input,
+                        attributes: attributes_without_slot_and_src(element),
+                        source_ordinal,
+                    });
+                }
                 let name = parse_component_resource_reference(reference, owner, logical_source)?;
                 if !resources
                     .iter()
@@ -2235,12 +2697,17 @@ fn normalize_component_node(
 fn normalize_root_node(
     document: &HtmlDocument,
     slot: usize,
-    logical_path: &str,
-    owner: &ResolvedPackage,
-    catalog: &ComponentCatalog,
+    context: RootNormalizationContext<'_>,
     state: &mut RootNormalizationState,
     mode: RootContentMode,
 ) -> Result<ComponentTemplateNode, PackageLoadError> {
+    let RootNormalizationContext {
+        logical_path,
+        owner,
+        catalog,
+        surface_owner,
+        surface_resources,
+    } = context;
     let source_ordinal = next_ordinal(&mut state.ordinal, owner.id(), logical_path)?;
     let node = document
         .get_node(slot)
@@ -2328,26 +2795,21 @@ fn normalize_root_node(
                 let definition = catalog
                     .definition(&target)
                     .expect("resolved definition exists");
-                let inputs = resolve_component_inputs(
+                let inputs = resolve_component_input_bindings(
                     definition.inputs(),
                     supplied_inputs,
                     owner.id(),
                     &target.name,
                     logical_path,
+                    None,
+                    surface_owner,
+                    surface_resources,
+                    &[],
                 )?;
                 let children = node
                     .children
                     .iter()
-                    .map(|child| {
-                        normalize_root_invocation_child(
-                            document,
-                            *child,
-                            logical_path,
-                            owner,
-                            catalog,
-                            state,
-                        )
-                    })
+                    .map(|child| normalize_root_invocation_child(document, *child, context, state))
                     .collect::<Result<Vec<_>, _>>()?;
                 let projections = build_projection_plans(
                     definition.slots(),
@@ -2374,6 +2836,16 @@ fn normalize_root_node(
                     "`resource:` image references are available only in their declaring component definition",
                 ));
             }
+            if tag == "img"
+                && element_attr(element, "src").is_some_and(|value| value.starts_with("input:"))
+            {
+                return Err(component_error(
+                    PackageErrorKind::ComponentResourceReferenceConsumerWrongType,
+                    owner.id(),
+                    logical_path,
+                    "`input:` image references are available only inside a component instance",
+                ));
+            }
             if element_attr(element, BIND_ATTRIBUTE)
                 .is_some_and(|value| value.starts_with("input."))
             {
@@ -2396,17 +2868,7 @@ fn normalize_root_node(
             let children = node
                 .children
                 .iter()
-                .map(|child| {
-                    normalize_root_node(
-                        document,
-                        *child,
-                        logical_path,
-                        owner,
-                        catalog,
-                        state,
-                        child_mode,
-                    )
-                })
+                .map(|child| normalize_root_node(document, *child, context, state, child_mode))
                 .collect::<Result<Vec<_>, _>>()?;
             state.inside_template = previous;
             Ok(ComponentTemplateNode::Element {
@@ -2447,18 +2909,19 @@ fn normalize_component_invocation_child(
 fn normalize_root_invocation_child(
     document: &HtmlDocument,
     slot: usize,
-    logical_path: &str,
-    owner: &ResolvedPackage,
-    catalog: &ComponentCatalog,
+    context: RootNormalizationContext<'_>,
     state: &mut RootNormalizationState,
 ) -> Result<ComponentInvocationChild, PackageLoadError> {
+    let RootNormalizationContext {
+        logical_path,
+        owner,
+        ..
+    } = context;
     let route = invocation_child_slot_name(document, slot, owner.id(), logical_path)?;
     let node = normalize_root_node(
         document,
         slot,
-        logical_path,
-        owner,
-        catalog,
+        context,
         state,
         RootContentMode::InvocationDirect,
     )?;
@@ -2573,6 +3036,37 @@ fn parse_component_resource_reference(
     })
 }
 
+fn parse_component_input_reference(
+    value: &str,
+    owner: &PackageId,
+    logical_source: &str,
+) -> Result<ComponentInputName, PackageLoadError> {
+    let Some(name) = value.strip_prefix("input:") else {
+        return Err(component_error(
+            PackageErrorKind::ComponentResourceReferenceAssignmentMalformed,
+            owner,
+            logical_source,
+            "resource-reference forwarding must use `input:<name>`",
+        ));
+    };
+    if name.is_empty() || name.contains(['/', '?', '#', '%', ':']) || value.contains("//") {
+        return Err(component_error(
+            PackageErrorKind::ComponentResourceReferenceAssignmentMalformed,
+            owner,
+            logical_source,
+            "resource-reference input must contain one unescaped component input name",
+        ));
+    }
+    ComponentInputName::parse(name).map_err(|_| {
+        component_error(
+            PackageErrorKind::ComponentResourceReferenceAssignmentMalformed,
+            owner,
+            logical_source,
+            "resource-reference input contains an invalid component input name",
+        )
+    })
+}
+
 fn validate_component_input_consumer(
     element: &blitz_dom::ElementData,
     children: &[UnresolvedTemplateNode],
@@ -2622,6 +3116,7 @@ fn validate_component_input_consumer(
             node,
             UnresolvedTemplateNode::Element { .. }
                 | UnresolvedTemplateNode::ResourceImage { .. }
+                | UnresolvedTemplateNode::InputResourceImage { .. }
                 | UnresolvedTemplateNode::Use { .. }
                 | UnresolvedTemplateNode::InputConsumer { .. }
         )
@@ -2725,7 +3220,9 @@ fn validate_component_input_consumer(
             )
         })?;
     let compatible = match kind {
-        ComponentInputConsumerKind::StateText => true,
+        ComponentInputConsumerKind::StateText => {
+            declaration.input_type() != ComponentInputType::ResourceReference
+        }
         ComponentInputConsumerKind::StateToken => matches!(
             declaration.input_type(),
             ComponentInputType::Token | ComponentInputType::Boolean
@@ -2865,7 +3362,9 @@ fn validate_static_component_element(
                 | "background"
                 | "action"
                 | "formaction"
-        ) && !(tag == "img" && name == "src" && value.starts_with("resource:"))
+        ) && !(tag == "img"
+            && name == "src"
+            && (value.starts_with("resource:") || value.starts_with("input:")))
         {
             return Err(component_error(
                 PackageErrorKind::ComponentResourceNotSupported,
@@ -3050,7 +3549,8 @@ fn locate_unresolved_slot(
                 }
             }
             UnresolvedTemplateNode::Text { .. } | UnresolvedTemplateNode::Comment { .. } => {}
-            UnresolvedTemplateNode::ResourceImage { .. } => {}
+            UnresolvedTemplateNode::ResourceImage { .. }
+            | UnresolvedTemplateNode::InputResourceImage { .. } => {}
         }
     }
     None
@@ -3084,7 +3584,8 @@ fn unresolved_slot_version(
                 UnresolvedTemplateNode::Use { .. }
                 | UnresolvedTemplateNode::Text { .. }
                 | UnresolvedTemplateNode::Comment { .. }
-                | UnresolvedTemplateNode::ResourceImage { .. } => {}
+                | UnresolvedTemplateNode::ResourceImage { .. }
+                | UnresolvedTemplateNode::InputResourceImage { .. } => {}
             }
         }
         false
@@ -3130,6 +3631,14 @@ fn serialize_unresolved_nodes(nodes: &[UnresolvedTemplateNode], output: &mut Str
             } => {
                 output.push_str("r:");
                 output.push_str(name.as_str());
+                serialize_attributes(attributes, output);
+                output.push(';');
+            }
+            UnresolvedTemplateNode::InputResourceImage {
+                input, attributes, ..
+            } => {
+                output.push_str("ir:");
+                output.push_str(input.as_str());
                 serialize_attributes(attributes, output);
                 output.push(';');
             }
@@ -3339,6 +3848,14 @@ fn serialize_component_nodes(nodes: &[ComponentTemplateNode], output: &mut Strin
                 serialize_attributes(attributes, output);
                 output.push(';');
             }
+            ComponentTemplateNode::InputResourceImage {
+                input, attributes, ..
+            } => {
+                output.push_str("ir:");
+                output.push_str(input.as_str());
+                serialize_attributes(attributes, output);
+                output.push(';');
+            }
             ComponentTemplateNode::Text { value, .. } => {
                 output.push_str("t:");
                 output.push_str(&value.len().to_string());
@@ -3394,6 +3911,8 @@ struct ComponentResolutionContext<'a> {
     packages: &'a BTreeMap<PackageId, Arc<ResolvedPackage>>,
     available: &'a BTreeSet<ComponentDefinitionKey>,
     input_declarations: &'a BTreeMap<ComponentDefinitionKey, Arc<[ComponentInputDeclaration]>>,
+    resource_declarations:
+        &'a BTreeMap<ComponentDefinitionKey, Arc<[ComponentResourceDeclaration]>>,
     slot_definitions: &'a BTreeMap<ComponentDefinitionKey, Arc<[ComponentSlotDefinition]>>,
     dependencies: &'a mut Vec<ComponentDefinitionKey>,
     dependency_set: &'a mut BTreeSet<ComponentDefinitionKey>,
@@ -3402,7 +3921,7 @@ struct ComponentResolutionContext<'a> {
 
 fn resolve_nodes(
     nodes: Vec<UnresolvedTemplateNode>,
-    owner: &PackageId,
+    owner: &ComponentDefinitionKey,
     context: &mut ComponentResolutionContext<'_>,
 ) -> Result<Vec<ComponentTemplateNode>, PackageLoadError> {
     nodes
@@ -3438,16 +3957,25 @@ fn resolve_nodes(
                 attributes,
                 source_ordinal,
             }),
+            UnresolvedTemplateNode::InputResourceImage {
+                input,
+                attributes,
+                source_ordinal,
+            } => Ok(ComponentTemplateNode::InputResourceImage {
+                input,
+                attributes,
+                source_ordinal,
+            }),
             UnresolvedTemplateNode::Use {
                 reference,
                 supplied_inputs,
                 children,
                 source_ordinal,
             } => {
-                let package = context.packages.get(owner).ok_or_else(|| {
+                let package = context.packages.get(owner.package_id()).ok_or_else(|| {
                     PackageLoadError::new(
                         PackageErrorKind::ComponentExportUnknown,
-                        format!("component owner package `{owner}` is absent"),
+                        format!("component owner package `{}` is absent", owner.package_id()),
                     )
                 })?;
                 let target = resolve_reference_key(package, &reference)?;
@@ -3456,7 +3984,7 @@ fn resolve_nodes(
                         PackageErrorKind::ComponentExportUnknown,
                         format!("component reference `{reference}` resolves to missing `{target}`"),
                     )
-                    .in_package(owner.to_string()));
+                    .in_package(owner.package_id().to_string()));
                 }
                 let declarations = context.input_declarations.get(&target).ok_or_else(|| {
                     PackageLoadError::new(
@@ -3464,12 +3992,24 @@ fn resolve_nodes(
                         format!("component input declarations for `{target}` are absent"),
                     )
                 })?;
-                let inputs = resolve_component_inputs(
+                let inputs = resolve_component_input_bindings(
                     declarations,
                     supplied_inputs,
-                    owner,
+                    owner.package_id(),
                     &target.name,
                     "component template",
+                    Some(owner),
+                    None,
+                    context
+                        .resource_declarations
+                        .get(owner)
+                        .map(Arc::as_ref)
+                        .unwrap_or(&[]),
+                    context
+                        .input_declarations
+                        .get(owner)
+                        .map(Arc::as_ref)
+                        .unwrap_or(&[]),
                 )?;
                 let children = children
                     .into_iter()
@@ -3490,7 +4030,7 @@ fn resolve_nodes(
                         .map(Arc::as_ref)
                         .unwrap_or(&[]),
                     children,
-                    owner,
+                    owner.package_id(),
                     &target.name,
                     "component template",
                 )?;
@@ -3536,13 +4076,18 @@ fn resolve_nodes(
         .collect()
 }
 
-fn resolve_component_inputs(
+#[allow(clippy::too_many_arguments)]
+fn resolve_component_input_bindings(
     declarations: &[ComponentInputDeclaration],
     supplied: Vec<(ComponentInputName, String)>,
     owner: &PackageId,
     component: &ComponentName,
     logical_source: &str,
-) -> Result<ResolvedComponentInputs, PackageLoadError> {
+    caller_definition: Option<&ComponentDefinitionKey>,
+    caller_surface: Option<&SurfaceResourceOwner>,
+    caller_resources: &[ComponentResourceDeclaration],
+    caller_inputs: &[ComponentInputDeclaration],
+) -> Result<ComponentInputBindings, PackageLoadError> {
     let supplied: BTreeMap<_, _> = supplied.into_iter().collect();
     for name in supplied.keys() {
         if !declarations
@@ -3560,27 +4105,178 @@ fn resolve_component_inputs(
     let mut values = Vec::with_capacity(declarations.len());
     for declaration in declarations {
         let (value, provenance) = match supplied.get(declaration.name()) {
-            Some(literal) => (
-                parse_component_input_literal(declaration.input_type(), literal).map_err(
-                    |error| {
+            Some(literal) if declaration.input_type() == ComponentInputType::ResourceReference => {
+                let accepted = declaration.resource_types().ok_or_else(|| {
+                    component_error(
+                        PackageErrorKind::InvalidComponentResourceReferenceInputDeclaration,
+                        owner,
+                        logical_source,
+                        format!(
+                            "component `{component}` resource-reference input `{}` has no accepted kinds",
+                            declaration.name()
+                        ),
+                    )
+                })?;
+                let value = if literal.starts_with("resource:") {
+                    let name = parse_component_resource_reference(literal, owner, logical_source)
+                        .map_err(|error| {
                         component_error(
-                            error.kind(),
+                            PackageErrorKind::ComponentResourceReferenceAssignmentMalformed,
+                            owner,
+                            logical_source,
+                            error.to_string(),
+                        )
+                    })?;
+                    let resource = caller_resources
+                        .iter()
+                        .find(|resource| resource.name() == &name)
+                        .ok_or_else(|| {
+                            component_error(
+                                PackageErrorKind::ComponentResourceReferenceDirectResourceUnknown,
+                                owner,
+                                logical_source,
+                                format!(
+                                    "component `{component}` input `{}` references unknown caller resource `{name}`",
+                                    declaration.name()
+                                ),
+                            )
+                        })?;
+                    if !accepted.contains(resource.kind()) {
+                        return Err(component_error(
+                            PackageErrorKind::ComponentResourceReferenceDirectResourceWrongKind,
                             owner,
                             logical_source,
                             format!(
-                                "component `{component}` input `{}`: {error}",
-                                declaration.name()
+                                "component `{component}` input `{}` accepts [{}], but caller resource `{name}` is `{}`",
+                                declaration.name(),
+                                accepted.canonical_string(),
+                                resource.kind().as_str()
                             ),
+                        ));
+                    }
+                    let binding_owner = match (caller_definition, caller_surface) {
+                        (Some(definition), None) => {
+                            DirectResourceBindingOwner::Component(definition.clone())
+                        }
+                        (None, Some(surface)) => {
+                            DirectResourceBindingOwner::Surface(surface.clone())
+                        }
+                        _ => {
+                            return Err(component_error(
+                                PackageErrorKind::ComponentResourceReferenceDirectResourceWrongOwner,
+                                owner,
+                                logical_source,
+                                "resource-reference direct assignment has no single caller resource scope",
+                            ));
+                        }
+                    };
+                    ComponentInputBindingValue::DirectResource {
+                        owner: binding_owner,
+                        name,
+                        kind: resource.kind(),
+                    }
+                } else if literal.starts_with("input:") {
+                    let name = parse_component_input_reference(literal, owner, logical_source)
+                        .map_err(|error| {
+                            component_error(
+                                PackageErrorKind::ComponentResourceReferenceAssignmentMalformed,
+                                owner,
+                                logical_source,
+                                error.to_string(),
+                            )
+                        })?;
+                    if caller_definition.is_none() {
+                        return Err(component_error(
+                            PackageErrorKind::ComponentResourceReferenceForwardingSourceWrongType,
+                            owner,
+                            logical_source,
+                            "surface roots cannot forward a component input",
+                        ));
+                    }
+                    let source = caller_inputs
+                        .iter()
+                        .find(|input| input.name() == &name)
+                        .ok_or_else(|| {
+                            component_error(
+                                PackageErrorKind::ComponentResourceReferenceForwardingSourceUnknown,
+                                owner,
+                                logical_source,
+                                format!("forwarded component input `{name}` is not declared"),
+                            )
+                        })?;
+                    if source.input_type() != ComponentInputType::ResourceReference {
+                        return Err(component_error(
+                            PackageErrorKind::ComponentResourceReferenceForwardingSourceWrongType,
+                            owner,
+                            logical_source,
+                            format!("component input `{name}` is not resource-reference typed"),
+                        ));
+                    }
+                    let source_kinds = source.resource_types().ok_or_else(|| {
+                        component_error(
+                            PackageErrorKind::InvalidComponentResourceReferenceInputDeclaration,
+                            owner,
+                            logical_source,
+                            format!("component input `{name}` has no accepted resource kinds"),
                         )
-                    },
-                )?,
+                    })?;
+                    if !source_kinds.is_subset_of(accepted) {
+                        return Err(component_error(
+                            PackageErrorKind::ComponentResourceReferenceForwardingKindsIncompatible,
+                            owner,
+                            logical_source,
+                            format!(
+                                "forwarded input `{name}` accepts [{}], which is not a subset of target input `{}` kinds [{}]",
+                                source_kinds.canonical_string(),
+                                declaration.name(),
+                                accepted.canonical_string()
+                            ),
+                        ));
+                    }
+                    ComponentInputBindingValue::ForwardedResource { input: name }
+                } else {
+                    return Err(component_error(
+                        PackageErrorKind::ComponentResourceReferenceAssignmentMalformed,
+                        owner,
+                        logical_source,
+                        format!(
+                            "component `{component}` input `{}` requires `resource:<name>` or `input:<name>`",
+                            declaration.name()
+                        ),
+                    ));
+                };
+                (value, ComponentInputProvenance::Supplied)
+            }
+            Some(literal) => (
+                ComponentInputBindingValue::Literal(
+                    parse_component_input_literal(declaration.input_type(), literal).map_err(
+                        |error| {
+                            component_error(
+                                error.kind(),
+                                owner,
+                                logical_source,
+                                format!(
+                                    "component `{component}` input `{}`: {error}",
+                                    declaration.name()
+                                ),
+                            )
+                        },
+                    )?,
+                ),
                 ComponentInputProvenance::Supplied,
             ),
             None => match declaration.default() {
-                Some(value) => (value.clone(), ComponentInputProvenance::Defaulted),
+                Some(value) => (
+                    ComponentInputBindingValue::Literal(value.clone()),
+                    ComponentInputProvenance::Defaulted,
+                ),
                 None => {
                     return Err(component_error(
-                        PackageErrorKind::ComponentInputMissingRequired,
+                        if declaration.input_type() == ComponentInputType::ResourceReference {
+                            PackageErrorKind::ComponentResourceReferenceAssignmentMissing
+                        } else {
+                            PackageErrorKind::ComponentInputMissingRequired
+                        },
                         owner,
                         logical_source,
                         format!(
@@ -3591,13 +4287,13 @@ fn resolve_component_inputs(
                 }
             },
         };
-        values.push(ResolvedComponentInput {
+        values.push(ComponentInputBinding {
             declaration: declaration.clone(),
             value,
             provenance,
         });
     }
-    Ok(ResolvedComponentInputs::new(values))
+    Ok(ComponentInputBindings::new(values))
 }
 
 fn resolve_reference_key(
@@ -3725,32 +4421,164 @@ fn component_dependency_order(
     Ok(order)
 }
 
+type PreparedExpansionValidation = (
+    PreparedDocumentStats,
+    Vec<String>,
+    Vec<ComponentDefinitionKey>,
+    BTreeMap<PreparedResourceReferenceBindingKey, ResourceOriginAssociation>,
+);
+
 fn validate_prepared_expansion(
     nodes: &[ComponentTemplateNode],
     catalog: &ComponentCatalog,
+    resources: &ComponentResourceCatalog,
     logical_path: &str,
-) -> Result<
-    (
-        PreparedDocumentStats,
-        Vec<String>,
-        Vec<ComponentDefinitionKey>,
-    ),
-    PackageLoadError,
-> {
+) -> Result<PreparedExpansionValidation, PackageLoadError> {
+    #[derive(Clone)]
+    struct ValidationResourceValue {
+        source: Arc<crate::ComponentResourceSource>,
+    }
+
+    type ValidationInputs = BTreeMap<ComponentInputName, ValidationResourceValue>;
+
+    struct ValidationProjections<'a> {
+        plans: &'a [ComponentProjectionPlan],
+        caller_inputs: ValidationInputs,
+    }
+
     struct Expansion<'a> {
         catalog: &'a ComponentCatalog,
+        resources: &'a ComponentResourceCatalog,
         instances: usize,
         referenced: BTreeSet<ComponentDefinitionKey>,
         expanded: usize,
         maximum_depth: usize,
         paths: Vec<String>,
+        resource_reference_values: usize,
+        resource_reference_origins:
+            BTreeMap<PreparedResourceReferenceBindingKey, ResourceOriginAssociation>,
     }
+
+    fn resolve_validation_inputs(
+        bindings: &ComponentInputBindings,
+        caller_inputs: &ValidationInputs,
+        invocation_path: &[u32],
+        state: &mut Expansion<'_>,
+    ) -> Result<ValidationInputs, PackageLoadError> {
+        let mut values = ValidationInputs::new();
+        for binding in bindings.values() {
+            let value = match &binding.value {
+                ComponentInputBindingValue::Literal(_) => continue,
+                ComponentInputBindingValue::DirectResource { owner, name, kind } => {
+                    let origin = match owner {
+                        DirectResourceBindingOwner::Component(definition) => state
+                            .resources
+                            .association(definition, name)
+                            .cloned()
+                            .map(ResourceOriginAssociation::Component),
+                        DirectResourceBindingOwner::Surface(surface) => state
+                            .resources
+                            .surface_association(surface, name)
+                            .cloned()
+                            .map(ResourceOriginAssociation::Surface),
+                    }
+                    .ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::ComponentResourceReferenceDirectResourceUnknown,
+                            format!(
+                                "resource-reference input `{}` has no caller-owned resource `{name}`",
+                                binding.declaration.name()
+                            ),
+                        )
+                    })?;
+                    if origin.source().kind() != *kind
+                        || !binding
+                            .declaration
+                            .resource_types()
+                            .is_some_and(|accepted| accepted.contains(*kind))
+                    {
+                        return Err(PackageLoadError::new(
+                            PackageErrorKind::ComponentResourceReferenceDirectResourceWrongKind,
+                            format!(
+                                "resource-reference input `{}` rejects direct resource kind `{}`",
+                                binding.declaration.name(),
+                                kind.as_str()
+                            ),
+                        ));
+                    }
+                    let key = PreparedResourceReferenceBindingKey::new(
+                        invocation_path,
+                        binding.declaration.name().clone(),
+                    );
+                    if state
+                        .resource_reference_origins
+                        .insert(key, origin.clone())
+                        .is_some()
+                    {
+                        return Err(PackageLoadError::new(
+                            PackageErrorKind::ComponentResourceReferenceValueInvalid,
+                            format!(
+                                "prepared resource-reference input `{}` has a duplicate direct assignment identity",
+                                binding.declaration.name()
+                            ),
+                        ));
+                    }
+                    ValidationResourceValue {
+                        source: Arc::clone(origin.source()),
+                    }
+                }
+                ComponentInputBindingValue::ForwardedResource { input } => {
+                    let value = caller_inputs.get(input).cloned().ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::ComponentResourceReferenceForwardingSourceUnknown,
+                            format!("forwarded resource-reference input `{input}` has no value"),
+                        )
+                    })?;
+                    if !binding
+                        .declaration
+                        .resource_types()
+                        .is_some_and(|accepted| accepted.contains(value.source.kind()))
+                    {
+                        return Err(PackageLoadError::new(
+                            PackageErrorKind::ComponentResourceReferenceForwardingKindsIncompatible,
+                            format!(
+                                "forwarded resource-reference input `{input}` has incompatible kind `{}`",
+                                value.source.kind().as_str()
+                            ),
+                        ));
+                    }
+                    value
+                }
+            };
+            state.resource_reference_values = state
+                .resource_reference_values
+                .checked_add(1)
+                .ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceReferenceValueLimit,
+                        "prepared resource-reference value count overflowed",
+                    )
+                })?;
+            if state.resource_reference_values > MAX_RESOURCE_REFERENCE_VALUES_PER_PREPARED_ROOT {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentResourceReferenceValueLimit,
+                    format!(
+                        "prepared root exceeds {MAX_RESOURCE_REFERENCE_VALUES_PER_PREPARED_ROOT} resource-reference values"
+                    ),
+                ));
+            }
+            values.insert(binding.declaration.name().clone(), value);
+        }
+        Ok(values)
+    }
+
     fn visit(
         nodes: &[ComponentTemplateNode],
         state: &mut Expansion<'_>,
         depth: usize,
         path: &mut Vec<u32>,
-        active_projections: Option<&[ComponentProjectionPlan]>,
+        current_inputs: &ValidationInputs,
+        active_projections: Option<&ValidationProjections<'_>>,
     ) -> Result<(), PackageLoadError> {
         fn add_expanded(state: &mut Expansion<'_>, count: usize) -> Result<(), PackageLoadError> {
             state.expanded = state.expanded.checked_add(count).ok_or_else(|| {
@@ -3772,17 +4600,33 @@ fn validate_prepared_expansion(
             add_expanded(state, 1)?;
             match node {
                 ComponentTemplateNode::Element { children, .. } => {
-                    visit(children, state, depth, path, active_projections)?;
+                    visit(
+                        children,
+                        state,
+                        depth,
+                        path,
+                        current_inputs,
+                        active_projections,
+                    )?;
                 }
-                ComponentTemplateNode::ResourceImage { .. } => {}
+                ComponentTemplateNode::ResourceImage { .. }
+                | ComponentTemplateNode::InputResourceImage { .. } => {}
                 ComponentTemplateNode::InputConsumer { children, .. } => {
                     // Materialization always appends one canonical value text node.
                     add_expanded(state, 1)?;
-                    visit(children, state, depth, path, active_projections)?;
+                    visit(
+                        children,
+                        state,
+                        depth,
+                        path,
+                        current_inputs,
+                        active_projections,
+                    )?;
                 }
                 ComponentTemplateNode::Host {
                     reference,
                     target,
+                    inputs,
                     projections,
                     source_ordinal,
                     ..
@@ -3840,12 +4684,19 @@ fn validate_prepared_expansion(
                             format!("prepared component target `{target}` is absent"),
                         )
                     })?;
+                    let child_inputs =
+                        resolve_validation_inputs(inputs, current_inputs, path, state)?;
+                    let projection_context = ValidationProjections {
+                        plans: projections,
+                        caller_inputs: current_inputs.clone(),
+                    };
                     visit(
                         &definition.nodes,
                         state,
                         next_depth,
                         path,
-                        Some(projections),
+                        &child_inputs,
+                        Some(&projection_context),
                     )?;
                     path.pop();
                 }
@@ -3857,6 +4708,7 @@ fn validate_prepared_expansion(
                         )
                     })?;
                     let projection = projections
+                        .plans
                         .iter()
                         .find(|projection| &projection.name == name)
                         .ok_or_else(|| {
@@ -3867,10 +4719,17 @@ fn validate_prepared_expansion(
                         })?;
                     match projection.outcome {
                         ComponentSlotProjectionOutcome::Assigned => {
-                            visit(&projection.assigned, state, depth, path, None)?;
+                            visit(
+                                &projection.assigned,
+                                state,
+                                depth,
+                                path,
+                                &projections.caller_inputs,
+                                None,
+                            )?;
                         }
                         ComponentSlotProjectionOutcome::Fallback => {
-                            visit(fallback, state, depth, path, None)?;
+                            visit(fallback, state, depth, path, current_inputs, None)?;
                         }
                         ComponentSlotProjectionOutcome::EmptyOptional => {}
                     }
@@ -3883,20 +4742,37 @@ fn validate_prepared_expansion(
 
     let mut state = Expansion {
         catalog,
+        resources,
         instances: 0,
         referenced: BTreeSet::new(),
         expanded: 0,
         maximum_depth: 0,
         paths: Vec::new(),
+        resource_reference_values: 0,
+        resource_reference_origins: BTreeMap::new(),
     };
-    visit(nodes, &mut state, 0, &mut Vec::new(), None).map_err(|error| error.at(logical_path))?;
+    visit(
+        nodes,
+        &mut state,
+        0,
+        &mut Vec::new(),
+        &ValidationInputs::new(),
+        None,
+    )
+    .map_err(|error| error.at(logical_path))?;
     let stats = PreparedDocumentStats {
         component_instances: state.instances,
         referenced_definitions: state.referenced.len(),
         expanded_nodes: state.expanded,
         maximum_nesting_depth: state.maximum_depth,
+        resource_reference_values: state.resource_reference_values,
     };
-    Ok((stats, state.paths, state.referenced.into_iter().collect()))
+    Ok((
+        stats,
+        state.paths,
+        state.referenced.into_iter().collect(),
+        state.resource_reference_origins,
+    ))
 }
 
 struct ActiveProjection<'a> {
@@ -4025,6 +4901,74 @@ fn instantiate_nodes(
                 ));
                 created.push(slot);
             }
+            ComponentTemplateNode::InputResourceImage {
+                input,
+                attributes,
+                source_ordinal,
+            } => {
+                let instance = context.instance.ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceReferenceUsageInvalid,
+                        "resource-reference image usage has no component instance",
+                    )
+                })?;
+                let inputs = context.inputs.ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentResourceReferenceUsageInvalid,
+                        "resource-reference image usage has no component input map",
+                    )
+                })?;
+                let value = inputs
+                    .get(input)
+                    .and_then(|value| match value {
+                        ComponentInputValue::ResourceReference(value) => Some(value),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::ComponentResourceReferenceConsumerWrongType,
+                            format!(
+                                "component image input `{input}` has no resource-reference value"
+                            ),
+                        )
+                    })?;
+                let slot = document.mutate().create_element(
+                    QualName::new(None, ns!(html), LocalName::from("img")),
+                    attributes.clone(),
+                );
+                let image_data = match value.source().as_ref() {
+                    crate::ComponentResourceSource::Raster(source) => {
+                        ImageData::Raster(RasterImageData::new(
+                            source.width(),
+                            source.height(),
+                            Arc::clone(source.rgba8()),
+                        ))
+                    }
+                    crate::ComponentResourceSource::Svg(source) => ImageData::Svg(SvgImageData {
+                        tree: Arc::clone(source.tree()),
+                        intrinsic_width: Some(source.width()),
+                        intrinsic_height: Some(source.height()),
+                    }),
+                };
+                document
+                    .get_node_mut(slot)
+                    .and_then(blitz_dom::node::Node::element_data_mut)
+                    .expect("created input image node remains an element")
+                    .special_data = SpecialElementData::Image(Box::new(image_data));
+                record_descendant(context.instance, *source_ordinal, slot, placement, state);
+                state
+                    .resource_usages
+                    .push(ComponentResourceUsage::from_input(
+                        state.generation,
+                        state.document_serial,
+                        instance.clone(),
+                        slot,
+                        value.origin().clone(),
+                        Arc::clone(&value.id),
+                        *source_ordinal,
+                    ));
+                created.push(slot);
+            }
             ComponentTemplateNode::InputConsumer {
                 name,
                 attributes,
@@ -4103,7 +5047,13 @@ fn instantiate_nodes(
                         format!("component target `{target}` disappeared during instantiation"),
                     )
                 })?;
-                let instance_inputs = inputs.for_instance();
+                let instance_inputs = resolve_instance_input_bindings(
+                    inputs,
+                    context.inputs,
+                    &instance_id,
+                    *source_ordinal,
+                    state,
+                )?;
                 let record_index = state.instances.len();
                 state.instances.push(ComponentInstanceRecord {
                     id: instance_id.clone(),
@@ -4256,7 +5206,15 @@ fn materialize_component_input(
     value_format: StateValueFormat,
 ) -> Result<MaterializedComponentInput, PackageLoadError> {
     match kind {
-        ComponentInputConsumerKind::StateText => Ok((value.canonical_string(), None)),
+        ComponentInputConsumerKind::StateText => {
+            if matches!(value, ComponentInputValue::ResourceReference(_)) {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentInputConsumerTypeMismatch,
+                    "state-text cannot consume a resource-reference component input",
+                ));
+            }
+            Ok((value.canonical_string(), None))
+        }
         ComponentInputConsumerKind::StateToken => {
             let token = match value {
                 ComponentInputValue::Token(value) => value.as_str(),

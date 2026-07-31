@@ -38,8 +38,9 @@ use htm_runtime::{
     MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT, MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS,
     MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM, MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM,
     MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_RANGE_CONTROLS_PER_DOCUMENT,
-    MAX_RANGE_CONTROLS_PER_ITEM, PeakBindingKey, RepeatSource, ShellAction, StateBindingKey,
-    StateToken, StateValueFormat, built_in_registry_names,
+    MAX_RANGE_CONTROLS_PER_ITEM, MAX_RESOURCE_REFERENCE_VALUES_PER_PREPARED_ROOT, PeakBindingKey,
+    RepeatSource, ShellAction, StateBindingKey, StateToken, StateValueFormat,
+    built_in_registry_names,
 };
 use htm_shell_host::{
     PerformanceDegradationReason, PipeWireAudioChannelPosition, PipeWireNodeDirection,
@@ -320,10 +321,13 @@ fn component_documentation_matches_the_composition_contract() {
         fs::read_to_string(root.join("docs/types/HTMShell.Component/Style.md")).unwrap();
     let resource_reference =
         fs::read_to_string(root.join("docs/types/HTMShell.Component/Resource.md")).unwrap();
+    let resource_input_reference =
+        fs::read_to_string(root.join("docs/types/HTMShell.Component/ResourceReferenceInput.md"))
+            .unwrap();
     let manifest_reference =
         fs::read_to_string(root.join("docs/types/HTMShell/ShellManifest.md")).unwrap();
     let public = format!(
-        "{package_guide}\n{guide}\n{reference}\n{input_reference}\n{slot_reference}\n{style_reference}\n{resource_reference}\n{manifest_reference}"
+        "{package_guide}\n{guide}\n{reference}\n{input_reference}\n{resource_input_reference}\n{slot_reference}\n{style_reference}\n{resource_reference}\n{manifest_reference}"
     );
 
     for statement in [
@@ -352,6 +356,16 @@ fn component_documentation_matches_the_composition_contract() {
         "state-reference",
         "action-reference",
         "resource-reference",
+        "`resourceTypes`",
+        "`required: true`",
+        "`input:icon`",
+        "parent accepted-kind set must be a subset",
+        "strict local",
+        "surface catalog",
+        "source stays owned",
+        "callee image owns",
+        "zero filesystem reads",
+        "ordinary root",
         "interpolation",
         "slots",
         "default or named content slots",
@@ -479,6 +493,13 @@ fn component_documentation_matches_the_composition_contract() {
         "| Supplied literal bytes per invocation | {} KiB |",
         MAX_COMPONENT_INPUT_LITERAL_BYTES / 1024
     )));
+    assert!(resource_input_reference.contains(&format!(
+        "| Concrete resource-reference values per prepared root | {} |",
+        formatted_decimal(MAX_RESOURCE_REFERENCE_VALUES_PER_PREPARED_ROOT as u64)
+    )));
+    assert!(resource_input_reference.contains(&format!(
+        "| Resources per surface | {MAX_COMPONENT_RESOURCE_DECLARATIONS} |"
+    )));
     assert!(slot_reference.contains(&format!(
         "| Slot declarations per component | {MAX_COMPONENT_SLOTS} |"
     )));
@@ -562,23 +583,82 @@ fn component_documentation_matches_the_composition_contract() {
     )));
 
     let manifest = ValidatedManifest::load(root.join("examples/package-graph/shell.json")).unwrap();
+    let example_manifest =
+        fs::read_to_string(root.join("examples/package-graph/shell.json")).unwrap();
+    let example_panel = fs::read_to_string(root.join("examples/package-graph/panel.html")).unwrap();
+    let example_components = fs::read_to_string(
+        root.join("examples/package-graph/packages/controls/components/status-card.html"),
+    )
+    .unwrap();
+    let example_component_manifest =
+        fs::read_to_string(root.join("examples/package-graph/packages/controls/shell.json"))
+            .unwrap();
+    let example_shared = fs::read_to_string(
+        root.join("examples/package-graph/packages/controls/shared/components/badge-label.html"),
+    )
+    .unwrap();
+    let example_styles = fs::read_to_string(
+        root.join("examples/package-graph/packages/controls/components/status-card.css"),
+    )
+    .unwrap();
+    for expected in [
+        "\"resources\"",
+        "\"surface-photo\"",
+        "\"surface-symbol\"",
+        "\"type\": \"resource-reference\"",
+        "\"resourceTypes\"",
+        "\"required\": true",
+    ] {
+        assert!(
+            format!("{example_manifest}\n{example_component_manifest}").contains(expected),
+            "package graph example omits {expected}"
+        );
+    }
+    for expected in [
+        "input-photo=\"resource:surface-photo\"",
+        "input-symbol=\"resource:surface-symbol\"",
+        "src=\"assets/root-projected.png\"",
+    ] {
+        assert!(
+            example_panel.contains(expected),
+            "package graph panel omits {expected}"
+        );
+    }
+    for expected in [
+        "input-icon=\"input:icon\"",
+        "input-icon=\"input:photo\"",
+        "input-icon=\"input:symbol\"",
+        "input-icon=\"resource:status-orb\"",
+        "src=\"input:photo\"",
+    ] {
+        assert!(
+            example_components.contains(expected),
+            "package graph component omits {expected}"
+        );
+    }
+    assert!(example_shared.contains("src=\"input:icon\""));
+    assert!(example_styles.contains("filter:"));
+    assert!(
+        root.join("examples/package-graph/assets/surface-symbol.svg")
+            .is_file()
+    );
     let snapshot = manifest.snapshot();
-    assert_eq!(snapshot.components().definitions().len(), 5);
+    assert_eq!(snapshot.components().definitions().len(), 9);
     assert_eq!(snapshot.components().totals().source_read_count, 2);
     assert_eq!(snapshot.components().totals().source_parse_count, 2);
     assert_eq!(snapshot.component_styles().sources().len(), 4);
     assert_eq!(snapshot.component_styles().totals().source_read_count, 4);
     assert_eq!(snapshot.component_styles().totals().source_parse_count, 4);
-    assert_eq!(snapshot.component_styles().associations().len(), 5);
-    assert_eq!(snapshot.component_resources().sources().len(), 6);
-    assert_eq!(snapshot.component_resources().totals().source_read_count, 6);
+    assert_eq!(snapshot.component_styles().associations().len(), 8);
+    assert_eq!(snapshot.component_resources().sources().len(), 8);
+    assert_eq!(snapshot.component_resources().totals().source_read_count, 8);
     assert_eq!(
         snapshot.component_resources().totals().source_decode_count,
-        4
+        5
     );
     assert_eq!(
         snapshot.component_resources().totals().source_parse_count,
-        2
+        3
     );
     assert_eq!(
         snapshot
@@ -587,7 +667,11 @@ fn component_documentation_matches_the_composition_contract() {
             .svg_resolver_statistics,
         Default::default()
     );
-    assert_eq!(snapshot.component_resources().associations().len(), 9);
+    assert_eq!(snapshot.component_resources().associations().len(), 11);
+    assert_eq!(
+        snapshot.component_resources().surface_associations().len(),
+        4
+    );
     assert_eq!(
         snapshot
             .components()
@@ -598,9 +682,13 @@ fn component_documentation_matches_the_composition_contract() {
         [
             "dev.coastlinesec.htmshell.shared:badge-label",
             "dev.coastlinesec.htmshell.shared:unstyled-note",
+            "dev.coastlinesec.htmshell.shared:resource-image",
             "dev.coastlinesec.htmshell.controls:status-card",
             "dev.coastlinesec.htmshell.controls:required-frame",
             "dev.coastlinesec.htmshell.controls:projected-label",
+            "dev.coastlinesec.htmshell.controls:resource-forwarder",
+            "dev.coastlinesec.htmshell.controls:resource-showcase",
+            "dev.coastlinesec.htmshell.controls:intrinsic-image",
         ]
     );
     let diagnostic = manifest.deterministic_package_graph_json().unwrap();
@@ -628,6 +716,15 @@ fn component_documentation_matches_the_composition_contract() {
         "\"component_raster_sources\"",
         "\"component_svg_sources\"",
         "\"component_resource_totals\"",
+        "\"surface_resource_associations\"",
+        "\"resource_types\"",
+        "\"resource_reference_values\"",
+        "\"resource_source_identity\"",
+        "\"resource_semantic_version\"",
+        "\"resource_owner\"",
+        "\"forwarding\"",
+        "\"original_owner\"",
+        "\"input_value\"",
         "\"resource_usages\"",
         "\"semantic_version\"",
         "\"format\"",

@@ -2,7 +2,7 @@
 
 HTMShell schema version 2 packages can export inert, reusable HTML fragments. A component definition is parsed and validated once while an immutable package snapshot candidate is built. An explicit `htm-use` then creates a fresh instance by cloning normalized template nodes. No source text is substituted or reparsed per instance.
 
-Components may declare bounded literal inputs, up to 32 default or named content slots, up to 16 package-owned stylesheets, and up to 32 static raster or simple SVG resources. They still have no local IDs, local state, implicit actions or service state, repeat integration, SVG subresources, CSS URL assets, or fonts.
+Components may declare bounded literal or required resource-reference inputs, up to 32 default or named content slots, up to 16 package-owned stylesheets, and up to 32 static raster or simple SVG resources. Surfaces may declare up to 32 strict local resources for typed assignment. Components still have no local IDs, local state, implicit actions or service state, repeat integration, SVG subresources, CSS URL assets, or fonts.
 
 ## Export a definition
 
@@ -54,7 +54,7 @@ Both `shell` and `library` packages may declare an optional ordered `components`
 }
 ```
 
-Each entry has `name`, `source`, an optional ordered `inputs` array, an optional ordered `slots` array, an optional ordered `styles` array, and an optional ordered `resources` array. The manifest owns the public export, input, slot, stylesheet association, and resource association tables. A template found in a file is not exported implicitly.
+Each entry has `name`, `source`, an optional ordered `inputs` array of literal or required resource-reference declarations, an optional ordered `slots` array, an optional ordered `styles` array, and an optional ordered `resources` array. The manifest owns the public export, input, slot, stylesheet association, and resource association tables. A template found in a file is not exported implicitly.
 
 Only the root shell package owns surfaces and topology. A library component always renders inside the root-owned document that explicitly instantiates it.
 
@@ -80,7 +80,7 @@ A source document contains one or more top-level declarations:
 
 Whitespace, comments, and ordinary parser metadata may surround declarations. Renderable content outside a declaration is invalid. Every manifest export must match exactly one declaration, every declaration must be exported, and duplicate names are invalid. Nested declaration templates and scripts are invalid.
 
-A definition may contain ordinary text and layout elements, ordinary classes, inline SVG without external references, non-resource inline styles, foreground filters, declared raster `<img>` elements, and nested `htm-use` directives. Declared component stylesheets and raster sources are read during package candidate validation. Raster sources are also decoded. Leaving a definition unused creates no surface, document instance, prepared resource usage, computed-style work, renderer resource, GPU upload, service demand, frame, or Wayland object.
+A definition may contain ordinary text and layout elements, ordinary classes, inline SVG without external references, non-resource inline styles, foreground filters, declared raster or simple SVG `<img>` elements, input-supplied resource images, and nested `htm-use` directives. Declared component stylesheets and resources are read during package candidate validation. Raster sources are decoded and simple SVG sources are parsed. Leaving a definition unused creates no surface, document instance, resource-reference value, prepared resource usage, computed-style work, renderer resource, GPU upload, service demand, frame, or Wayland object.
 
 The component profile rejects:
 
@@ -109,7 +109,7 @@ It can use a direct library dependency through the declaring package's alias:
 
 A nested component resolves references in its definition owner's package scope. Bare references select an export in that package. Qualified references use one direct dependency alias from that package. Parent aliases, transitive aliases, package IDs, filesystem paths, `self`, and `root` do not leak into the scope.
 
-`htm-use` requires one `component` attribute. Its only other accepted attributes are declared `input-*` literals. It accepts no `id`, `class`, `style`, or unprefixed input. Renderable direct children are accepted only when they route to a declared slot. Unknown references, attributes, inputs, slots, or unroutable content reject the complete candidate. Schema version 1 and manifestless headless roots cannot use `htm-use`.
+`htm-use` requires one `component` attribute. Its only other accepted attributes are declared `input-*` assignments. Literal inputs accept typed literals. Resource-reference inputs accept caller-local `resource:name` or static `input:name` forwarding. It accepts no `id`, `class`, `style`, or unprefixed input. Renderable direct children are accepted only when they route to a declared slot. Unknown references, attributes, inputs, slots, or unroutable content reject the complete candidate. Schema version 1 and manifestless headless roots cannot use `htm-use`.
 
 ## Literal inputs
 
@@ -171,7 +171,60 @@ Components consume a value only through their nearest host's `input.<name>` name
 </template>
 ```
 
-Nested components receive only their own declared literals and defaults. Parent inputs are not inherited or forwarded. Placeholder scanning, interpolation, expressions, state-reference inputs, action-reference inputs, and resource-reference inputs do not exist.
+Nested components receive only their own declared values. Literal parent inputs are not inherited or forwarded. Placeholder scanning, interpolation, expressions, state-reference inputs, and action-reference inputs do not exist.
+
+## Resource-reference inputs
+
+A reusable component may require one caller-authorized raster or simple SVG source:
+
+```json
+{
+  "name": "icon",
+  "type": "resource-reference",
+  "resourceTypes": ["raster", "svg"],
+  "required": true
+}
+```
+
+`resourceTypes` contains one or two unique entries from `raster` and `svg`. Order does not change the semantic kind set. The input is required-only: `required: true` must be present and defaults, optional values, and null are invalid.
+
+A schema version 2 panel or overlay can declare an ordered strict local `resources` array with at most 32 entries. The entries use the same exact `name`, `type`, and `source` shape, secure package-root-relative loader, formats, and limits as component resources. This catalog is used only for typed assignments from that surface root:
+
+```html
+<htm-use
+  component="controls.status-row"
+  input-icon="resource:warning-icon">
+</htm-use>
+```
+
+A component caller uses the same syntax to pass an intrinsic resource from its own definition catalog. The name always resolves in the caller scope. It never grants the callee another catalog lookup.
+
+A component statically forwards a received reference:
+
+```html
+<htm-use
+  component="nested-icon"
+  input-icon="input:icon">
+</htm-use>
+```
+
+The forwarding input must be a resource-reference input. The parent accepted-kind set must be a subset of the child accepted-kind set. Each hop receives a distinct immutable value identity while retaining the original source, semantic version, and owner. Forwarding is bounded by the component nesting depth of 32 and adds no state cell, observer, callback, timer, or runtime mutation.
+
+The callee consumes the value only through an ordinary component-owned or fallback image:
+
+```html
+<img src="input:icon" alt="">
+```
+
+The lowercase `input:` reference contains one input name and no slash, query, fragment, or percent encoding. No other element or attribute can consume it. Natural dimensions and ordinary image layout come from the underlying raster or simple SVG source.
+
+The source stays owned by the original surface or component association. The callee image owns a distinct usage. Fallback keeps callee DOM and style ownership while using the caller source. Projected caller content does not gain callee inputs, siblings do not share values, and surface catalogs remain isolated.
+
+All direct assignments, forwarding plans, kind checks, required values, and image consumers resolve before publication. A failed reference rejects the complete candidate and retains the last published snapshot. Assignment, forwarding, consumption, output instantiation, rendering, and device recovery perform no filesystem read, raster decode, or SVG parse. CPU and Vello reuse the existing immutable source paths. One prepared root may contain at most 16,384 concrete resource-reference values.
+
+Strict surface resources do not replace ordinary root resource loading. Existing root-relative images, external SVG, CSS resources, fonts, caching, and symlink behavior remain unchanged. Root `<img src="resource:name">` and root `<img src="input:name">` are still invalid.
+
+See the [resource-reference input reference](../types/HTMShell.Component/ResourceReferenceInput.md).
 
 ## Content slots
 
@@ -310,7 +363,7 @@ Every declared source, including one on an unused definition, is eagerly read an
 
 Definition content and fallback resolve against the callee definition catalog. Nested children use their own catalogs. Assigned slot content keeps caller ownership: root content keeps the root resource pipeline, and parent-component content keeps its parent definition catalog. Projection never grants access to a callee resource. Dependency resource aliases do not exist.
 
-The syntax applies only to `<img src>`. It does not add `srcset`, SVG `<image>` resources, CSS `url()`, fonts, media, data, resource-reference inputs, animation, network loading, or data URLs. See the [component resource reference](../types/HTMShell.Component/Resource.md).
+Intrinsic `resource:name` and passed `input:name` syntax applies only to `<img src>`. It does not add `srcset`, SVG `<image>` resources, CSS `url()`, fonts, media, data, optional or dynamic resources, animation, network loading, or data URLs. See the [component resource reference](../types/HTMShell.Component/Resource.md).
 
 ## Host and identity
 
@@ -341,6 +394,7 @@ All package manifests, component sources, component references, component cycles
 | Supplied inputs per invocation | 64 |
 | String input | 4,096 UTF-8 bytes |
 | Supplied literal bytes per invocation | 16 KiB |
+| Concrete resource-reference values per prepared root | 16,384 |
 | Slots per component | 32 |
 | Slot name | 64 bytes |
 | Stylesheets per component | 16 |
@@ -348,6 +402,7 @@ All package manifests, component sources, component references, component cycles
 | Component stylesheet path | 512 UTF-8 bytes |
 | Component stylesheet file | 1 MiB |
 | Image resources per component | 32 |
+| Image resources per surface | 32 |
 | Resource associations per package | 4,096 |
 | Unique image sources per package | 256 |
 | Resource name | 64 ASCII bytes |
@@ -366,6 +421,6 @@ All package manifests, component sources, component references, component cycles
 
 Component references form a separately validated dependency graph. Direct, indirect, and cross-package recursion cannot become current. The dependency-first definition order is deterministic, shared definitions are parsed once, and diamonds reuse one immutable definition.
 
-See the [package graph example](../../examples/package-graph/shell.json), the [local package guide](packages.md), the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference, the [component input reference](../types/HTMShell.Component/Input.md), the [slot reference](../types/HTMShell.Component/Slot.md), the [component style reference](../types/HTMShell.Component/Style.md), and the [component resource reference](../types/HTMShell.Component/Resource.md).
+See the [package graph example](../../examples/package-graph/shell.json), the [local package guide](packages.md), the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference, the [component input reference](../types/HTMShell.Component/Input.md), the [resource-reference input reference](../types/HTMShell.Component/ResourceReferenceInput.md), the [slot reference](../types/HTMShell.Component/Slot.md), the [component style reference](../types/HTMShell.Component/Style.md), and the [component resource reference](../types/HTMShell.Component/Resource.md).
 
-Local ID scoping, host styling, slotted-content selectors, package-global library styles, dynamic state and action bindings, repeat integration, advanced or subresource-bearing component SVG, CSS URL assets, fonts, resource-reference inputs, and hot reload remain unavailable.
+Local ID scoping, host styling, slotted-content selectors, package-global library styles, dynamic state and action bindings, repeat integration, advanced or subresource-bearing component SVG, CSS URL assets, fonts, optional or dynamic resource inputs, and hot reload remain unavailable.

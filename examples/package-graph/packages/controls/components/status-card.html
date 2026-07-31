@@ -69,3 +69,22 @@
     </p>
   </htm-use>
 </template>
+
+<template data-htm-component="resource-forwarder">
+  <htm-use component="shared.resource-image" input-icon="input:icon"></htm-use>
+</template>
+
+<template data-htm-component="resource-showcase">
+  <section class="passed-resource-showcase">
+    <htm-use component="resource-forwarder" input-icon="input:photo"></htm-use>
+    <htm-use component="shared.resource-image" input-icon="input:symbol"></htm-use>
+    <htm-use component="resource-forwarder" input-icon="resource:status-orb"></htm-use>
+    <slot>
+      <img class="passed-resource-fallback" src="input:photo" alt="">
+    </slot>
+  </section>
+</template>
+
+<template data-htm-component="intrinsic-image">
+  <htm-use component="resource-forwarder" input-icon="resource:status-orb"></htm-use>
+</template>

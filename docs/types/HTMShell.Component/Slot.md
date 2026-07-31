@@ -93,7 +93,7 @@ Projection changes placement, not ownership.
 
 Root-document content retains root state, action, ID, reference, package, resource, stylesheet, and semantic ownership. Content originating in a parent component retains that parent component instance, nearest `input.*` host, and component stylesheet scope. Projected content never gains callee inputs, callee selector ownership, or the callee package resource base.
 
-Fallback belongs to the callee definition. It is cloned per callee instance, uses callee literal inputs, component stylesheets, and declared raster or simple SVG resource catalog, and remains subject to the component static profile. It cannot use ordinary relative images, SVG subresources or advanced references, CSS URL assets, fonts, or component-local IDs.
+Fallback belongs to the callee definition. It is cloned per callee instance, uses callee literal or resource-reference inputs, component stylesheets, and declared raster or simple SVG resource catalog, and remains subject to the component static profile. A fallback `<img src="input:name">` remains callee-owned while consuming the caller-owned source. Fallback cannot use ordinary relative images, SVG subresources or advanced references, CSS URL assets, fonts, or component-local IDs.
 
 Repeat and contextual-repeat declarations cannot cross a projection boundary.
 
@@ -126,6 +126,6 @@ Declaration, template matching, required content, direct-child routing, caller s
 
 Assigned nodes count once. Fallback nodes count only when fallback is selected.
 
-Component-local IDs, `::slotted()`, repeat projection, advanced or subresource-bearing component SVG, CSS URL assets, resource-reference inputs, dynamic slot switching, and hot reload are unavailable. Declared raster and simple SVG images are supported on component-owned `<img src="resource:name">` nodes and keep the caller or callee ownership described above.
+Component-local IDs, `::slotted()`, repeat projection, advanced or subresource-bearing component SVG, CSS URL assets, optional or dynamic resource inputs, dynamic slot switching, and hot reload are unavailable. Declared raster and simple SVG images are supported on component-owned `<img src="resource:name">` nodes. Required resource-reference values may be consumed through `<img src="input:name">`. Projection never changes the caller or callee ownership described above.
 
 See [components](../../guide/components.md), [`HTMShell.Component`](README.md), [component inputs](Input.md), [component styles](Style.md), and [component resources](Resource.md).

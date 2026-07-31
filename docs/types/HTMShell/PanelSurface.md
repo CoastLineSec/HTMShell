@@ -14,7 +14,14 @@ A panel is a persistent top-edge layer-shell surface created on every eligible o
   "outputs": "all",
   "edge": "top",
   "thickness": 62,
-  "reserveSpace": true
+  "reserveSpace": true,
+  "resources": [
+    {
+      "name": "status-symbol",
+      "type": "svg",
+      "source": "assets/status-symbol.svg"
+    }
+  ]
 }
 ```
 
@@ -28,6 +35,7 @@ A panel is a persistent top-edge layer-shell surface created on every eligible o
 | `edge` | Must be `top`. |
 | `thickness` | Logical height from 1 through 512. |
 | `reserveSpace` | Reserves `thickness` when true, otherwise reserves no space. |
+| `resources` | Optional ordered strict raster or simple SVG catalog, at most 32 declarations. |
 
 ## Notes
 
@@ -38,5 +46,7 @@ Every output owns an independent parsed document, protocol role, input state, bu
 Scale 1 is the fallback. Compositor-preferred fractional presentation is used when fractional-scale and viewporter are both available.
 
 Only one top panel template is supported. Other edges, multiple panels, keyboard focus, and persistent output selection are unavailable.
+
+The surface catalog is assignment-only. The panel root may pass `resource:name` to a declared component `resource-reference` input. Ordinary root images keep the existing document-relative provider and cannot use `resource:name`. The source remains panel-template-owned while the receiving component image owns its usage. See [resource-reference inputs](../HTMShell.Component/ResourceReferenceInput.md).
 
 See [`ShellManifest`](ShellManifest.md) and [`OverlaySurface`](OverlaySurface.md).

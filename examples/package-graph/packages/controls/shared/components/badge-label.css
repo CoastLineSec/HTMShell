@@ -17,3 +17,9 @@
   color: #7cc4ff;
   font-size: 0.75rem;
 }
+
+.package-passed-image {
+  width: 44px;
+  height: 32px;
+  border-radius: 7px;
+}

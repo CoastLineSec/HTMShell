@@ -138,6 +138,74 @@
           "source": "assets/control-symbol.svg"
         }
       ]
+    },
+    {
+      "name": "resource-forwarder",
+      "source": "components/status-card.html",
+      "inputs": [
+        {
+          "name": "icon",
+          "type": "resource-reference",
+          "resourceTypes": [
+            "raster",
+            "svg"
+          ],
+          "required": true
+        }
+      ],
+      "styles": [
+        "components/status-card.css"
+      ]
+    },
+    {
+      "name": "resource-showcase",
+      "source": "components/status-card.html",
+      "inputs": [
+        {
+          "name": "photo",
+          "type": "resource-reference",
+          "resourceTypes": [
+            "raster"
+          ],
+          "required": true
+        },
+        {
+          "name": "symbol",
+          "type": "resource-reference",
+          "resourceTypes": [
+            "raster",
+            "svg"
+          ],
+          "required": true
+        }
+      ],
+      "slots": [
+        {
+          "name": "default",
+          "required": false
+        }
+      ],
+      "styles": [
+        "components/status-card.css"
+      ],
+      "resources": [
+        {
+          "name": "status-orb",
+          "type": "raster",
+          "source": "assets/status-orb.png"
+        }
+      ]
+    },
+    {
+      "name": "intrinsic-image",
+      "source": "components/status-card.html",
+      "resources": [
+        {
+          "name": "status-orb",
+          "type": "raster",
+          "source": "assets/status-orb.png"
+        }
+      ]
     }
   ]
 }

@@ -12,7 +12,14 @@ An overlay is a transient, output-local layer-shell surface.
   "kind": "overlay",
   "document": "overlay.html",
   "outputs": "all",
-  "initiallyOpen": false
+  "initiallyOpen": false,
+  "resources": [
+    {
+      "name": "profile-photo",
+      "type": "raster",
+      "source": "assets/profile.webp"
+    }
+  ]
 }
 ```
 
@@ -24,6 +31,7 @@ An overlay is a transient, output-local layer-shell surface.
 | `document` | Selects the local HTML document. |
 | `outputs` | Must be `all`. |
 | `initiallyOpen` | Controls initial mapping. |
+| `resources` | Optional ordered strict raster or simple SVG catalog, at most 32 declarations. |
 
 ## Notes
 
@@ -36,5 +44,7 @@ Closing attaches a null buffer and removes the transient role after presentation
 Each output has an independent overlay document and open state. A panel action affects only the overlay on the same output.
 
 Scale 1 and compositor-preferred fractional presentation follow the same rules as panels. Multiple overlays, keyboard focus, and moving a live role between outputs are unavailable.
+
+The surface catalog is visible only to resource-reference assignments made by this overlay root. It does not affect ordinary root image, CSS, or external SVG loading and is not visible to the panel or another overlay. See [resource-reference inputs](../HTMShell.Component/ResourceReferenceInput.md).
 
 See [`ShellManifest`](ShellManifest.md), [`PanelSurface`](PanelSurface.md), and [overlay actions](../HTMShell.Actions/Overlay.md).

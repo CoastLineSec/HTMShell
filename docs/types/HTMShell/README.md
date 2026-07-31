@@ -1,6 +1,6 @@
 # `HTMShell`
 
-The `HTMShell` module describes the local manifest and its portable layer-shell surfaces. Package identity and local dependencies are documented by [`HTMShell.Package`](../HTMShell.Package/README.md).
+The `HTMShell` module describes the local manifest and its portable layer-shell surfaces, including strict surface-local resources for typed component assignment. Package identity and local dependencies are documented by [`HTMShell.Package`](../HTMShell.Package/README.md).
 
 ## Types
 

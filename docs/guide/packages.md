@@ -38,6 +38,12 @@ The `shell.json` manifest uses a `package` object and an ordered `dependencies` 
           "name": "label",
           "type": "string",
           "required": true
+        },
+        {
+          "name": "icon",
+          "type": "resource-reference",
+          "resourceTypes": ["raster", "svg"],
+          "required": true
         }
       ],
       "slots": [
@@ -63,7 +69,14 @@ The `shell.json` manifest uses a `package` object and an ordered `dependencies` 
       "outputs": "all",
       "edge": "top",
       "thickness": 52,
-      "reserveSpace": true
+      "reserveSpace": true,
+      "resources": [
+        {
+          "name": "warning-icon",
+          "type": "svg",
+          "source": "assets/warning.svg"
+        }
+      ]
     },
     {
       "id": "overlay",
@@ -100,11 +113,13 @@ Package versions are optional SemVer 2.0.0 metadata. HTMShell records a declared
 
 Unknown fields are rejected. Library manifests must omit `surfaces`.
 
-The optional ordered `components` array is accepted only by schema version 2. Each entry has a `name`, a package-relative `source`, an optional ordered `inputs` array, an optional ordered `slots` array with up to 32 unique default or named declarations, an optional ordered `styles` array with up to 16 component-owned stylesheet paths, and an optional ordered `resources` array with up to 32 named raster or simple SVG declarations. The manifest export, input, slot, stylesheet, and resource association tables are authoritative. Every exported name must match exactly one inert template declaration, and every declaration must be exported. Inputs, slot projections, contained stylesheet sources, selector ownership, image sources, and image usages resolve before publication. See [components](components.md).
+The optional ordered `components` array is accepted only by schema version 2. Each entry has a `name`, a package-relative `source`, an optional ordered `inputs` array, an optional ordered `slots` array with up to 32 unique default or named declarations, an optional ordered `styles` array with up to 16 component-owned stylesheet paths, and an optional ordered `resources` array with up to 32 named raster or simple SVG declarations. Inputs may use the six literal types or the required `resource-reference` type. The manifest export, input, slot, stylesheet, and resource association tables are authoritative. Every exported name must match exactly one inert template declaration, and every declaration must be exported. Inputs, slot projections, contained stylesheet sources, selector ownership, image sources, assignments, forwarding, and image usages resolve before publication. See [components](components.md).
 
 Component stylesheet paths are relative to the package that owns the export. They are bounded to 512 UTF-8 bytes and 1 MiB per regular non-symlink file. One package may declare at most 64 unique component stylesheet files. A shared path is read and parsed once per package snapshot candidate, while each definition retains its own ordered association. Invalid CSS, imports, URL assets, font sources, or unsupported scope selectors reject the complete candidate without fetching resources.
 
 Component resource declarations contain exactly `name`, `type`, and `source`. Supported types are `raster` and `svg`. Sources resolve from the owning package root, are opened without following any symlink component, and are eagerly validated even when the definition is unused. Raster sources accept PNG, JPEG, and static WebP and decode during candidate construction. Simple SVG sources parse once under a geometry-only allowlist with no CSS, text, fonts, images, references, IDs, fragments, subresources, scripts, or animation. See [component resources](../types/HTMShell.Component/Resource.md).
+
+A schema version 2 panel or overlay may declare up to 32 strict local resources with the same entry shape and loader. Its catalog is visible only when that surface root assigns `resource:name` to a declared component `resource-reference` input. A component may assign one of its own resources in the same way or forward a received value with `input:name`; the callee consumes it through `<img src="input:name">`. The source stays caller-owned and the image usage is callee-owned. No path or catalog authority crosses the input boundary, and no read, decode, or parse occurs after catalog construction. Ordinary root image, external SVG, CSS, font, cache, and symlink behavior remains unchanged. See [resource-reference inputs](../types/HTMShell.Component/ResourceReferenceInput.md).
 
 ## Package IDs and aliases
 
@@ -176,10 +191,12 @@ A manifestless headless directory containing `index.html` remains valid and uses
 | Supplied inputs per invocation | 64 |
 | String input | 4,096 UTF-8 bytes |
 | Supplied literal bytes per invocation | 16 KiB |
+| Concrete resource-reference values per prepared root | 16,384 |
 | Slots per component | 32 |
 | Slot name | 64 bytes |
+| Image resources per surface | 32 |
 
-Manifest, package, component, input, slot, stylesheet, image resource, and graph errors reject the candidate rather than truncating it. Component definitions, literal typed inputs, caller-owned default or named slot projection, scoped component stylesheets, named static raster images, and simple self-contained SVG geometry are supported. Component-local IDs, dynamic state or action bindings, repeat integration, advanced or subresource-bearing SVG, CSS URL assets, fonts, resource-reference inputs, and hot reload are not implemented.
+Manifest, package, component, input, slot, stylesheet, image resource, and graph errors reject the candidate rather than truncating it. Component definitions, literal typed inputs, required static resource-reference inputs, caller-owned default or named slot projection, scoped component stylesheets, named static raster images, and simple self-contained SVG geometry are supported. Component-local IDs, dynamic state or action bindings, repeat integration, advanced or subresource-bearing SVG, CSS URL assets, fonts, optional or dynamic resource inputs, and hot reload are not implemented.
 
 See the [package graph example](../../examples/package-graph/shell.json), the [`HTMShell.Package`](../types/HTMShell.Package/README.md) reference, and the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference.
 
