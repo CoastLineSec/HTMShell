@@ -50,3 +50,4 @@ strip = false
 [patch.crates-io]
 libspa-sys = { path = "third-party/libspa-sys" }
 pipewire-sys = { path = "third-party/pipewire-sys" }
+vello_encoding = { path = "third-party/vello_encoding" }

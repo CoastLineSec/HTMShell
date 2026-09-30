@@ -5,6 +5,9 @@ mod painter;
 mod partial;
 mod shadow_effects;
 
+#[cfg(test)]
+mod atlas_regression;
+
 pub use live::{
     LiveGpuBackendInfo, LiveGpuConfiguration, LiveGpuError, LiveGpuErrorKind, LiveGpuPresenter,
     LiveGpuStatistics, LiveWaylandHandle, PendingLiveGpuFrame,
