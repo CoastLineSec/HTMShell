@@ -329,14 +329,10 @@ pub(crate) fn build_retained_scene_with_resources(
     let slots = author_slots(document);
     let maximum_nodes = slots
         .len()
-        .checked_mul(2)
-        .and_then(|count| count.checked_add(1))
+        // One primary node per authored slot, plus the surface clear node.
+        // Effects and clips are attached to that primary node, not wrappers.
+        .checked_add(1)
         .ok_or_else(|| RuntimeError::LimitExceeded("scene-node count overflow".into()))?;
-    if maximum_nodes > MAX_SCENE_NODES {
-        return Err(RuntimeError::LimitExceeded(format!(
-            "retained scene could require {maximum_nodes} nodes; limit is {MAX_SCENE_NODES}"
-        )));
-    }
 
     let paint_indices: BTreeMap<_, _> = collect_retained_paint_order(document)
         .into_iter()
@@ -362,7 +358,7 @@ pub(crate) fn build_retained_scene_with_resources(
     }
 
     let root = SceneNodeId::root(document_identity);
-    let mut nodes = Vec::with_capacity(maximum_nodes);
+    let mut nodes = Vec::with_capacity(maximum_nodes.min(MAX_SCENE_NODES));
     nodes.push(SceneNode {
         id: root,
         parent: None,
@@ -501,6 +497,11 @@ pub(crate) fn build_retained_scene_with_resources(
         if !visible {
             visual_parents.insert(slot, visual_parent);
             continue;
+        }
+        if nodes.len() == MAX_SCENE_NODES {
+            return Err(RuntimeError::LimitExceeded(format!(
+                "retained scene exceeds {MAX_SCENE_NODES} nodes"
+            )));
         }
         if foreground_filter.as_ref().is_some_and(Result::is_ok) {
             active_filtered_elements = active_filtered_elements.saturating_add(1);
@@ -1330,6 +1331,41 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn retained_scene_budget_counts_actual_primary_nodes() {
+        fn groups(count: usize) -> String {
+            let leaves = count - 5;
+            (0..5)
+                .map(|index| {
+                    format!(
+                        "<section>{}</section>",
+                        "<div></div>".repeat(leaves / 5 + usize::from(index < leaves % 5))
+                    )
+                })
+                .collect()
+        }
+        let base = retained(&document("<body></body>"), 1).nodes.len();
+        let count = MAX_SCENE_NODES - base;
+        let exact = document(&format!("<body>{}</body>", groups(count)));
+        let scene = retained(&exact, 1);
+        assert_eq!(scene.nodes.len(), MAX_SCENE_NODES);
+        let over = document(&format!("<body>{}</body>", groups(count + 1)));
+        assert!(matches!(
+            build_retained_scene(
+                &over,
+                &IdentityRegistry::from_document(&over),
+                ExperimentalDocumentIdentity { serial: 5 },
+                SceneRevision(1),
+                ViewportSpec {
+                    logical_width: 200,
+                    logical_height: 120,
+                    ..Default::default()
+                },
+            ),
+            Err(RuntimeError::LimitExceeded(_))
+        ));
     }
 
     fn scene(revision: u64, nodes: Vec<SceneNode>) -> RetainedScene {

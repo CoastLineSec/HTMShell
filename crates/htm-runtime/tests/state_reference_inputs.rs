@@ -684,7 +684,14 @@ fn state_values_and_consumer_bindings_accept_the_exact_limits() {
         .map(|_| r#"<span data-htm-element="state-text" data-htm-bind="input.time"></span>"#)
         .collect::<String>();
     let consumer_uses = (0..consumer_instances)
-        .map(|_| r#"<htm-use component="state-consumers" input-time="state:time"></htm-use>"#)
+        // Keep each paint parent below the independent 10,000-child limit.
+        .map(|index| {
+            format!(
+                "{}<htm-use component=\"state-consumers\" input-time=\"state:time\"></htm-use>{}",
+                if index % 200 == 0 { "<section>" } else { "" },
+                if index % 200 == 199 { "</section>" } else { "" }
+            )
+        })
         .collect::<String>();
     let maximum_bindings = Fixture::new();
     maximum_bindings.package(
@@ -719,7 +726,7 @@ fn state_values_and_consumer_bindings_accept_the_exact_limits() {
         consumer_instances * consumer_count
     );
     // Candidate acceptance must cover the constructed DOM, not just binding counts.
-    LiveDocument::load_surface_snapshot(
+    let mut live = LiveDocument::load_surface_snapshot(
         Arc::clone(&snapshot),
         panel,
         LiveDocumentKind::Panel,
@@ -727,6 +734,7 @@ fn state_values_and_consumer_bindings_accept_the_exact_limits() {
         96,
     )
     .unwrap();
+    live.render().unwrap();
 
     let overflowing_consumers = consumers.repeat(2);
     let mut loader = PackageSnapshotLoader::new();
