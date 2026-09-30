@@ -3137,10 +3137,14 @@ fn normalize_component_node(
                 return Ok(UnresolvedTemplateNode::InputConsumer {
                     name: element.name.clone(),
                     attributes: attributes_without_slot(element),
-                    children: children
-                        .into_iter()
-                        .filter(|child| matches!(child, UnresolvedTemplateNode::Comment { .. }))
-                        .collect(),
+                    children: if consumer_kind == ComponentInputConsumerKind::BooleanEnabled {
+                        children
+                    } else {
+                        children
+                            .into_iter()
+                            .filter(|child| matches!(child, UnresolvedTemplateNode::Comment { .. }))
+                            .collect()
+                    },
                     consumer_kind,
                     input,
                     value_format,

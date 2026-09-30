@@ -325,6 +325,56 @@ fn all_four_state_projections_use_the_existing_finite_consumers() {
 }
 
 #[test]
+fn boolean_state_consumers_preserve_authored_children_for_every_availability() {
+    let fixture = Fixture::new();
+    let declaration = export(
+        "state-button",
+        &format!("[{}]", state_input("enabled", "boolean")),
+    )
+    .replace(
+        r#""resources":[]"#,
+        r#""resources":[{"name":"icon","type":"svg","source":"assets/icon.svg"}]"#,
+    );
+    fixture.package(
+        &format!("[{declaration}]"),
+        r#"<template data-htm-component="state-button"><button data-htm-enabled-bind="input.enabled">Provider button <span>Nested label</span><img src="resource:icon" alt="Static icon"></button></template>"#,
+        r#"[{"name":"enabled","source":"power_profile.availability","valueType":"boolean"}]"#,
+        "[]",
+        r#"<htm-use component="state-button" input-enabled="state:enabled"></htm-use>"#,
+    );
+    fixture.write(
+        "assets/icon.svg",
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12"><rect width="12" height="12" fill="#ff0000"/></svg>"##,
+    );
+    let snapshot = PackageSnapshotLoader::new()
+        .load_manifest(fixture.root.join("shell.json"))
+        .unwrap();
+    let panel = &snapshot.root_manifest().unwrap().surfaces[0];
+    let mut live = LiveDocument::load_surface_snapshot(
+        Arc::clone(&snapshot),
+        panel,
+        LiveDocumentKind::Panel,
+        480,
+        96,
+    )
+    .unwrap();
+    assert_eq!(live.component_resource_usages().len(), 1);
+    let source = live.component_resource_usages()[0].source().id().clone();
+    for enabled in [Some(true), Some(false), None, Some(true)] {
+        live.apply_bound_booleans(&[(StateBindingKey::PowerProfileAvailability, enabled)])
+            .unwrap();
+        assert!(
+            live.element_text("panel-root")
+                .unwrap()
+                .contains("Provider button Nested label")
+        );
+        assert_eq!(live.component_resource_usages().len(), 1);
+        assert_eq!(live.component_resource_usages()[0].source().id(), &source);
+        live.render().unwrap();
+    }
+}
+
+#[test]
 fn surface_aliases_and_forwarding_fail_closed() {
     let input = format!("[{}]", state_input("time", "string"));
     let cases = [
