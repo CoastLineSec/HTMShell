@@ -795,6 +795,7 @@ struct PresentedFrame {
     buffer_height: u32,
     render_us: u64,
     conversion_us: u64,
+    follow_up_required: bool,
 }
 
 #[cfg(feature = "gpu-renderer")]
@@ -3012,6 +3013,9 @@ impl State {
             buffer_height: request.buffer_height,
             render_us: rendered_micros.max(milliseconds_to_microseconds(runtime_render_ms)),
             conversion_us: 0,
+            // Both successful reconfiguration and CPU fallback require one
+            // frame after this already-presented buffer's callback completes.
+            follow_up_required: suboptimal,
         }))
     }
 
@@ -3350,11 +3354,14 @@ impl State {
                 buffer_height: frame.buffer_height,
                 render_us: milliseconds_to_microseconds(frame.render_ms),
                 conversion_us,
+                follow_up_required: false,
             });
         }
         let presented = presented.expect("a presenter completed the selected frame");
         let surface_state = &mut self.surfaces[index];
-        surface_state.scheduler.frame_committed();
+        surface_state
+            .scheduler
+            .frame_committed_with_follow_up(presented.follow_up_required);
         surface_state.mapped = true;
         surface_state.map_state.mapped();
         surface_state.configures.mark_presented();

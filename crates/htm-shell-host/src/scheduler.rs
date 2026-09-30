@@ -22,8 +22,12 @@ impl FrameScheduler {
     }
 
     pub fn frame_committed(&mut self) {
+        self.frame_committed_with_follow_up(false);
+    }
+
+    pub fn frame_committed_with_follow_up(&mut self, follow_up_required: bool) {
         self.frame_callback_outstanding = true;
-        self.dirty = false;
+        self.dirty = follow_up_required;
     }
 
     pub fn frame_callback_done(&mut self) {
@@ -87,5 +91,22 @@ mod tests {
         );
         scheduler.frame_callback_done();
         assert_eq!(scheduler.decision(true, true), ScheduleDecision::Render);
+    }
+
+    #[test]
+    fn recovery_invalidations_survive_commit_then_return_to_idle() {
+        let mut scheduler = FrameScheduler::default();
+        scheduler.mark_dirty();
+        scheduler.frame_committed_with_follow_up(true);
+        assert!(scheduler.dirty());
+        assert_eq!(
+            scheduler.decision(true, true),
+            ScheduleDecision::WaitForFrameCallback
+        );
+        scheduler.frame_callback_done();
+        assert_eq!(scheduler.decision(true, true), ScheduleDecision::Render);
+        scheduler.frame_committed_with_follow_up(false);
+        scheduler.frame_callback_done();
+        assert_eq!(scheduler.decision(true, true), ScheduleDecision::Idle);
     }
 }
