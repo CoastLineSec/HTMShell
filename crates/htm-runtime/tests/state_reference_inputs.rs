@@ -349,7 +349,13 @@ fn boolean_state_consumers_preserve_authored_children_for_every_availability() {
     let snapshot = PackageSnapshotLoader::new()
         .load_manifest(fixture.root.join("shell.json"))
         .unwrap();
-    let panel = &snapshot.root_manifest().unwrap().surfaces[0];
+    let panel = snapshot
+        .root_manifest()
+        .unwrap()
+        .surfaces
+        .iter()
+        .find(|surface| surface.id() == "panel")
+        .unwrap();
     let mut live = LiveDocument::load_surface_snapshot(
         Arc::clone(&snapshot),
         panel,
@@ -360,11 +366,17 @@ fn boolean_state_consumers_preserve_authored_children_for_every_availability() {
     .unwrap();
     assert_eq!(live.component_resource_usages().len(), 1);
     let source = live.component_resource_usages()[0].source().id().clone();
+    let consumer_id = format!(
+        "\0component-state:{}",
+        live.component_input_consumers()[0]
+            .state_binding_id()
+            .unwrap()
+    );
     for enabled in [Some(true), Some(false), None, Some(true)] {
         live.apply_bound_booleans(&[(StateBindingKey::PowerProfileAvailability, enabled)])
             .unwrap();
         assert!(
-            live.element_text("panel-root")
+            live.element_text(&consumer_id)
                 .unwrap()
                 .contains("Provider button Nested label")
         );
