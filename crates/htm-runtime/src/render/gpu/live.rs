@@ -1395,6 +1395,7 @@ impl LiveGpuPresenter {
     }
 
     pub fn release_surface(&mut self, surface: RenderSurfaceId) {
+        self.backend.release_surface_recording(surface);
         if let Some(mut target) = self.targets.remove(&surface) {
             let releases = u64::from(target.backing.is_some()) * 2;
             destroy_target_images(&mut target);
@@ -1410,6 +1411,7 @@ impl LiveGpuPresenter {
         self.targets.clear();
         self.pipelines.clear();
         self.backend.prepared.clear();
+        self.backend.prepared_surfaces.clear();
         self.backend.cache.clear();
         self.backend.device_generation =
             DeviceGeneration(self.backend.device_generation.0.saturating_add(1));

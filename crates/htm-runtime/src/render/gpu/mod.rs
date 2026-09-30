@@ -323,6 +323,14 @@ struct OffscreenTarget {
     initialized: bool,
 }
 
+fn retain_live_recordings<T>(
+    recordings: &mut BTreeMap<(ExperimentalDocumentIdentity, SceneRevision), T>,
+    owners: &BTreeMap<RenderSurfaceId, ExperimentalDocumentIdentity>,
+) {
+    let live: BTreeSet<_> = owners.values().copied().collect();
+    recordings.retain(|(document, _), _| live.contains(document));
+}
+
 pub(crate) struct VelloOffscreenRenderer {
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
@@ -338,6 +346,7 @@ pub(crate) struct VelloOffscreenRenderer {
     next_target_generation: u64,
     targets: BTreeMap<RenderSurfaceId, OffscreenTarget>,
     prepared: BTreeMap<(ExperimentalDocumentIdentity, SceneRevision), GpuPreparedScene>,
+    prepared_surfaces: BTreeMap<RenderSurfaceId, ExperimentalDocumentIdentity>,
     cache: GpuResourceCache,
     statistics: GpuStatistics,
     shutdown: bool,
@@ -476,6 +485,7 @@ impl VelloOffscreenRenderer {
             next_target_generation: 0,
             targets: BTreeMap::new(),
             prepared: BTreeMap::new(),
+            prepared_surfaces: BTreeMap::new(),
             cache: GpuResourceCache::default(),
             statistics,
             shutdown: false,
@@ -492,6 +502,14 @@ impl VelloOffscreenRenderer {
 
     pub(crate) fn cache_usage(&self) -> (usize, u64) {
         (self.cache.entries.len(), self.cache.bytes)
+    }
+
+    fn release_surface_recording(&mut self, surface: RenderSurfaceId) {
+        self.prepared_surfaces.remove(&surface);
+        retain_live_recordings(&mut self.prepared, &self.prepared_surfaces);
+        // Only metadata not referenced by a surviving recording is retired.
+        self.release_resources(&[])
+            .expect("GPU metadata retirement is infallible");
     }
 
     fn allocate_target(&mut self, target: RenderTarget) -> Result<OffscreenTarget, BackendError> {
@@ -720,6 +738,9 @@ impl Renderer for VelloOffscreenRenderer {
         }
         self.cache
             .prepare(self.device_generation, plan, &mut self.statistics)?;
+        self.prepared_surfaces
+            .insert(plan.surface, prepared.document);
+        retain_live_recordings(&mut self.prepared, &self.prepared_surfaces);
         self.prepared
             .retain(|(document, _), _| *document != prepared.document);
         self.prepared
@@ -920,15 +941,6 @@ impl Renderer for VelloOffscreenRenderer {
             }
             keep
         });
-        if self.prepared.len() > 64 {
-            let newest = self
-                .prepared
-                .keys()
-                .next_back()
-                .copied()
-                .expect("nonempty prepared map");
-            self.prepared.retain(|key, _| *key == newest);
-        }
         Ok(())
     }
 
@@ -938,6 +950,7 @@ impl Renderer for VelloOffscreenRenderer {
             target.readback.destroy();
         }
         self.prepared.clear();
+        self.prepared_surfaces.clear();
         self.cache.clear();
         self.renderer = vello::Renderer::new(
             &self.device,
@@ -979,6 +992,7 @@ impl Renderer for VelloOffscreenRenderer {
     }
 
     fn release_target(&mut self, surface: RenderSurfaceId) {
+        self.release_surface_recording(surface);
         if let Some(target) = self.targets.remove(&surface) {
             target.texture.destroy();
             target.readback.destroy();
@@ -991,6 +1005,7 @@ impl Renderer for VelloOffscreenRenderer {
             target.readback.destroy();
         }
         self.prepared.clear();
+        self.prepared_surfaces.clear();
         self.cache.clear();
         self.device.destroy();
         self.shutdown = true;
@@ -1332,6 +1347,45 @@ mod tests {
         BlendMode, Blob, Color, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat,
         ImageQuality,
     };
+
+    #[test]
+    fn final_surface_release_retires_recordings_without_evicting_survivors() {
+        let survivor = ExperimentalDocumentIdentity { serial: 1 };
+        let first_surface = RenderSurfaceId {
+            instance: 1,
+            generation: 1,
+        };
+        let second_surface = RenderSurfaceId {
+            instance: 2,
+            generation: 1,
+        };
+        let retained = Arc::new(vec![1u8]);
+        let retained_weak = Arc::downgrade(&retained);
+        let mut owners = BTreeMap::from([(first_surface, survivor)]);
+        let mut recordings = BTreeMap::from([((survivor, SceneRevision(1)), retained)]);
+        for serial in 2..502 {
+            let transient = ExperimentalDocumentIdentity { serial };
+            let bytes = Arc::new(vec![2u8]);
+            let weak = Arc::downgrade(&bytes);
+            owners.insert(second_surface, transient);
+            recordings.insert((transient, SceneRevision(1)), bytes);
+            retain_live_recordings(&mut recordings, &owners);
+            assert_eq!(recordings.len(), 2);
+            owners.remove(&second_surface);
+            retain_live_recordings(&mut recordings, &owners);
+            assert_eq!(recordings.len(), 1);
+            assert!(weak.upgrade().is_none());
+            assert!(retained_weak.upgrade().is_some());
+        }
+        // Two surfaces may share a document; only its last owner retires it.
+        owners.insert(second_surface, survivor);
+        owners.remove(&first_surface);
+        retain_live_recordings(&mut recordings, &owners);
+        assert!(retained_weak.upgrade().is_some());
+        owners.clear();
+        retain_live_recordings(&mut recordings, &owners);
+        assert!(retained_weak.upgrade().is_none());
+    }
 
     fn proof_plan(surface: RenderSurfaceId, effect: Option<SceneEffect>) -> FramePlan {
         let document = ExperimentalDocumentIdentity { serial: 41 };
