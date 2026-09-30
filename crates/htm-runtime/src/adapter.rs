@@ -351,6 +351,18 @@ pub(crate) fn validate_document_limits(document: &HtmlDocument) -> Result<(), Ru
         let Some(node) = document.get_node(node_id) else {
             continue;
         };
+        if let Some(element) = node.element_data()
+            && element.name.ns.as_ref() == "http://www.w3.org/2000/svg"
+        {
+            crate::resource::validate_svg_element(
+                element.name.local.as_ref(),
+                element
+                    .attrs
+                    .iter()
+                    .map(|attribute| (attribute.name.local.as_ref(), attribute.value.as_str())),
+            )
+            .map_err(|message| RuntimeError::InvalidPackage(message.to_owned()))?;
+        }
         stack.extend(node.children.iter().rev().map(|child| (*child, depth + 1)));
     }
     Ok(())

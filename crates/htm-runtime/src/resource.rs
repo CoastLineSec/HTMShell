@@ -89,20 +89,21 @@ impl LocalOnlyResourceProvider {
         let Ok(text) = std::str::from_utf8(bytes) else {
             return Err("SVG is not UTF-8");
         };
-        let lowered = text.to_ascii_lowercase();
-        const REJECTED: [&str; 9] = [
-            "<script",
-            "<foreignobject",
-            "href=\"http://",
-            "href=\"https://",
-            "href=\"//",
-            "href='//",
-            "url(http",
-            "file://",
-            "javascript:",
-        ];
-        if REJECTED.iter().any(|needle| lowered.contains(needle)) {
-            return Err("SVG contains an active or external reference");
+        let document = usvg::roxmltree::Document::parse_with_options(
+            text,
+            usvg::roxmltree::ParsingOptions {
+                allow_dtd: false,
+                nodes_limit: 50_000,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| "SVG XML is invalid or exceeds the structural limit")?;
+        for node in document.descendants().filter(|node| node.is_element()) {
+            validate_svg_element(
+                node.tag_name().name(),
+                node.attributes()
+                    .map(|attribute| (attribute.name(), attribute.value())),
+            )?;
         }
         Ok(())
     }
@@ -231,7 +232,25 @@ impl NetProvider for LocalOnlyResourceProvider {
             }
         };
 
-        if resource_kind == "svg"
+        // Blitz sniffs SVG after raster decoding fails, regardless of extension.
+        // Validate every XML-shaped payload before it reaches that fallback.
+        // Compressed SVG cannot be inspected under this bounded source profile.
+        if bytes.starts_with(&[0x1f, 0x8b]) {
+            self.reject(
+                &url,
+                resource_kind,
+                "rejected",
+                "compressed SVG is unsupported",
+                handler,
+            );
+            return;
+        }
+        let xml_shaped = std::str::from_utf8(&bytes).is_ok_and(|text| {
+            text.trim_start_matches('\u{feff}')
+                .trim_start()
+                .starts_with('<')
+        });
+        if (resource_kind == "svg" || xml_shaped)
             && let Err(detail) = Self::validate_svg(&bytes)
         {
             self.reject(&url, resource_kind, "rejected", detail, handler);
@@ -250,5 +269,61 @@ impl NetProvider for LocalOnlyResourceProvider {
             byte_count: Some(bytes.len()),
         });
         handler.bytes(url, Bytes::from(bytes));
+    }
+}
+
+// This runs on decoded XML/HTML attributes, not substrings in authored source.
+// Self-contained geometry and local fragment references remain supported.
+pub(crate) fn validate_svg_element<'a>(
+    name: &str,
+    attributes: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Result<(), &'static str> {
+    if ["image", "feImage", "script", "foreignObject"]
+        .iter()
+        .any(|tag| name.eq_ignore_ascii_case(tag))
+    {
+        return Err("SVG image and active subresources are unsupported");
+    }
+    for (name, value) in attributes {
+        if name == "href" && !value.trim().starts_with('#') {
+            return Err("SVG references must be local fragments");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn svg_policy_rejects_secondary_reads_and_accepts_geometry() {
+        let svg = |body: &str| {
+            format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">{body}</svg>"#
+            )
+        };
+        assert!(
+            LocalOnlyResourceProvider::validate_svg(
+                svg("<rect width='16' height='16'/>").as_bytes()
+            )
+            .is_ok()
+        );
+        assert!(
+            LocalOnlyResourceProvider::validate_svg(svg("<use href='#local'/>").as_bytes()).is_ok()
+        );
+        for body in [
+            "<image href='/outside.png'/>",
+            "<image href='../outside.png'/>",
+            "<image href='&#47;outside.png'/>",
+            "<feImage href='outside.png'/>",
+            "<use href='outside.svg#local'/>",
+            "<image href='data:image/svg+xml;base64,AAAA'/>",
+        ] {
+            assert!(
+                LocalOnlyResourceProvider::validate_svg(svg(body).as_bytes()).is_err(),
+                "{body}"
+            );
+        }
     }
 }

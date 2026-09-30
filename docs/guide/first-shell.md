@@ -72,6 +72,13 @@ The panel binds its output label and opens its output-local overlay:
 
 ## Overlay HTML
 
+Root SVG images and inline SVG must be self-contained. Geometry and local
+fragment references are supported; SVG `image`, `feImage`, scripts, foreign
+objects, external references, DTDs, and compressed SVG are rejected. This rule
+also applies when SVG is stored under a non-SVG filename. It prevents the SVG
+decoder from opening files outside the root resource provider. Use ordinary
+HTML image nodes for separate raster resources.
+
 The overlay exposes its state and a close action:
 
 ```html
