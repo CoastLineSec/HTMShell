@@ -1066,11 +1066,14 @@ fn print_gpu_metrics(prefix: &str, summary: &htm_shell_host::GpuSurfaceHostSumma
         summary.duplicate_frame_suppressions,
     );
     println!(
-        "{prefix}_gpu_resources=entries:{} bytes:{} uploads:{} cache_hits:{}",
+        "{prefix}_gpu_resources=entries:{} bytes:{} uploads:{} cache_hits:{} effect_image_handles_created:{} effect_image_handles_reused:{} effect_image_handles_replaced:{}",
         summary.resource_entries,
         summary.resource_bytes,
         summary.resource_uploads,
         summary.cache_hits,
+        summary.effect_image_handle_creations,
+        summary.effect_image_handle_reuses,
+        summary.effect_image_handle_replacements,
     );
     if !summary.last_error.is_empty() {
         println!("{prefix}_gpu_last_error={}", summary.last_error);

@@ -334,6 +334,13 @@ pub struct LiveGpuStatistics {
     pub gpu_color_filter_pipeline_failures: u64,
     pub gpu_color_filter_device_resets: u64,
     pub gpu_color_filter_pixels: u64,
+    pub gpu_effect_image_handle_creations: u64,
+    pub gpu_effect_image_handle_reuses: u64,
+    pub gpu_effect_image_handle_replacements: u64,
+    pub gpu_effect_image_last_layer_ordinal: u64,
+    pub gpu_effect_image_last_width: u32,
+    pub gpu_effect_image_last_height: u32,
+    pub gpu_effect_image_last_diagnostic_id: u64,
     pub gpu_blur_layer_creations: u64,
     pub gpu_blur_layer_reuses: u64,
     pub gpu_blur_gaussian_frames: u64,
@@ -829,6 +836,14 @@ impl LiveGpuPresenter {
         self.statistics
     }
 
+    pub fn persistent_backing_revision(&self, surface: RenderSurfaceId) -> Option<u64> {
+        self.targets
+            .get(&surface)
+            .and_then(|target| target.backing.as_ref())
+            .and_then(|backing| backing.revision)
+            .map(|revision| revision.0)
+    }
+
     pub fn record_wayland_damage(&mut self, rectangles: usize, pixels: u64, full: bool) {
         self.statistics.wayland_damage_rectangles = self
             .statistics
@@ -1239,6 +1254,20 @@ impl LiveGpuPresenter {
         self.statistics.gpu_color_filter_device_resets =
             backend_statistics.gpu_color_filter_device_resets;
         self.statistics.gpu_color_filter_pixels = backend_statistics.gpu_color_filter_pixels;
+        self.statistics.gpu_effect_image_handle_creations =
+            backend_statistics.gpu_effect_image_handle_creations;
+        self.statistics.gpu_effect_image_handle_reuses =
+            backend_statistics.gpu_effect_image_handle_reuses;
+        self.statistics.gpu_effect_image_handle_replacements =
+            backend_statistics.gpu_effect_image_handle_replacements;
+        self.statistics.gpu_effect_image_last_layer_ordinal =
+            backend_statistics.gpu_effect_image_last_layer_ordinal;
+        self.statistics.gpu_effect_image_last_width =
+            backend_statistics.gpu_effect_image_last_width;
+        self.statistics.gpu_effect_image_last_height =
+            backend_statistics.gpu_effect_image_last_height;
+        self.statistics.gpu_effect_image_last_diagnostic_id =
+            backend_statistics.gpu_effect_image_last_diagnostic_id;
         self.statistics.gpu_blur_layer_creations = backend_statistics.gpu_blur_layer_creations;
         self.statistics.gpu_blur_layer_reuses = backend_statistics.gpu_blur_layer_reuses;
         self.statistics.gpu_blur_gaussian_frames = backend_statistics.gpu_blur_gaussian_frames;
@@ -1776,6 +1805,7 @@ fn render_prepared_target(
         &backend.device,
         &backend.queue,
         &mut backend.renderer,
+        &mut backend.effect_image_cache,
         &mut backend.color_effect_pipeline,
         &mut backend.blur_effect_pipelines,
         &mut backend.shadow_effect_pipelines,
@@ -1998,7 +2028,11 @@ mod tests {
     use crate::render::{
         FramePlan, FrameReasonSet, SceneDelta, SceneNodeId, SceneRevision, SceneSubpart,
     };
-    use crate::{ExperimentalDocumentIdentity, ViewportSpec};
+    use crate::{
+        ExperimentalDocumentIdentity, LiveDocument, LiveDocumentKind, PackageSnapshotLoader,
+        StateBindingKey, ViewportSpec,
+    };
+    use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
     use vello::peniko::{Color, Fill};
@@ -2597,6 +2631,114 @@ mod tests {
             768,
         );
         assert_eq!(after_stale, before_stale);
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn package_graph_full_repaint_matches_a_fresh_persistent_backing() {
+        let manifest =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/package-graph/shell.json");
+        let snapshot = PackageSnapshotLoader::new()
+            .load_manifest(manifest)
+            .unwrap();
+        let panel = snapshot
+            .root_manifest()
+            .unwrap()
+            .surfaces
+            .iter()
+            .find(|surface| surface.id() == "panel")
+            .unwrap();
+        let mut live = LiveDocument::load_surface_snapshot(
+            Arc::clone(&snapshot),
+            panel,
+            LiveDocumentKind::Panel,
+            3440,
+            52,
+        )
+        .unwrap();
+        let request = crate::LiveRenderRequest::new(3440, 52, 120).unwrap();
+        let mut backend = VelloOffscreenRenderer::new(false).unwrap();
+        let layout = proof_layout(&backend.device);
+        let mut backing = persistent_backing_for_size(&backend, &layout, 3440, 52);
+
+        live.apply_bound_text(&[(StateBindingKey::ClockTime, "10:01".to_owned())])
+            .unwrap();
+        let initial = live
+            .prepare_gpu_pending_for(request, 92, 1)
+            .unwrap()
+            .unwrap();
+        let initial_plan = initial.plan();
+        let initial_prepared = GpuPreparedScene::from_cpu(
+            initial_plan.document,
+            initial.prepared().prepared.clone(),
+            initial_plan.scene.live_resources(),
+            collect_effect_plans(&initial_plan.scene),
+        );
+        let initial_decision = select_damage_work(initial_plan, false, true);
+        update_persistent_backing(
+            &mut backend,
+            &mut backing,
+            &initial_prepared,
+            initial_plan,
+            &initial_decision,
+        )
+        .unwrap();
+        backing.initialized = true;
+        backing.revision = Some(initial_plan.scene_revision);
+        backing.force_full_repaint = false;
+        live.accept_gpu_frame(initial);
+
+        live.apply_bound_text(&[(StateBindingKey::ClockTime, "10:02".to_owned())])
+            .unwrap();
+        let updated = live
+            .prepare_gpu_pending_for(request, 92, 1)
+            .unwrap()
+            .unwrap();
+        let updated_plan = updated.plan();
+        let updated_prepared = GpuPreparedScene::from_cpu(
+            updated_plan.document,
+            updated.prepared().prepared.clone(),
+            updated_plan.scene.live_resources(),
+            collect_effect_plans(&updated_plan.scene),
+        );
+        let updated_decision = select_damage_work(updated_plan, true, false);
+        assert!(matches!(
+            updated_decision,
+            DamageRenderDecision::FullGpu { .. }
+        ));
+        update_persistent_backing(
+            &mut backend,
+            &mut backing,
+            &updated_prepared,
+            updated_plan,
+            &updated_decision,
+        )
+        .unwrap();
+        let actual = read_texture(
+            &backend.device,
+            &backend.queue,
+            &backing.current.texture,
+            3440,
+            52,
+        );
+
+        let mut fresh = persistent_backing_for_size(&backend, &layout, 3440, 52);
+        update_persistent_backing(
+            &mut backend,
+            &mut fresh,
+            &updated_prepared,
+            updated_plan,
+            &updated_decision,
+        )
+        .unwrap();
+        let expected = read_texture(
+            &backend.device,
+            &backend.queue,
+            &fresh.current.texture,
+            3440,
+            52,
+        );
+        assert_eq!(actual, expected);
     }
 
     #[test]

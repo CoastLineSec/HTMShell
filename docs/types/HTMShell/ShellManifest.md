@@ -2,7 +2,7 @@
 
 **Module:** `HTMShell` | **Kind:** JSON manifest | **Status:** Experimental
 
-`ShellManifest` defines the root local package and the documents used for portable shell surfaces. Schema version 1 remains supported. Schema version 2 adds package identity, optional version metadata, local library dependencies, components, and strict surface-local resources without changing the supported surface topology.
+`ShellManifest` defines the root local package and the documents used for portable shell surfaces. Schema version 1 remains supported. Schema version 2 adds package identity, optional version metadata, local library dependencies, components, strict surface-local resources, and strict surface-local state aliases without changing the supported surface topology.
 
 ## Usage
 
@@ -88,6 +88,13 @@ Schema version 2 replaces the root `id` with package metadata and may add local 
           "type": "svg",
           "source": "assets/warning.svg"
         }
+      ],
+      "stateReferences": [
+        {
+          "name": "current-time",
+          "source": "clock.time",
+          "valueType": "string"
+        }
       ]
     },
     {
@@ -112,10 +119,13 @@ Shared surface fields:
 | `document` | Local relative HTML path, maximum 512 bytes. |
 | `outputs` | Only `all`. |
 | `resources` | Optional ordered strict surface-local raster or simple SVG declarations, at most 32. |
+| `stateReferences` | Optional ordered strict surface-local state aliases, at most 64. |
 
 Panel fields are `edge`, `thickness`, and `reserveSpace`. Overlay fields use `initiallyOpen`. Surface resource entries contain exactly `name`, `type`, and `source`; use the component resource name, path, filesystem, raster, and SVG contract. The catalog is visible only to typed `resource-reference` assignments made by that surface root. Ordinary root image URLs remain on the existing document-relative provider, and `<img src="resource:name">` remains invalid in root markup.
 
-See [`HTMShell.Package`](../HTMShell.Package/README.md) for dependency fields and graph rules, [`HTMShell.Component`](../HTMShell.Component/README.md) for component syntax, and [resource-reference inputs](../HTMShell.Component/ResourceReferenceInput.md) for surface catalog assignment and ownership.
+Surface state-reference entries contain exactly `name`, `source`, and `valueType`. The source is one eligible finite non-contextual state binding, and its projection must exactly match `string`, `number`, `boolean`, or `token`. The alias is visible only to a typed `state-reference` assignment made by that surface root. Existing root state bindings remain unchanged. Alias validation alone creates no live binding or provider demand.
+
+See [`HTMShell.Package`](../HTMShell.Package/README.md) for dependency fields and graph rules, [`HTMShell.Component`](../HTMShell.Component/README.md) for component syntax, [resource-reference inputs](../HTMShell.Component/ResourceReferenceInput.md) for surface catalog assignment and ownership, and [state-reference inputs](../HTMShell.Component/StateReferenceInput.md) for surface authorization and live binding behavior.
 
 ## Notes
 
@@ -123,6 +133,6 @@ The manifest is limited to 256 KiB. Document paths cannot be absolute, remote, o
 
 Dimensions are logical pixels. Scale is compositor-provided and cannot be selected by the manifest. Output names are not manifest selectors.
 
-Manifest hot reload, optional or dynamic resource inputs, state or action references, host and slotted selectors, package-global library styles, advanced or subresource-bearing component SVG, CSS URL assets, fonts, persistent output selection, scale overrides, additional surface kinds, and more than one panel or overlay template are unavailable. Component exports may declare up to 32 default or named slots, 16 scoped stylesheet paths, and 32 static image resources.
+Manifest hot reload, optional or dynamic reference inputs, action-reference inputs, dynamic state rebinding, contextual state forwarding, host and slotted selectors, package-global library styles, advanced or subresource-bearing component SVG, CSS URL assets, fonts, persistent output selection, scale overrides, additional surface kinds, and more than one panel or overlay template are unavailable. Component exports may declare up to 32 default or named slots, 16 scoped stylesheet paths, and 32 static image resources.
 
 See the tracked [static panel manifest](../../../examples/static-panel/shell.json), [`PanelSurface`](PanelSurface.md), and [`OverlaySurface`](OverlaySurface.md).

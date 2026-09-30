@@ -12,10 +12,6 @@
   background: rgba(42, 54, 82, 0.72);
 }
 
-.graph-status-card:hover {
-  filter: brightness(1.06);
-}
-
 .graph-status-card h2,
 .graph-status-card p {
   margin: 0;

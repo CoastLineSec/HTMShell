@@ -197,6 +197,27 @@
       ]
     },
     {
+      "name": "state-dashboard",
+      "source": "components/status-card.html",
+      "inputs": [
+        {
+          "name": "time",
+          "type": "state-reference",
+          "valueType": "string",
+          "required": true
+        }
+      ],
+      "slots": [
+        {
+          "name": "default",
+          "required": false
+        }
+      ],
+      "styles": [
+        "components/component-frames.css"
+      ]
+    },
+    {
       "name": "intrinsic-image",
       "source": "components/status-card.html",
       "resources": [

@@ -21,6 +21,13 @@ A panel is a persistent top-edge layer-shell surface created on every eligible o
       "type": "svg",
       "source": "assets/status-symbol.svg"
     }
+  ],
+  "stateReferences": [
+    {
+      "name": "current-time",
+      "source": "clock.time",
+      "valueType": "string"
+    }
   ]
 }
 ```
@@ -36,6 +43,7 @@ A panel is a persistent top-edge layer-shell surface created on every eligible o
 | `thickness` | Logical height from 1 through 512. |
 | `reserveSpace` | Reserves `thickness` when true, otherwise reserves no space. |
 | `resources` | Optional ordered strict raster or simple SVG catalog, at most 32 declarations. |
+| `stateReferences` | Optional ordered finite state aliases, at most 64 declarations. |
 
 ## Notes
 
@@ -48,5 +56,7 @@ Scale 1 is the fallback. Compositor-preferred fractional presentation is used wh
 Only one top panel template is supported. Other edges, multiple panels, keyboard focus, and persistent output selection are unavailable.
 
 The surface catalog is assignment-only. The panel root may pass `resource:name` to a declared component `resource-reference` input. Ordinary root images keep the existing document-relative provider and cannot use `resource:name`. The source remains panel-template-owned while the receiving component image owns its usage. See [resource-reference inputs](../HTMShell.Component/ResourceReferenceInput.md).
+
+The state alias table is also assignment-only. The panel root may pass `state:name` to a matching required `state-reference` component input. Every alias resolves one eligible finite source with an exact `string`, `number`, `boolean`, or `token` projection. Components cannot enumerate or directly name this table. Existing root state consumers remain unchanged. Alias-only declarations create no live demand. See [state-reference inputs](../HTMShell.Component/StateReferenceInput.md).
 
 See [`ShellManifest`](ShellManifest.md) and [`OverlaySurface`](OverlaySurface.md).

@@ -19,3 +19,18 @@
 <template data-htm-component="resource-image">
   <img class="package-passed-image" src="input:icon" alt="">
 </template>
+
+<template data-htm-component="state-forwarder">
+  <htm-use component="state-clock-label" input-time="input:time"></htm-use>
+</template>
+
+<template data-htm-component="state-clock-label">
+  <span
+    class="package-state-reference"
+    data-htm-element="state-text"
+    data-htm-bind="input.time"></span>
+  <span
+    class="package-state-reference"
+    data-htm-element="state-text"
+    data-htm-bind="input.time"></span>
+</template>

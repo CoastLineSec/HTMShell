@@ -19,6 +19,13 @@ An overlay is a transient, output-local layer-shell surface.
       "type": "raster",
       "source": "assets/profile.webp"
     }
+  ],
+  "stateReferences": [
+    {
+      "name": "current-time",
+      "source": "clock.time",
+      "valueType": "string"
+    }
   ]
 }
 ```
@@ -32,6 +39,7 @@ An overlay is a transient, output-local layer-shell surface.
 | `outputs` | Must be `all`. |
 | `initiallyOpen` | Controls initial mapping. |
 | `resources` | Optional ordered strict raster or simple SVG catalog, at most 32 declarations. |
+| `stateReferences` | Optional ordered finite state aliases, at most 64 declarations. |
 
 ## Notes
 
@@ -46,5 +54,7 @@ Each output has an independent overlay document and open state. A panel action a
 Scale 1 and compositor-preferred fractional presentation follow the same rules as panels. Multiple overlays, keyboard focus, and moving a live role between outputs are unavailable.
 
 The surface catalog is visible only to resource-reference assignments made by this overlay root. It does not affect ordinary root image, CSS, or external SVG loading and is not visible to the panel or another overlay. See [resource-reference inputs](../HTMShell.Component/ResourceReferenceInput.md).
+
+The state alias table is visible only to state-reference assignments made by this overlay root. It does not change ordinary root state bindings and is not visible to the panel or another overlay. Alias validation creates no binding or demand. A live consumer may retain existing provider demand and update retained DOM state while the overlay is closed, but the closed overlay requests no frame and performs no presentation. See [state-reference inputs](../HTMShell.Component/StateReferenceInput.md).
 
 See [`ShellManifest`](ShellManifest.md), [`PanelSurface`](PanelSurface.md), and [overlay actions](../HTMShell.Actions/Overlay.md).

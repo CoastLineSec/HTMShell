@@ -154,6 +154,6 @@ Unused surface declarations are still validated eagerly, but create no resource-
 
 Surface resource associations count toward the package limit of 4,096 resource associations. Their source files count toward the limit of 256 unique package resource sources and the existing candidate-read and neutral decoded-resource budgets. See [component resources](Resource.md) for the shared source, path, raster, and SVG limits.
 
-Resource-reference inputs are static. Optional values, defaults, runtime mutation, state or action references, dynamic forwarding, CSS resources, fonts, advanced SVG, service-provided images, animation, and physics are not supported.
+Resource-reference inputs are static. Optional values, defaults, runtime mutation, action references, dynamic forwarding, CSS resources, fonts, advanced SVG, service-provided images, animation, and physics are not supported. Read-only state references are a separate typed input family and never carry image resources.
 
 See [component inputs](Input.md), [component resources](Resource.md), [`HTMShell.Component`](README.md), [`ShellManifest`](../HTMShell/ShellManifest.md), and [components](../../guide/components.md).

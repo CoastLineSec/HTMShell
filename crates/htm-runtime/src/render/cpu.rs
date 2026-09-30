@@ -208,6 +208,7 @@ pub(crate) struct CpuRenderSession {
     current_scale: Option<[u32; 2]>,
     renderer: CpuReferenceRenderer,
     recovery_pending: bool,
+    full_repaint_pending: bool,
 }
 
 impl CpuRenderSession {
@@ -388,11 +389,15 @@ impl CpuRenderSession {
         if self.recovery_pending {
             reasons.insert(FrameReason::RendererRecovery);
         }
+        if self.full_repaint_pending {
+            reasons.insert(FrameReason::ExplicitInvalidation);
+        }
         if delta.is_empty()
             && !surface_changed
             && !size_changed
             && !scale_changed
             && !self.recovery_pending
+            && !self.full_repaint_pending
             && !force
         {
             return Ok(None);
@@ -403,6 +408,7 @@ impl CpuRenderSession {
             || size_changed
             || scale_changed
             || self.recovery_pending
+            || self.full_repaint_pending
         {
             DamageRegion::Full
         } else {
@@ -531,10 +537,20 @@ impl CpuRenderSession {
         self.current_size = Some(prepared.size);
         self.current_scale = Some(prepared.scale);
         self.recovery_pending = false;
+        self.full_repaint_pending = false;
     }
 
     pub(crate) fn reject_prepared(&mut self, recoverable: bool) {
         self.recovery_pending |= recoverable;
+    }
+
+    pub(crate) fn request_full_repaint(&mut self) {
+        self.full_repaint_pending = true;
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    pub(crate) const fn diagnostic_scene_revision_sequence(&self) -> u64 {
+        self.next_revision
     }
 
     pub(crate) fn reset_backend(&mut self) -> Result<(), RuntimeError> {
@@ -1629,6 +1645,36 @@ mod tests {
             Some(old_id)
         );
         assert!(!updated.plan.delta.full_scene_replacement);
+    }
+
+    #[test]
+    fn requested_full_repaint_does_not_enter_renderer_recovery() {
+        let mut document = document();
+        let identities = IdentityRegistry::from_document(&document);
+        let mut session = CpuRenderSession::default();
+        render(&mut session, &mut document, &identities, false)
+            .unwrap()
+            .unwrap();
+
+        session.request_full_repaint();
+        let repainted = render(&mut session, &mut document, &identities, false)
+            .unwrap()
+            .expect("requested repaint");
+
+        assert!(repainted.plan.delta.is_empty());
+        assert_eq!(repainted.plan.damage, DamageRegion::Full);
+        assert!(
+            repainted
+                .plan
+                .reasons
+                .contains(&FrameReason::ExplicitInvalidation)
+        );
+        assert!(
+            !repainted
+                .plan
+                .reasons
+                .contains(&FrameReason::RendererRecovery)
+        );
     }
 
     #[test]

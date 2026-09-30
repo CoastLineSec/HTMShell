@@ -11,10 +11,12 @@ use std::time::Instant;
 use crate::component::{
     ComponentCatalog, ComponentExport, ComponentInputDeclaration, ComponentInputName,
     ComponentInputType, ComponentName, ComponentResourceKindSet, ComponentSlotDeclaration,
-    ComponentSlotName, ComponentValidationTotals, ExpectedComponentDefinition,
-    MAX_COMPONENT_EXPORTS_PER_PACKAGE, MAX_COMPONENT_INPUTS, MAX_COMPONENT_SLOTS,
-    MAX_COMPONENT_SOURCE_BYTES, PreparedDocument, build_component_catalog,
-    parse_component_input_default, parse_component_source, prepare_root_document,
+    ComponentSlotName, ComponentStateValueType, ComponentValidationTotals,
+    ExpectedComponentDefinition, MAX_COMPONENT_EXPORTS_PER_PACKAGE, MAX_COMPONENT_INPUTS,
+    MAX_COMPONENT_SLOTS, MAX_COMPONENT_SOURCE_BYTES, PreparedDocument,
+    RootSurfaceAssignmentContext, SurfaceStateReferenceAuthorization, SurfaceStateReferenceOwner,
+    build_component_catalog, parse_component_input_default, parse_component_source,
+    prepare_root_document,
 };
 use crate::component_resource::{
     ComponentResourceAssociation, ComponentResourceCatalog, ComponentResourceDeclaration,
@@ -51,6 +53,7 @@ pub const MAX_PACKAGE_HTML_BYTES: u64 = 2 * 1024 * 1024;
 const SCHEMA_V1: u32 = 1;
 const SCHEMA_V2: u32 = 2;
 const MAX_SURFACE_TEMPLATES: usize = 16;
+pub const MAX_SURFACE_STATE_REFERENCES: usize = 64;
 const MAX_V1_ID_BYTES: usize = 64;
 const MAX_DOCUMENT_PATH_BYTES: usize = 512;
 const MAX_PANEL_THICKNESS: u32 = 512;
@@ -146,6 +149,35 @@ pub enum PackageErrorKind {
     ComponentInputBindingNotSupported,
     ComponentStateReferenceInputNotSupported,
     ComponentActionReferenceInputNotSupported,
+    InvalidComponentStateReferenceInputDeclaration,
+    ComponentStateReferenceValueTypeMissing,
+    ComponentStateReferenceValueTypeUnsupported,
+    ComponentStateReferenceRequiredFlagInvalid,
+    ComponentStateReferenceDefaultForbidden,
+    InvalidSurfaceStateReferenceDeclaration,
+    DuplicateSurfaceStateReferenceAlias,
+    SurfaceStateReferenceAliasLimit,
+    SurfaceStateSourceUnknown,
+    SurfaceStateSourceIneligible,
+    SurfaceStateSourceScopeInvalid,
+    SurfaceStateSourceTypeMismatch,
+    ComponentStateReferenceAssignmentMissing,
+    ComponentStateReferenceAssignmentMalformed,
+    ComponentStateReferenceAliasUnknown,
+    ComponentStateReferenceAliasWrongSurface,
+    ComponentStateReferenceAssignmentTypeMismatch,
+    ComponentStateReferenceForwardingSourceUnknown,
+    ComponentStateReferenceForwardingSourceWrongType,
+    ComponentStateReferenceForwardingTypeMismatch,
+    ComponentStateReferenceForwardingDepth,
+    ComponentStateReferenceConsumerMalformed,
+    ComponentStateReferenceConsumerUnknown,
+    ComponentStateReferenceConsumerWrongType,
+    ComponentStateReferenceValueInvalid,
+    ComponentStateReferenceValueLimit,
+    ComponentStateReferenceConsumerBindingLimit,
+    ComponentStateReferenceConsumerBindingInvalid,
+    ComponentStateReferenceLiveActivationFailure,
     InvalidComponentResourceReferenceInputDeclaration,
     ComponentResourceReferenceKindsMissing,
     ComponentResourceReferenceKindDuplicate,
@@ -528,6 +560,8 @@ pub struct SurfaceTemplate {
     id: String,
     resource_owner: SurfaceResourceOwner,
     resources: Arc<[ComponentResourceDeclaration]>,
+    state_reference_owner: SurfaceStateReferenceOwner,
+    state_references: Arc<[Arc<SurfaceStateReferenceAuthorization>]>,
     document: PathBuf,
     canonical_document: PathBuf,
     html: Arc<str>,
@@ -548,6 +582,14 @@ impl SurfaceTemplate {
 
     pub fn resources(&self) -> &[ComponentResourceDeclaration] {
         &self.resources
+    }
+
+    pub fn state_reference_owner(&self) -> &SurfaceStateReferenceOwner {
+        &self.state_reference_owner
+    }
+
+    pub fn state_references(&self) -> &[Arc<SurfaceStateReferenceAuthorization>] {
+        &self.state_references
     }
 
     pub fn document(&self) -> &Path {
@@ -1116,6 +1158,7 @@ struct PackageGraphDiagnostic<'a> {
     component_raster_sources: Vec<ComponentRasterSourceDiagnostic>,
     component_svg_sources: Vec<ComponentSvgSourceDiagnostic>,
     surface_resource_associations: Vec<SurfaceResourceAssociationDiagnostic>,
+    surface_state_reference_authorizations: Vec<SurfaceStateReferenceAuthorizationDiagnostic>,
     component_resource_totals: ComponentResourceTotalsDiagnostic,
     prepared_root_documents: Vec<PreparedDocumentDiagnostic<'a>>,
 }
@@ -1155,6 +1198,7 @@ struct ComponentInputDeclarationDiagnostic {
     required: bool,
     default: Option<String>,
     resource_types: Vec<&'static str>,
+    state_value_type: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1226,6 +1270,17 @@ struct SurfaceResourceAssociationDiagnostic {
 }
 
 #[derive(Debug, Serialize)]
+struct SurfaceStateReferenceAuthorizationDiagnostic {
+    identity: String,
+    owner: String,
+    name: String,
+    source: &'static str,
+    scope: &'static str,
+    value_type: &'static str,
+    ordinal: u16,
+}
+
+#[derive(Debug, Serialize)]
 struct ComponentResourceTotalsDiagnostic {
     sources: usize,
     reads: usize,
@@ -1290,6 +1345,8 @@ struct PreparedDocumentDiagnostic<'a> {
     expanded_nodes: usize,
     maximum_nesting_depth: usize,
     resource_reference_values: usize,
+    state_reference_values: usize,
+    state_consumer_bindings: usize,
     instance_paths: &'a [String],
     inputs: Vec<ComponentInstanceInputDiagnostic>,
     consumers: Vec<ComponentInputConsumerDiagnostic>,
@@ -1372,6 +1429,10 @@ struct ComponentInputValueDiagnostic {
     resource_source_identity: Option<String>,
     resource_semantic_version: Option<String>,
     resource_owner: Option<String>,
+    state_source_identity: Option<String>,
+    state_source: Option<&'static str>,
+    state_scope: Option<&'static str>,
+    state_authorization: Option<String>,
     forwarding: Vec<String>,
 }
 
@@ -1381,6 +1442,10 @@ struct ComponentInputConsumerDiagnostic {
     input: String,
     kind: &'static str,
     source_ordinal: u32,
+    state_binding_identity: Option<String>,
+    state_source_identity: Option<String>,
+    state_source: Option<&'static str>,
+    state_projection: Option<&'static str>,
 }
 
 impl<'a> PackageGraphDiagnostic<'a> {
@@ -1398,6 +1463,8 @@ impl<'a> PackageGraphDiagnostic<'a> {
                         expanded_nodes: stats.expanded_nodes,
                         maximum_nesting_depth: stats.maximum_nesting_depth,
                         resource_reference_values: stats.resource_reference_values,
+                        state_reference_values: stats.state_reference_values,
+                        state_consumer_bindings: stats.state_consumer_bindings,
                         instance_paths: prepared.logical_instance_paths(),
                         inputs: diagnostics.inputs,
                         consumers: diagnostics.consumers,
@@ -1431,6 +1498,8 @@ impl<'a> PackageGraphDiagnostic<'a> {
                     expanded_nodes: stats.expanded_nodes,
                     maximum_nesting_depth: stats.maximum_nesting_depth,
                     resource_reference_values: stats.resource_reference_values,
+                    state_reference_values: stats.state_reference_values,
+                    state_consumer_bindings: stats.state_consumer_bindings,
                     instance_paths: prepared.logical_instance_paths(),
                     inputs: diagnostics.inputs,
                     consumers: diagnostics.consumers,
@@ -1647,6 +1716,23 @@ impl<'a> PackageGraphDiagnostic<'a> {
                     ordinal: association.ordinal(),
                 })
                 .collect(),
+            surface_state_reference_authorizations: snapshot
+                .root_manifest()
+                .into_iter()
+                .flat_map(|manifest| manifest.surfaces.iter())
+                .flat_map(SurfaceTemplate::state_references)
+                .map(
+                    |authorization| SurfaceStateReferenceAuthorizationDiagnostic {
+                        identity: authorization.deterministic_id(snapshot.generation()),
+                        owner: authorization.owner().deterministic_string(),
+                        name: authorization.name().to_string(),
+                        source: authorization.source().as_str(),
+                        scope: authorization.scope().as_str(),
+                        value_type: authorization.value_type().as_str(),
+                        ordinal: authorization.ordinal(),
+                    },
+                )
+                .collect(),
             component_resource_totals: {
                 let totals = snapshot.component_resources().totals();
                 ComponentResourceTotalsDiagnostic {
@@ -1693,6 +1779,9 @@ fn input_declaration_diagnostics(
                 .flat_map(ComponentResourceKindSet::canonical_kinds)
                 .map(ComponentResourceKind::as_str)
                 .collect(),
+            state_value_type: declaration
+                .state_value_type()
+                .map(ComponentStateValueType::as_str),
         })
         .collect()
 }
@@ -1804,6 +1893,10 @@ fn prepared_component_diagnostics(
                         crate::ComponentInputValue::ResourceReference(resource) => Some(resource),
                         _ => None,
                     };
+                    let state_reference = match input.value() {
+                        crate::ComponentInputValue::StateReference(reference) => Some(reference),
+                        _ => None,
+                    };
                     ComponentInputValueDiagnostic {
                         name: input.declaration().name().to_string(),
                         input_type: input.declaration().input_type().as_str(),
@@ -1824,6 +1917,15 @@ fn prepared_component_diagnostics(
                         }),
                         resource_owner: resource
                             .map(|resource| resource.origin().owner_diagnostic()),
+                        state_source_identity: state_reference
+                            .map(|reference| reference.source_identity().to_owned()),
+                        state_source: state_reference.map(|reference| reference.source().as_str()),
+                        state_scope: state_reference.map(|reference| reference.scope().as_str()),
+                        state_authorization: state_reference.map(|reference| {
+                            reference
+                                .authorization()
+                                .deterministic_id(snapshot.generation())
+                        }),
                         forwarding: resource
                             .map(|resource| {
                                 resource
@@ -1831,6 +1933,15 @@ fn prepared_component_diagnostics(
                                     .iter()
                                     .map(ToString::to_string)
                                     .collect()
+                            })
+                            .or_else(|| {
+                                state_reference.map(|reference| {
+                                    reference
+                                        .forwarding_provenance()
+                                        .iter()
+                                        .map(ToString::to_string)
+                                        .collect()
+                                })
                             })
                             .unwrap_or_default(),
                     }
@@ -1849,6 +1960,16 @@ fn prepared_component_diagnostics(
             input: consumer.input().to_string(),
             kind: consumer.kind().as_str(),
             source_ordinal: consumer.template_source_ordinal(),
+            state_binding_identity: consumer.state_binding_id().map(str::to_owned),
+            state_source_identity: consumer
+                .state_reference()
+                .map(|reference| reference.source_identity().to_owned()),
+            state_source: consumer
+                .state_reference()
+                .map(|reference| reference.source().as_str()),
+            state_projection: consumer
+                .state_reference()
+                .map(|reference| reference.value_type().as_str()),
         })
         .collect();
     let resource_usages = instantiated
@@ -2228,6 +2349,16 @@ struct RawComponentInput {
     default: Option<serde_json::Value>,
     #[serde(rename = "resourceTypes")]
     resource_types: Option<Vec<String>>,
+    #[serde(rename = "valueType")]
+    value_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawSurfaceStateReference {
+    name: String,
+    source: String,
+    value_type: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2255,6 +2386,8 @@ struct RawPanelTemplate {
     reserve_space: bool,
     #[serde(default)]
     resources: Vec<RawComponentResource>,
+    #[serde(default)]
+    state_references: Vec<RawSurfaceStateReference>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2266,6 +2399,8 @@ struct RawOverlayTemplate {
     initially_open: bool,
     #[serde(default)]
     resources: Vec<RawComponentResource>,
+    #[serde(default)]
+    state_references: Vec<RawSurfaceStateReference>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2648,45 +2783,48 @@ impl<'a> GraphBuilder<'a> {
         let mut overlay_count = 0usize;
         let mut surfaces = Vec::with_capacity(raw_surfaces.len());
         for raw_surface in raw_surfaces {
-            let (id, document, outputs, preset, raw_resources) = match raw_surface {
-                RawSurfaceTemplate::Panel(panel) => {
-                    panel_count += 1;
-                    if panel.thickness == 0 || panel.thickness > MAX_PANEL_THICKNESS {
-                        return Err(PackageLoadError::new(
-                            PackageErrorKind::RootTopologyFailure,
-                            format!(
-                                "surface `{}` thickness {} is outside 1..={MAX_PANEL_THICKNESS}",
-                                panel.id, panel.thickness
-                            ),
-                        ));
+            let (id, document, outputs, preset, raw_resources, raw_state_references) =
+                match raw_surface {
+                    RawSurfaceTemplate::Panel(panel) => {
+                        panel_count += 1;
+                        if panel.thickness == 0 || panel.thickness > MAX_PANEL_THICKNESS {
+                            return Err(PackageLoadError::new(
+                                PackageErrorKind::RootTopologyFailure,
+                                format!(
+                                    "surface `{}` thickness {} is outside 1..={MAX_PANEL_THICKNESS}",
+                                    panel.id, panel.thickness
+                                ),
+                            ));
+                        }
+                        (
+                            panel.id,
+                            panel.document,
+                            output_scope(panel.outputs),
+                            SurfacePreset::Panel(PanelTemplate {
+                                edge: match panel.edge {
+                                    RawPanelEdge::Top => PanelEdge::Top,
+                                },
+                                thickness: panel.thickness,
+                                reserve_space: panel.reserve_space,
+                            }),
+                            panel.resources,
+                            panel.state_references,
+                        )
                     }
-                    (
-                        panel.id,
-                        panel.document,
-                        output_scope(panel.outputs),
-                        SurfacePreset::Panel(PanelTemplate {
-                            edge: match panel.edge {
-                                RawPanelEdge::Top => PanelEdge::Top,
-                            },
-                            thickness: panel.thickness,
-                            reserve_space: panel.reserve_space,
-                        }),
-                        panel.resources,
-                    )
-                }
-                RawSurfaceTemplate::Overlay(overlay) => {
-                    overlay_count += 1;
-                    (
-                        overlay.id,
-                        overlay.document,
-                        output_scope(overlay.outputs),
-                        SurfacePreset::Overlay(OverlayTemplate {
-                            initially_open: overlay.initially_open,
-                        }),
-                        overlay.resources,
-                    )
-                }
-            };
+                    RawSurfaceTemplate::Overlay(overlay) => {
+                        overlay_count += 1;
+                        (
+                            overlay.id,
+                            overlay.document,
+                            output_scope(overlay.outputs),
+                            SurfacePreset::Overlay(OverlayTemplate {
+                                initially_open: overlay.initially_open,
+                            }),
+                            overlay.resources,
+                            overlay.state_references,
+                        )
+                    }
+                };
             validate_v1_id("surface id", &id)?;
             if !ids.insert(id.clone()) {
                 return Err(PackageLoadError::new(
@@ -2694,14 +2832,31 @@ impl<'a> GraphBuilder<'a> {
                     format!("duplicate surface id `{id}`"),
                 ));
             }
-            if schema != SCHEMA_V2 && !raw_resources.is_empty() {
-                return Err(PackageLoadError::new(
-                    PackageErrorKind::InvalidSurfaceResourceDeclaration,
-                    "surface resources require a schema-v2 shell package",
-                )
-                .in_package(package_id.to_string()));
+            if schema != SCHEMA_V2 {
+                if !raw_resources.is_empty() {
+                    return Err(PackageLoadError::new(
+                        PackageErrorKind::InvalidSurfaceResourceDeclaration,
+                        "surface resources require a schema-v2 shell package",
+                    )
+                    .in_package(package_id.to_string()));
+                }
+                if !raw_state_references.is_empty() {
+                    return Err(PackageLoadError::new(
+                        PackageErrorKind::InvalidSurfaceStateReferenceDeclaration,
+                        "surface state references require a schema-v2 shell package",
+                    )
+                    .in_package(package_id.to_string()));
+                }
             }
             let resources = validate_surface_resources(raw_resources, package_id, &id)?;
+            let state_reference_owner =
+                SurfaceStateReferenceOwner::new(package_id.clone(), id.clone());
+            let state_references = validate_surface_state_references(
+                raw_state_references,
+                package_id,
+                &id,
+                &state_reference_owner,
+            )?;
             let relative = validate_document_path(&id, &document)?;
             let requested = package_root.join(&relative);
             let canonical_document =
@@ -2732,6 +2887,8 @@ impl<'a> GraphBuilder<'a> {
             surfaces.push(SurfaceTemplate {
                 resource_owner: SurfaceResourceOwner::new(package_id.clone(), id.clone()),
                 resources: resources.into(),
+                state_reference_owner,
+                state_references: state_references.into(),
                 id,
                 document: relative,
                 canonical_document,
@@ -3535,8 +3692,11 @@ impl<'a> GraphBuilder<'a> {
                     &root_package,
                     &components,
                     &component_resources,
-                    Some(surface.resource_owner()),
-                    surface.resources(),
+                    RootSurfaceAssignmentContext::new(
+                        surface.resource_owner(),
+                        surface.resources(),
+                        surface.state_references(),
+                    ),
                 )?;
                 prepared.select_style_matching_mode(
                     component_styles.has_reachable_styles(prepared.referenced_definition_keys()),
@@ -3551,8 +3711,7 @@ impl<'a> GraphBuilder<'a> {
                 &root_package,
                 &components,
                 &component_resources,
-                None,
-                &[],
+                RootSurfaceAssignmentContext::headless(),
             )?;
             prepared.select_style_matching_mode(
                 component_styles.has_reachable_styles(prepared.referenced_definition_keys()),
@@ -3719,8 +3878,7 @@ fn build_headless_candidate(
                 &package,
                 &components,
                 &component_resources,
-                None,
-                &[],
+                RootSurfaceAssignmentContext::headless(),
             )?);
             let mut entry = entry;
             entry.prepared_document = Some(prepared);
@@ -4031,6 +4189,115 @@ fn validate_surface_resources(
     Ok(declarations)
 }
 
+fn validate_surface_state_references(
+    raw: Vec<RawSurfaceStateReference>,
+    owner: &PackageId,
+    surface: &str,
+    authorization_owner: &SurfaceStateReferenceOwner,
+) -> Result<Vec<Arc<SurfaceStateReferenceAuthorization>>, PackageLoadError> {
+    if raw.len() > MAX_SURFACE_STATE_REFERENCES {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::SurfaceStateReferenceAliasLimit,
+            format!(
+                "surface `{surface}` declares {} state references; limit is {MAX_SURFACE_STATE_REFERENCES}",
+                raw.len()
+            ),
+        )
+        .in_package(owner.to_string()));
+    }
+    let mut names = BTreeSet::new();
+    let mut references = Vec::with_capacity(raw.len());
+    for (ordinal, entry) in raw.into_iter().enumerate() {
+        let name = ComponentInputName::parse(&entry.name).map_err(|error| {
+            PackageLoadError::new(
+                PackageErrorKind::InvalidSurfaceStateReferenceDeclaration,
+                format!(
+                    "surface `{surface}` state-reference alias `{}` is invalid: {}",
+                    entry.name, error
+                ),
+            )
+            .in_package(owner.to_string())
+        })?;
+        if !names.insert(name.clone()) {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::DuplicateSurfaceStateReferenceAlias,
+                format!("surface `{surface}` repeats state-reference alias `{name}`"),
+            )
+            .in_package(owner.to_string()));
+        }
+        let source = crate::StateBindingKey::parse(&entry.source).ok_or_else(|| {
+            let (kind, classification) = if is_ineligible_contextual_state_source(&entry.source) {
+                (
+                    PackageErrorKind::SurfaceStateSourceIneligible,
+                    "ineligible contextual source",
+                )
+            } else {
+                (
+                    PackageErrorKind::SurfaceStateSourceUnknown,
+                    "unknown source",
+                )
+            };
+            PackageLoadError::new(
+                kind,
+                format!(
+                    "surface `{surface}` state-reference alias `{name}` uses {classification} `{}`",
+                    entry.source
+                ),
+            )
+            .in_package(owner.to_string())
+        })?;
+        let value_type = ComponentStateValueType::parse(&entry.value_type).map_err(|error| {
+            PackageLoadError::new(
+                PackageErrorKind::InvalidSurfaceStateReferenceDeclaration,
+                format!(
+                    "surface `{surface}` state-reference alias `{name}` has invalid value type: {error}"
+                ),
+            )
+            .in_package(owner.to_string())
+        })?;
+        if !source.supports(value_type.projection()) {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::SurfaceStateSourceTypeMismatch,
+                format!(
+                    "surface `{surface}` state-reference alias `{name}` declares `{}`, but source `{}` does not provide that projection",
+                    value_type.as_str(),
+                    source.as_str()
+                ),
+            )
+            .in_package(owner.to_string()));
+        }
+        let ordinal = u16::try_from(ordinal).map_err(|_| {
+            PackageLoadError::new(
+                PackageErrorKind::InvalidSurfaceStateReferenceDeclaration,
+                "surface state-reference ordinal does not fit in u16",
+            )
+        })?;
+        references.push(Arc::new(SurfaceStateReferenceAuthorization::new(
+            authorization_owner.clone(),
+            name,
+            source,
+            value_type,
+            ordinal,
+        )));
+    }
+    Ok(references)
+}
+
+fn is_ineligible_contextual_state_source(value: &str) -> bool {
+    crate::RepeatSource::ALL
+        .into_iter()
+        .any(|source| source.as_str() == value)
+        || crate::ContextualRepeatSource::ALL
+            .into_iter()
+            .any(|source| source.as_str() == value)
+        || crate::ItemBindingKey::ALL
+            .into_iter()
+            .any(|key| key.as_str() == value)
+        || crate::PeakBindingKey::ALL
+            .into_iter()
+            .any(|key| key.as_str() == value)
+}
+
 fn validate_component_resource_path(
     value: &str,
 ) -> Result<ComponentResourcePath, PackageLoadError> {
@@ -4202,6 +4469,43 @@ fn validate_component_inputs(
                 .in_package(owner.to_string())
                 .at(format!("component {component} input {name}"))
         })?;
+        let state_value_type = if input_type == ComponentInputType::StateReference {
+            let raw_value_type = input.value_type.as_deref().ok_or_else(|| {
+                PackageLoadError::new(
+                    PackageErrorKind::ComponentStateReferenceValueTypeMissing,
+                    format!("state-reference component input `{name}` requires `valueType`"),
+                )
+                .in_package(owner.to_string())
+            })?;
+            let value_type = ComponentStateValueType::parse(raw_value_type)
+                .map_err(|error| error.in_package(owner.to_string()))?;
+            if input.required != Some(true) {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentStateReferenceRequiredFlagInvalid,
+                    format!("state-reference component input `{name}` requires `required: true`"),
+                )
+                .in_package(owner.to_string()));
+            }
+            if input.default.is_some() {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentStateReferenceDefaultForbidden,
+                    format!("state-reference component input `{name}` cannot declare a default"),
+                )
+                .in_package(owner.to_string()));
+            }
+            Some(value_type)
+        } else {
+            if input.value_type.is_some() {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::InvalidComponentInputDeclaration,
+                    format!(
+                        "component input `{name}` may use `valueType` only with `type: \"state-reference\"`"
+                    ),
+                )
+                .in_package(owner.to_string()));
+            }
+            None
+        };
         let resource_types = if input_type == ComponentInputType::ResourceReference {
             let raw_kinds = input.resource_types.ok_or_else(|| {
                 PackageLoadError::new(
@@ -4261,6 +4565,13 @@ fn validate_component_inputs(
                 )
                 .in_package(owner.to_string()));
             }
+            if input.value_type.is_some() {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::InvalidComponentResourceReferenceInputDeclaration,
+                    format!("resource-reference component input `{name}` cannot use `valueType`"),
+                )
+                .in_package(owner.to_string()));
+            }
             Some(ComponentResourceKindSet::new(kinds))
         } else {
             if input.resource_types.is_some() {
@@ -4305,6 +4616,7 @@ fn validate_component_inputs(
             required,
             default,
             resource_types,
+            state_value_type,
         ));
     }
     Ok(declarations)

@@ -38,8 +38,10 @@ use htm_runtime::{
     MAX_PIPEWIRE_PROPERTY_KEYS_PER_DOCUMENT, MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS,
     MAX_PIPEWIRE_PROPERTY_LOOKUPS_PER_ITEM, MAX_PIPEWIRE_RELATION_BINDINGS_PER_ITEM,
     MAX_PIPEWIRE_REPEAT_DECLARATIONS_PER_DOCUMENT, MAX_RANGE_CONTROLS_PER_DOCUMENT,
-    MAX_RANGE_CONTROLS_PER_ITEM, MAX_RESOURCE_REFERENCE_VALUES_PER_PREPARED_ROOT, PeakBindingKey,
-    RepeatSource, ShellAction, StateBindingKey, StateToken, StateValueFormat,
+    MAX_RANGE_CONTROLS_PER_ITEM, MAX_RESOURCE_REFERENCE_VALUES_PER_PREPARED_ROOT,
+    MAX_STATE_REFERENCE_CONSUMER_BINDINGS_PER_PREPARED_ROOT,
+    MAX_STATE_REFERENCE_VALUES_PER_PREPARED_ROOT, MAX_SURFACE_STATE_REFERENCES, PeakBindingKey,
+    RepeatSource, ShellAction, StateBindingKey, StateToken, StateValueFormat, StateValueKind,
     built_in_registry_names,
 };
 use htm_shell_host::{
@@ -324,10 +326,13 @@ fn component_documentation_matches_the_composition_contract() {
     let resource_input_reference =
         fs::read_to_string(root.join("docs/types/HTMShell.Component/ResourceReferenceInput.md"))
             .unwrap();
+    let state_input_reference =
+        fs::read_to_string(root.join("docs/types/HTMShell.Component/StateReferenceInput.md"))
+            .unwrap();
     let manifest_reference =
         fs::read_to_string(root.join("docs/types/HTMShell/ShellManifest.md")).unwrap();
     let public = format!(
-        "{package_guide}\n{guide}\n{reference}\n{input_reference}\n{resource_input_reference}\n{slot_reference}\n{style_reference}\n{resource_reference}\n{manifest_reference}"
+        "{package_guide}\n{guide}\n{reference}\n{input_reference}\n{resource_input_reference}\n{state_input_reference}\n{slot_reference}\n{style_reference}\n{resource_reference}\n{manifest_reference}"
     );
 
     for statement in [
@@ -357,6 +362,8 @@ fn component_documentation_matches_the_composition_contract() {
         "action-reference",
         "resource-reference",
         "`resourceTypes`",
+        "`valueType`",
+        "`stateReferences`",
         "`required: true`",
         "`input:icon`",
         "parent accepted-kind set must be a subset",
@@ -366,6 +373,11 @@ fn component_documentation_matches_the_composition_contract() {
         "callee image owns",
         "zero filesystem reads",
         "ordinary root",
+        "`state:name`",
+        "`input.name`",
+        "provider demand",
+        "equal-value suppression",
+        "closed retained overlay",
         "interpolation",
         "slots",
         "default or named content slots",
@@ -410,7 +422,7 @@ fn component_documentation_matches_the_composition_contract() {
         "Assigned slot content retains caller ownership",
         "Dependency package aliases are not resource lookup paths",
         "device generation",
-        "state or action",
+        "action authority",
         "repeat integration",
         "simple SVG",
         "no secondary filesystem read",
@@ -500,6 +512,40 @@ fn component_documentation_matches_the_composition_contract() {
     assert!(resource_input_reference.contains(&format!(
         "| Resources per surface | {MAX_COMPONENT_RESOURCE_DECLARATIONS} |"
     )));
+    assert!(state_input_reference.contains(&format!(
+        "| State-reference aliases per surface | {MAX_SURFACE_STATE_REFERENCES} |"
+    )));
+    assert!(state_input_reference.contains(&format!(
+        "| Concrete state-reference values per prepared root | {} |",
+        formatted_decimal(MAX_STATE_REFERENCE_VALUES_PER_PREPARED_ROOT as u64)
+    )));
+    assert!(state_input_reference.contains(&format!(
+        "| State consumer bindings per prepared root | {} |",
+        formatted_decimal(MAX_STATE_REFERENCE_CONSUMER_BINDINGS_PER_PREPARED_ROOT as u64)
+    )));
+    assert_eq!(StateBindingKey::ALL.len(), 87);
+    for key in StateBindingKey::ALL {
+        let accepted = [
+            (StateValueKind::Text, "string"),
+            (StateValueKind::Value, "number"),
+            (StateValueKind::Boolean, "boolean"),
+            (StateValueKind::Token, "token"),
+        ]
+        .into_iter()
+        .filter_map(|(kind, name)| key.supports(kind).then_some(name))
+        .collect::<Vec<_>>()
+        .join(", ");
+        let row = format!(
+            "| `{}` | {} | {} |",
+            key.as_str(),
+            key.scope().as_str(),
+            accepted
+        );
+        assert!(
+            state_input_reference.contains(&row),
+            "state-reference source table omits or mistypes {row}"
+        );
+    }
     assert!(slot_reference.contains(&format!(
         "| Slot declarations per component | {MAX_COMPONENT_SLOTS} |"
     )));
@@ -608,6 +654,9 @@ fn component_documentation_matches_the_composition_contract() {
         "\"type\": \"resource-reference\"",
         "\"resourceTypes\"",
         "\"required\": true",
+        "\"stateReferences\"",
+        "\"type\": \"state-reference\"",
+        "\"valueType\": \"string\"",
     ] {
         assert!(
             format!("{example_manifest}\n{example_component_manifest}").contains(expected),
@@ -618,6 +667,8 @@ fn component_documentation_matches_the_composition_contract() {
         "input-photo=\"resource:surface-photo\"",
         "input-symbol=\"resource:surface-symbol\"",
         "src=\"assets/root-projected.png\"",
+        "input-time=\"state:current-time\"",
+        "data-htm-bind=\"clock.time\"",
     ] {
         assert!(
             example_panel.contains(expected),
@@ -630,6 +681,8 @@ fn component_documentation_matches_the_composition_contract() {
         "input-icon=\"input:symbol\"",
         "input-icon=\"resource:status-orb\"",
         "src=\"input:photo\"",
+        "input-time=\"input:time\"",
+        "data-htm-bind=\"input.time\"",
     ] {
         assert!(
             example_components.contains(expected),
@@ -643,13 +696,13 @@ fn component_documentation_matches_the_composition_contract() {
             .is_file()
     );
     let snapshot = manifest.snapshot();
-    assert_eq!(snapshot.components().definitions().len(), 9);
+    assert_eq!(snapshot.components().definitions().len(), 12);
     assert_eq!(snapshot.components().totals().source_read_count, 2);
     assert_eq!(snapshot.components().totals().source_parse_count, 2);
     assert_eq!(snapshot.component_styles().sources().len(), 4);
     assert_eq!(snapshot.component_styles().totals().source_read_count, 4);
     assert_eq!(snapshot.component_styles().totals().source_parse_count, 4);
-    assert_eq!(snapshot.component_styles().associations().len(), 8);
+    assert_eq!(snapshot.component_styles().associations().len(), 11);
     assert_eq!(snapshot.component_resources().sources().len(), 8);
     assert_eq!(snapshot.component_resources().totals().source_read_count, 8);
     assert_eq!(
@@ -682,12 +735,15 @@ fn component_documentation_matches_the_composition_contract() {
         [
             "dev.coastlinesec.htmshell.shared:badge-label",
             "dev.coastlinesec.htmshell.shared:unstyled-note",
+            "dev.coastlinesec.htmshell.shared:state-clock-label",
+            "dev.coastlinesec.htmshell.shared:state-forwarder",
             "dev.coastlinesec.htmshell.shared:resource-image",
             "dev.coastlinesec.htmshell.controls:status-card",
             "dev.coastlinesec.htmshell.controls:required-frame",
             "dev.coastlinesec.htmshell.controls:projected-label",
             "dev.coastlinesec.htmshell.controls:resource-forwarder",
             "dev.coastlinesec.htmshell.controls:resource-showcase",
+            "dev.coastlinesec.htmshell.controls:state-dashboard",
             "dev.coastlinesec.htmshell.controls:intrinsic-image",
         ]
     );
@@ -719,6 +775,13 @@ fn component_documentation_matches_the_composition_contract() {
         "\"surface_resource_associations\"",
         "\"resource_types\"",
         "\"resource_reference_values\"",
+        "\"surface_state_reference_authorizations\"",
+        "\"state_value_type\"",
+        "\"state_reference_values\"",
+        "\"state_consumer_bindings\"",
+        "\"state_source_identity\"",
+        "\"state_authorization\"",
+        "\"state_binding_identity\"",
         "\"resource_source_identity\"",
         "\"resource_semantic_version\"",
         "\"resource_owner\"",

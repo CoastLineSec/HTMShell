@@ -23,3 +23,10 @@
   height: 32px;
   border-radius: 7px;
 }
+
+.package-state-reference {
+  display: inline-block;
+  margin-right: 8px;
+  color: #dce6ff;
+  font-variant-numeric: tabular-nums;
+}

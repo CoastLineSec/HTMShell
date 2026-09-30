@@ -25,6 +25,7 @@ const PACKED_VECTORS_PER_OPERATION: usize = 6;
 const PACKED_OPERATION_BYTES: usize = PACKED_VECTORS_PER_OPERATION * 16;
 const PACKED_OPERATION_BUFFER_BYTES: usize =
     PACKED_HEADER_BYTES + MAX_FOREGROUND_EFFECT_FUNCTIONS * PACKED_OPERATION_BYTES;
+const MAX_EFFECT_IMAGE_HANDLE_VARIANTS_PER_LAYER: usize = 4;
 const _: () = assert!(1 <= MAX_EFFECT_PIPELINE_VARIANTS);
 
 const COLOR_EFFECT_SHADER: &str = r#"
@@ -79,6 +80,119 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 pub(super) struct ColorEffectPipeline {
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
+}
+
+#[derive(Default)]
+pub(super) struct EffectImageCache {
+    layers: Vec<Vec<CachedEffectImage>>,
+    use_sequence: u64,
+    next_diagnostic_id: u64,
+}
+
+struct CachedEffectImage {
+    image: ImageData,
+    width: u32,
+    height: u32,
+    last_use: u64,
+    diagnostic_id: u64,
+}
+
+impl EffectImageCache {
+    fn bind(
+        &mut self,
+        renderer: &mut vello::Renderer,
+        layer_index: usize,
+        texture: wgpu::Texture,
+        statistics: &mut GpuStatistics,
+    ) -> Result<ImageData, BackendError> {
+        self.use_sequence = self.use_sequence.checked_add(1).ok_or_else(|| {
+            effect_error(
+                BackendErrorKind::ResourcePreparation,
+                "GPU effect image-cache sequence exhausted",
+                true,
+            )
+        })?;
+        let width = texture.width();
+        let height = texture.height();
+        if self.layers.len() <= layer_index {
+            self.layers.resize_with(layer_index + 1, Vec::new);
+        }
+        let layer = &mut self.layers[layer_index];
+        if let Some(cached) = layer
+            .iter_mut()
+            .find(|cached| cached.width == width && cached.height == height)
+        {
+            cached.last_use = self.use_sequence;
+            let texture = registered_texture(texture);
+            renderer.override_image(&cached.image, Some(texture));
+            statistics.gpu_effect_image_handle_reuses =
+                statistics.gpu_effect_image_handle_reuses.saturating_add(1);
+            record_effect_image_diagnostic(
+                statistics,
+                layer_index,
+                width,
+                height,
+                cached.diagnostic_id,
+            );
+            return Ok(cached.image.clone());
+        }
+        if layer.len() >= MAX_EFFECT_IMAGE_HANDLE_VARIANTS_PER_LAYER {
+            let oldest = layer
+                .iter()
+                .enumerate()
+                .min_by_key(|(index, cached)| (cached.last_use, *index))
+                .map(|(index, _)| index)
+                .expect("bounded nonempty effect image layer");
+            let evicted = layer.remove(oldest);
+            renderer.override_image(&evicted.image, None);
+            statistics.gpu_effect_image_handle_replacements = statistics
+                .gpu_effect_image_handle_replacements
+                .saturating_add(1);
+        }
+        let image = renderer.register_texture(texture);
+        self.next_diagnostic_id = self.next_diagnostic_id.checked_add(1).ok_or_else(|| {
+            effect_error(
+                BackendErrorKind::ResourcePreparation,
+                "GPU effect image diagnostic identity exhausted",
+                true,
+            )
+        })?;
+        let diagnostic_id = self.next_diagnostic_id;
+        layer.push(CachedEffectImage {
+            image: image.clone(),
+            width,
+            height,
+            last_use: self.use_sequence,
+            diagnostic_id,
+        });
+        statistics.gpu_effect_image_handle_creations = statistics
+            .gpu_effect_image_handle_creations
+            .saturating_add(1);
+        record_effect_image_diagnostic(statistics, layer_index, width, height, diagnostic_id);
+        Ok(image)
+    }
+}
+
+fn record_effect_image_diagnostic(
+    statistics: &mut GpuStatistics,
+    layer_index: usize,
+    width: u32,
+    height: u32,
+    diagnostic_id: u64,
+) {
+    statistics.gpu_effect_image_last_layer_ordinal = u64::try_from(layer_index).unwrap_or(u64::MAX);
+    statistics.gpu_effect_image_last_width = width;
+    statistics.gpu_effect_image_last_height = height;
+    statistics.gpu_effect_image_last_diagnostic_id = diagnostic_id;
+}
+
+fn registered_texture(texture: wgpu::Texture) -> wgpu::TexelCopyTextureInfoBase<wgpu::Texture> {
+    wgpu::TexelCopyTextureInfoBase {
+        texture,
+        mip_level: 0,
+        origin: wgpu::Origin3d::ZERO,
+        aspect: wgpu::TextureAspect::All,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -329,6 +443,7 @@ pub(super) fn render_prepared_scene(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     renderer: &mut vello::Renderer,
+    effect_image_cache: &mut EffectImageCache,
     color_pipeline: &mut Option<ColorEffectPipeline>,
     blur_pipelines: &mut Option<BlurEffectPipelines>,
     shadow_pipelines: &mut Option<ShadowEffectPipelines>,
@@ -387,6 +502,7 @@ pub(super) fn render_prepared_scene(
         device,
         queue,
         renderer,
+        effect_image_cache,
         color_pipeline,
         blur_pipelines,
         shadow_pipelines,
@@ -468,6 +584,7 @@ fn transform_nodes(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     renderer: &mut vello::Renderer,
+    effect_image_cache: &mut EffectImageCache,
     color_pipeline: &mut Option<ColorEffectPipeline>,
     blur_pipelines: &mut Option<BlurEffectPipelines>,
     shadow_pipelines: &mut Option<ShadowEffectPipelines>,
@@ -482,6 +599,7 @@ fn transform_nodes(
         };
         let own_filter = command_has_foreground_filter(push);
         let own_plan = if own_filter {
+            let current_plan_index = *plan_index;
             let plan = plans.get(*plan_index).cloned().ok_or_else(|| {
                 effect_error(
                     BackendErrorKind::ResourcePreparation,
@@ -490,7 +608,7 @@ fn transform_nodes(
                 )
             })?;
             *plan_index += 1;
-            Some(plan)
+            Some((current_plan_index, plan))
         } else {
             None
         };
@@ -505,6 +623,7 @@ fn transform_nodes(
             device,
             queue,
             renderer,
+            effect_image_cache,
             color_pipeline,
             blur_pipelines,
             shadow_pipelines,
@@ -514,7 +633,7 @@ fn transform_nodes(
             statistics,
         )?;
 
-        let Some(plan) = own_plan else {
+        let Some((current_plan_index, plan)) = own_plan else {
             continue;
         };
         match plan.execution {
@@ -699,11 +818,14 @@ fn transform_nodes(
                     &views,
                     statistics,
                 )?;
-                let image = renderer.register_texture(
+                let image = effect_image_cache.bind(
+                    renderer,
+                    current_plan_index,
                     textures[final_index]
                         .take()
                         .expect("final GPU effect texture remains owned"),
-                );
+                    statistics,
+                )?;
                 if let Some(unused) = textures[1 - final_index].take() {
                     unused.destroy();
                 }

@@ -42,6 +42,32 @@ Authors cannot set `data-htm-state` on a registered element.
       data-htm-format="energy"></data>
 ```
 
+## Component state-reference inputs
+
+A schema version 2 surface may authorize one eligible finite scalar source under a surface-local name:
+
+```json
+"stateReferences": [
+  {
+    "name": "current-time",
+    "source": "clock.time",
+    "valueType": "string"
+  }
+]
+```
+
+The root passes that alias to a required state-reference component input:
+
+```html
+<htm-use component="clock-label" input-time="state:current-time"></htm-use>
+```
+
+Components cannot discover providers or name a surface alias directly. A component may statically forward a received reference through `input:name`. A component-owned or fallback `state-text`, `state-token`, or `state-value` declaration may consume the matching reference with `data-htm-bind="input.name"`. A component-owned button may consume a Boolean enabled projection with `data-htm-enabled-bind="input.name"`. Projected caller content keeps caller scope.
+
+Authorization, type matching, assignment, forwarding, and consumer plans validate before publication. Live consumer bindings activate only after publication and reuse the existing event-driven provider snapshots, demand accounting, equal-value suppression, batching, and output-local scheduling. Temporary provider unavailability preserves the binding and uses the source's existing typed unavailable projection. Closed retained overlays may retain demand and update retained DOM state, but they do not request or present frames while closed.
+
+See [state-reference inputs](../types/HTMShell.Component/StateReferenceInput.md) for the exact declaration, eligible sources, consumer compatibility, lifecycle, and limits.
+
 ## Collections
 
 [`repeat`](../types/HTMShell.Elements/repeat.md) expands one inert `template` for each keyed source item. Registered descendants use `data-htm-local-id`. Repeats cannot be nested. Power repeats are read-only. `pipewire.nodes` also permits its narrow mute buttons and volume range controls.

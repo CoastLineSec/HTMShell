@@ -43,6 +43,36 @@
       "source": "components/badge-label.html"
     },
     {
+      "name": "state-forwarder",
+      "source": "components/badge-label.html",
+      "inputs": [
+        {
+          "name": "time",
+          "type": "state-reference",
+          "valueType": "string",
+          "required": true
+        }
+      ],
+      "styles": [
+        "components/badge-label.css"
+      ]
+    },
+    {
+      "name": "state-clock-label",
+      "source": "components/badge-label.html",
+      "inputs": [
+        {
+          "name": "time",
+          "type": "state-reference",
+          "valueType": "string",
+          "required": true
+        }
+      ],
+      "styles": [
+        "components/badge-label.css"
+      ]
+    },
+    {
       "name": "resource-image",
       "source": "components/badge-label.html",
       "inputs": [

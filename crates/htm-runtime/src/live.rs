@@ -9,11 +9,11 @@ use crate::builtin::{
 };
 use crate::identity::IdentityRegistry;
 use crate::model::{DiagnosticMessage, LogicalRect, ViewportSpec};
-#[cfg(feature = "gpu-renderer")]
-use crate::render::PreparedRender;
 use crate::render::{
     CpuRenderSession, DamageRegion, FramePlan, FrameReason, FrameReasonSet, RenderSurfaceId,
 };
+#[cfg(feature = "gpu-renderer")]
+use crate::render::{PreparedRender, ResourceKind, SceneChangeKind};
 use crate::resource::{LocalOnlyResourceProvider, ResourceAudit};
 use crate::style_owner::{StyleActivationMode, StyleOwnership, activate_style_ownership};
 use crate::{
@@ -34,6 +34,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+
+const COMPONENT_STATE_BINDING_ID_PREFIX: &str = "\0component-state:";
+#[cfg(feature = "gpu-renderer")]
+const NATIVE_REPRODUCER_LOG_ENV: &str = "HTMSHELL_M9_P5A_NATIVE_REPRO_LOG";
+#[cfg(feature = "gpu-renderer")]
+const NATIVE_REPRODUCER_UPDATE_ID: &str = "m9-p5a-native-repro-update";
 
 const MAX_HTML_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_LOGICAL_DIMENSION: u32 = 16_384;
@@ -130,6 +136,75 @@ impl LiveGpuPreparedFrame {
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub fn scene_revision(&self) -> u64 {
+        self.prepared.plan.scene_revision.0
+    }
+
+    pub fn full_repaint_decision(&self) -> bool {
+        self.prepared.plan.full_repaint
+    }
+
+    pub fn prior_scene_revision(&self) -> Option<u64> {
+        self.prepared
+            .plan
+            .prior_scene_revision
+            .map(|revision| revision.0)
+    }
+
+    pub fn diagnostic_revision_reason_category(&self) -> &'static str {
+        let plan = &self.prepared.plan;
+        if plan.reasons.contains(&FrameReason::RendererRecovery) {
+            return "renderer-recovery";
+        }
+        if plan.reasons.contains(&FrameReason::MappedTransition)
+            || plan.reasons.contains(&FrameReason::InitialPresentation)
+        {
+            return "surface-map-unmap";
+        }
+        if plan.reasons.contains(&FrameReason::ScaleChange)
+            || plan.reasons.contains(&FrameReason::SurfaceResize)
+        {
+            return "output-geometry-scale-change";
+        }
+        if plan
+            .delta
+            .resource_changes
+            .iter()
+            .any(|change| change.id.kind == ResourceKind::RasterImage)
+        {
+            return "raster-resource-change";
+        }
+        if plan
+            .delta
+            .resource_changes
+            .iter()
+            .any(|change| change.id.kind == ResourceKind::Svg)
+        {
+            return "svg-resource-change";
+        }
+        if plan.delta.changes.iter().any(|change| {
+            change.kinds.contains(&SceneChangeKind::Geometry)
+                || change.kinds.contains(&SceneChangeKind::Reparented)
+        }) {
+            return "layout-change";
+        }
+        if plan
+            .delta
+            .changes
+            .iter()
+            .any(|change| change.kinds.contains(&SceneChangeKind::Effect))
+        {
+            return "effect-layer-change";
+        }
+        if plan.reasons.contains(&FrameReason::ExplicitInvalidation) && plan.full_repaint {
+            return "conservative-full-repaint";
+        }
+        if plan.delta.is_empty() {
+            return "damage-only-update";
+        }
+        "scene-rebuild"
     }
 }
 
@@ -552,6 +627,7 @@ pub struct LiveDocument {
     parse_count: u32,
     started: Instant,
     frame_generation: u64,
+    diagnostic_component_clock_updates: u64,
     kind: LiveDocumentKind,
     last_pointer: Option<Point<f32>>,
     pressed_action: Option<PendingActivation>,
@@ -1078,6 +1154,7 @@ impl LiveDocument {
             kind.builtin_surface_kind(),
             &source.display().to_string(),
             &local_input_consumer_slots,
+            &component_input_consumers,
         )?;
         let declaration_discovery_ms = elapsed_ms(discovery_started);
         let builtin_summary = builtins.summary();
@@ -1139,6 +1216,7 @@ impl LiveDocument {
             parse_count: 1,
             started: Instant::now(),
             frame_generation: 0,
+            diagnostic_component_clock_updates: 0,
             kind,
             last_pointer: None,
             pressed_action: None,
@@ -1459,6 +1537,16 @@ impl LiveDocument {
         self.render_session.reject_prepared(true);
     }
 
+    #[cfg(feature = "gpu-renderer")]
+    pub fn diagnostic_scene_revision_sequence(&self) -> u64 {
+        self.render_session.diagnostic_scene_revision_sequence()
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    fn request_conservative_full_repaint(&mut self) {
+        self.render_session.request_full_repaint();
+    }
+
     fn render_internal(
         &mut self,
         request: LiveRenderRequest,
@@ -1657,6 +1745,11 @@ impl LiveDocument {
 
     pub fn component_resource_usages(&self) -> &[crate::ComponentResourceUsage] {
         &self.component_resource_usages
+    }
+
+    #[doc(hidden)]
+    pub fn diagnostic_component_clock_update_count(&self) -> u64 {
+        self.diagnostic_component_clock_updates
     }
 
     pub fn source(&self) -> &Path {
@@ -2818,6 +2911,7 @@ impl LiveDocument {
         let mut pending_text = Vec::new();
         let mut pending_tokens = Vec::new();
         let mut changed_keys = std::collections::BTreeSet::new();
+        let mut component_state_changed = false;
         let mut update = BindingUpdate::default();
         for (key, value) in text_values {
             if !key.supports(StateValueKind::Text) {
@@ -2844,6 +2938,9 @@ impl LiveDocument {
                 continue;
             }
             let targets = targets.to_vec();
+            component_state_changed |= targets
+                .iter()
+                .any(|target| target.starts_with(COMPONENT_STATE_BINDING_ID_PREFIX));
             for html_id in &targets {
                 let identity = self.builtins.indexed_node(html_id).ok_or_else(|| {
                     RuntimeError::InvalidMutationTarget(format!(
@@ -2883,6 +2980,9 @@ impl LiveDocument {
                 continue;
             }
             let targets = targets.to_vec();
+            component_state_changed |= targets
+                .iter()
+                .any(|target| target.starts_with(COMPONENT_STATE_BINDING_ID_PREFIX));
             for html_id in &targets {
                 let identity = self.builtins.indexed_node(html_id).ok_or_else(|| {
                     RuntimeError::InvalidMutationTarget(format!(
@@ -2925,7 +3025,33 @@ impl LiveDocument {
             .suppressed_binding_updates
             .saturating_add(update.suppressed_keys as u64);
         if update.changed_elements > 0 {
+            #[cfg(feature = "gpu-renderer")]
+            if component_state_changed
+                && changed_keys.contains(&StateBindingKey::ClockTime)
+                && std::env::var_os(NATIVE_REPRODUCER_LOG_ENV).is_some()
+                && self
+                    .builtins
+                    .indexed_node(NATIVE_REPRODUCER_UPDATE_ID)
+                    .is_some()
+            {
+                self.diagnostic_component_clock_updates = self
+                    .diagnostic_component_clock_updates
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        RuntimeError::LimitExceeded(
+                            "native reproducer Clock update counter exhausted".into(),
+                        )
+                    })?;
+                self.set_registered_text(
+                    NATIVE_REPRODUCER_UPDATE_ID,
+                    &format!("Update {}", self.diagnostic_component_clock_updates),
+                )?;
+            }
             self.resolve();
+            #[cfg(feature = "gpu-renderer")]
+            if component_state_changed {
+                self.request_conservative_full_repaint();
+            }
         }
         self.measurements.last_state_projection_ms = elapsed_ms(projection_started);
         Ok(update)
@@ -2938,6 +3064,7 @@ impl LiveDocument {
         let started = Instant::now();
         let mut seen = BTreeSet::new();
         let mut update = BindingUpdate::default();
+        let mut component_state_changed = false;
         for (key, value) in values {
             if !key.supports(StateValueKind::Value) {
                 return Err(RuntimeError::InvalidMutationTarget(format!(
@@ -3010,6 +3137,8 @@ impl LiveDocument {
                     self.apply_value_to_node(node, &formatted.display, formatted.value.as_deref())?
                 };
                 if changed {
+                    component_state_changed |=
+                        html_id.starts_with(COMPONENT_STATE_BINDING_ID_PREFIX);
                     update.changed_elements = update.changed_elements.saturating_add(1);
                     update.changed_value_elements = update.changed_value_elements.saturating_add(1);
                 }
@@ -3017,6 +3146,10 @@ impl LiveDocument {
         }
         if update.changed_elements > 0 {
             self.resolve();
+            #[cfg(feature = "gpu-renderer")]
+            if component_state_changed {
+                self.request_conservative_full_repaint();
+            }
         }
         self.measurements.last_attribute_mutation_ms = elapsed_ms(started);
         Ok(update)
@@ -3029,6 +3162,7 @@ impl LiveDocument {
         let started = Instant::now();
         let mut seen = BTreeSet::new();
         let mut update = BindingUpdate::default();
+        let mut component_state_changed = false;
         for (key, value) in values {
             if !key.supports(StateValueKind::Boolean) {
                 return Err(RuntimeError::InvalidMutationTarget(format!(
@@ -3067,6 +3201,8 @@ impl LiveDocument {
                         declaration.disabled,
                         *value == Some(true),
                     )? {
+                        component_state_changed |=
+                            html_id.starts_with(COMPONENT_STATE_BINDING_ID_PREFIX);
                         update.changed_elements = update.changed_elements.saturating_add(1);
                         update.changed_boolean_elements =
                             update.changed_boolean_elements.saturating_add(1);
@@ -3085,10 +3221,15 @@ impl LiveDocument {
                 }
                 update.changed_elements = update.changed_elements.saturating_add(1);
                 update.changed_boolean_elements = update.changed_boolean_elements.saturating_add(1);
+                component_state_changed |= html_id.starts_with(COMPONENT_STATE_BINDING_ID_PREFIX);
             }
         }
         if update.changed_elements > 0 {
             self.resolve();
+            #[cfg(feature = "gpu-renderer")]
+            if component_state_changed {
+                self.request_conservative_full_repaint();
+            }
         }
         self.measurements.last_attribute_mutation_ms = elapsed_ms(started);
         Ok(update)

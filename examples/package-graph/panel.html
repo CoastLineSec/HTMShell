@@ -22,6 +22,19 @@
         component="controls.resource-showcase"
         input-photo="resource:surface-photo"
         input-symbol="resource:surface-symbol"></htm-use>
+      <htm-use
+        component="controls.state-dashboard"
+        input-time="state:current-time">
+        <span
+          id="projected-clock-time"
+          class="projected-status"
+          data-htm-element="state-text"
+          data-htm-bind="clock.time">Caller-scoped time</span>
+      </htm-use>
+      <htm-use
+        component="controls.state-dashboard"
+        input-time="state:current-time"></htm-use>
+      <span class="literal-state-sibling">Literal sibling</span>
       <span id="output-label" data-htm-element="state-text" data-htm-bind="output.label">Output</span>
       <button
         id="overlay-toggle"

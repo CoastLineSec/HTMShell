@@ -320,8 +320,8 @@ fn declarations_and_invocations_reject_invalid_contracts() {
             PackageErrorKind::ReservedComponentInputName,
         ),
         (
-            r#"[{"name":"binding","type":"state-reference","default":"x"}]"#,
-            PackageErrorKind::ComponentStateReferenceInputNotSupported,
+            r#"[{"name":"binding","type":"action-reference","required":true}]"#,
+            PackageErrorKind::ComponentActionReferenceInputNotSupported,
         ),
     ];
     for (inputs, expected) in declaration_cases {

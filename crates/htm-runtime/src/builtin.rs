@@ -1,8 +1,9 @@
 use crate::identity::{IdentityRegistry, author_slots};
 use crate::{
-    ClockFormat, ClockTimeZone, ContextualRepeatSource, ExperimentalDocumentIdentity,
-    ExperimentalNodeIdentity, ItemBindingKey, MAX_CLOCK_DECLARATIONS_PER_DOCUMENT,
-    MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT, MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
+    ClockFormat, ClockTimeZone, ComponentInputConsumerKind, ComponentInputConsumerRecord,
+    ContextualRepeatSource, ExperimentalDocumentIdentity, ExperimentalNodeIdentity, ItemBindingKey,
+    MAX_CLOCK_DECLARATIONS_PER_DOCUMENT, MAX_CONTEXTUAL_GRAPH_REPEATS_PER_DOCUMENT,
+    MAX_CONTEXTUAL_LINK_GROUP_REPEATS_PER_NODE_TEMPLATE,
     MAX_CONTEXTUAL_LINK_REPEATS_PER_GROUP_TEMPLATE, MAX_CONTEXTUAL_REPEATS_PER_DOCUMENT,
     MAX_CONTEXTUAL_REPEATS_PER_NODE_TEMPLATE, MAX_PIPEWIRE_AUDIO_CONTROLS_PER_DOCUMENT,
     MAX_PIPEWIRE_AUDIO_CONTROLS_PER_ITEM, MAX_PIPEWIRE_BINDINGS_PER_ITEM,
@@ -264,6 +265,12 @@ impl StateBindingKey {
         Self::OverlayActivationCount,
         Self::ShellLastAction,
     ];
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|binding| binding.as_str() == value)
+    }
 
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -881,6 +888,16 @@ pub enum StateBindingScope {
     Process,
     Output,
     Surface,
+}
+
+impl StateBindingScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Process => "process",
+            Self::Output => "output",
+            Self::Surface => "surface",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1696,6 +1713,7 @@ impl BuiltInElementIndex {
         surface_kind: BuiltInSurfaceKind,
         source: &str,
         local_input_consumers: &BTreeSet<usize>,
+        component_input_consumers: &[ComponentInputConsumerRecord],
     ) -> Result<Self, RuntimeError> {
         ensure_registry_valid()?;
         let mut elements = BTreeMap::new();
@@ -2308,6 +2326,128 @@ impl BuiltInElementIndex {
                     .push(html_id.clone());
             }
             elements.insert(html_id, indexed);
+        }
+
+        for (order, consumer) in component_input_consumers
+            .iter()
+            .filter(|consumer| consumer.is_live_state_reference())
+            .enumerate()
+        {
+            let reference = consumer.state_reference().ok_or_else(|| {
+                RuntimeError::Package(crate::PackageLoadError::new(
+                    crate::PackageErrorKind::ComponentStateReferenceLiveActivationFailure,
+                    "live component state consumer has no state-reference value".to_owned(),
+                ))
+            })?;
+            let binding = reference.source();
+            let projection = consumer.kind().projection();
+            if !binding.supports(projection) {
+                return Err(RuntimeError::Package(crate::PackageLoadError::new(
+                    crate::PackageErrorKind::ComponentStateReferenceConsumerBindingInvalid,
+                    format!(
+                        "component state consumer `{}` requests unsupported `{}` projection from `{}`",
+                        consumer.input(),
+                        consumer.kind().as_str(),
+                        binding.as_str()
+                    ),
+                )));
+            }
+            let binding_id = consumer.state_binding_id().ok_or_else(|| {
+                RuntimeError::Package(crate::PackageLoadError::new(
+                    crate::PackageErrorKind::ComponentStateReferenceLiveActivationFailure,
+                    "live component state consumer has no binding identity".to_owned(),
+                ))
+            })?;
+            let internal_id = format!("\0component-state:{binding_id}");
+            if elements.contains_key(&internal_id) {
+                return Err(RuntimeError::Package(crate::PackageLoadError::new(
+                    crate::PackageErrorKind::ComponentStateReferenceConsumerBindingInvalid,
+                    "component state consumer binding identity is duplicated".to_owned(),
+                )));
+            }
+            let node = document.get_node(consumer.node_slot()).ok_or_else(|| {
+                RuntimeError::InvalidMutationTarget(
+                    "component state consumer node disappeared during discovery".to_owned(),
+                )
+            })?;
+            let disabled = node
+                .element_data()
+                .is_some_and(|element| element.has_attr(local_name!("disabled")));
+            let (kind, direct_binding, binding_kind, enabled_binding, value_format) =
+                match consumer.kind() {
+                    ComponentInputConsumerKind::StateText => (
+                        BuiltInElementKind::StateText,
+                        Some(binding),
+                        Some(StateValueKind::Text),
+                        None,
+                        None,
+                    ),
+                    ComponentInputConsumerKind::StateToken => (
+                        BuiltInElementKind::StateToken,
+                        Some(binding),
+                        Some(StateValueKind::Token),
+                        None,
+                        None,
+                    ),
+                    ComponentInputConsumerKind::StateValue => (
+                        BuiltInElementKind::StateValue,
+                        Some(binding),
+                        Some(StateValueKind::Value),
+                        None,
+                        Some(StateValueFormat::Raw),
+                    ),
+                    ComponentInputConsumerKind::BooleanEnabled => (
+                        BuiltInElementKind::StateText,
+                        None,
+                        None,
+                        Some(binding),
+                        None,
+                    ),
+                };
+            let declaration = ElementDeclaration {
+                id: ElementInstanceId {
+                    document_generation,
+                    html_id: internal_id.clone(),
+                },
+                kind,
+                binding: direct_binding,
+                binding_kind,
+                action: None,
+                action_target: None,
+                pipewire_target: None,
+                clock: None,
+                disabled,
+                enabled_binding,
+                value_format,
+                repeat: None,
+                range: None,
+                peak_monitor: None,
+            };
+            let indexed = IndexedElement {
+                declaration,
+                node: identities.identity_for_slot(document, consumer.node_slot())?,
+                depth: node_depth(document, consumer.node_slot()),
+                order: order.saturating_add(elements.len()),
+            };
+            match projection {
+                StateValueKind::Text => text_bindings
+                    .entry(binding)
+                    .or_default()
+                    .push(internal_id.clone()),
+                StateValueKind::Token => token_bindings
+                    .entry(binding)
+                    .or_default()
+                    .push(internal_id.clone()),
+                StateValueKind::Value => value_bindings
+                    .entry(binding)
+                    .or_default()
+                    .push(internal_id.clone()),
+                StateValueKind::Boolean => boolean_bindings
+                    .entry(binding)
+                    .or_default()
+                    .push(internal_id.clone()),
+            }
+            elements.insert(internal_id, indexed);
         }
 
         let clock_declarations = elements
@@ -4690,6 +4830,7 @@ mod tests {
             kind,
             "fixture.html",
             &BTreeSet::new(),
+            &[],
         )
     }
 

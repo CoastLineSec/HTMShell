@@ -8,7 +8,9 @@ use crate::{
     ComponentResourceCatalog, ComponentResourceDeclaration, ComponentResourceKind,
     ComponentResourceName, ComponentResourceUsage, ComponentStylesheetPath,
 };
-use crate::{NumericValue, StateToken, StateValueFormat};
+use crate::{
+    NumericValue, StateBindingKey, StateBindingScope, StateToken, StateValueFormat, StateValueKind,
+};
 use blitz_dom::node::{ImageData, NodeData, RasterImageData, SpecialElementData, SvgImageData};
 use blitz_dom::{Attribute, DocumentConfig, LocalName, QualName, ns};
 use blitz_html::HtmlDocument;
@@ -39,6 +41,47 @@ pub const MAX_COMPONENT_INPUT_STRING_BYTES: usize = 4_096;
 pub const MAX_COMPONENT_INPUT_LITERAL_BYTES: usize = 16 * 1_024;
 pub const MAX_COMPONENT_INPUT_ATTRIBUTES: usize = 64;
 pub const MAX_RESOURCE_REFERENCE_VALUES_PER_PREPARED_ROOT: usize = 16_384;
+pub const MAX_STATE_REFERENCE_VALUES_PER_PREPARED_ROOT: usize = 16_384;
+pub const MAX_STATE_REFERENCE_CONSUMER_BINDINGS_PER_PREPARED_ROOT: usize = 50_000;
+
+fn increment_state_consumer_binding_count(count: &mut usize) -> Result<(), PackageLoadError> {
+    *count = count.checked_add(1).ok_or_else(|| {
+        PackageLoadError::new(
+            PackageErrorKind::ComponentStateReferenceConsumerBindingLimit,
+            "state-reference consumer binding count overflowed",
+        )
+    })?;
+    if *count > MAX_STATE_REFERENCE_CONSUMER_BINDINGS_PER_PREPARED_ROOT {
+        return Err(PackageLoadError::new(
+            PackageErrorKind::ComponentStateReferenceConsumerBindingLimit,
+            format!(
+                "prepared root exceeds {MAX_STATE_REFERENCE_CONSUMER_BINDINGS_PER_PREPARED_ROOT} state-reference consumer bindings"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod state_reference_limit_tests {
+    use super::*;
+
+    #[test]
+    fn state_consumer_binding_counter_accepts_exact_limit_and_rejects_one_over() {
+        let mut count = MAX_STATE_REFERENCE_CONSUMER_BINDINGS_PER_PREPARED_ROOT - 1;
+        increment_state_consumer_binding_count(&mut count).unwrap();
+        assert_eq!(
+            count,
+            MAX_STATE_REFERENCE_CONSUMER_BINDINGS_PER_PREPARED_ROOT
+        );
+        assert_eq!(
+            increment_state_consumer_binding_count(&mut count)
+                .unwrap_err()
+                .kind(),
+            PackageErrorKind::ComponentStateReferenceConsumerBindingLimit
+        );
+    }
+}
 pub const MAX_COMPONENT_SLOTS: usize = 32;
 pub const MAX_COMPONENT_SLOT_NAME_BYTES: usize = 64;
 
@@ -50,6 +93,7 @@ const SLOT_ELEMENT: &str = "slot";
 const BIND_ATTRIBUTE: &str = "data-htm-bind";
 const FORMAT_ATTRIBUTE: &str = "data-htm-format";
 const STATE_ATTRIBUTE: &str = "data-htm-state";
+const ENABLED_BIND_ATTRIBUTE: &str = "data-htm-enabled-bind";
 
 const RESERVED_COMPONENT_INPUT_NAMES: &[&str] = &[
     "component",
@@ -126,6 +170,8 @@ pub enum ComponentInputType {
     Length,
     #[serde(rename = "resource-reference")]
     ResourceReference,
+    #[serde(rename = "state-reference")]
+    StateReference,
 }
 
 impl ComponentInputType {
@@ -138,10 +184,7 @@ impl ComponentInputType {
             "color" => Ok(Self::Color),
             "length" => Ok(Self::Length),
             "resource-reference" => Ok(Self::ResourceReference),
-            "state-reference" => Err(PackageLoadError::new(
-                PackageErrorKind::ComponentStateReferenceInputNotSupported,
-                "state-reference component inputs are not supported",
-            )),
+            "state-reference" => Ok(Self::StateReference),
             "action-reference" => Err(PackageLoadError::new(
                 PackageErrorKind::ComponentActionReferenceInputNotSupported,
                 "action-reference component inputs are not supported",
@@ -162,7 +205,218 @@ impl ComponentInputType {
             Self::Color => "color",
             Self::Length => "length",
             Self::ResourceReference => "resource-reference",
+            Self::StateReference => "state-reference",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComponentStateValueType {
+    String,
+    Number,
+    Boolean,
+    Token,
+}
+
+impl ComponentStateValueType {
+    pub fn parse(value: &str) -> Result<Self, PackageLoadError> {
+        match value {
+            "string" => Ok(Self::String),
+            "number" => Ok(Self::Number),
+            "boolean" => Ok(Self::Boolean),
+            "token" => Ok(Self::Token),
+            _ => Err(PackageLoadError::new(
+                PackageErrorKind::ComponentStateReferenceValueTypeUnsupported,
+                format!("unsupported state-reference value type `{value}`"),
+            )),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+            Self::Token => "token",
+        }
+    }
+
+    pub const fn projection(self) -> StateValueKind {
+        match self {
+            Self::String => StateValueKind::Text,
+            Self::Number => StateValueKind::Value,
+            Self::Boolean => StateValueKind::Boolean,
+            Self::Token => StateValueKind::Token,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SurfaceStateReferenceOwner {
+    package_id: PackageId,
+    surface_id: Arc<str>,
+}
+
+impl SurfaceStateReferenceOwner {
+    pub(crate) fn new(package_id: PackageId, surface_id: String) -> Self {
+        Self {
+            package_id,
+            surface_id: surface_id.into(),
+        }
+    }
+
+    pub fn package_id(&self) -> &PackageId {
+        &self.package_id
+    }
+
+    pub fn surface_id(&self) -> &str {
+        &self.surface_id
+    }
+
+    pub fn deterministic_string(&self) -> String {
+        format!("{}:surface.{}", self.package_id, self.surface_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurfaceStateReferenceAuthorization {
+    owner: SurfaceStateReferenceOwner,
+    name: ComponentInputName,
+    source: StateBindingKey,
+    value_type: ComponentStateValueType,
+    ordinal: u16,
+}
+
+impl SurfaceStateReferenceAuthorization {
+    pub(crate) fn new(
+        owner: SurfaceStateReferenceOwner,
+        name: ComponentInputName,
+        source: StateBindingKey,
+        value_type: ComponentStateValueType,
+        ordinal: u16,
+    ) -> Self {
+        Self {
+            owner,
+            name,
+            source,
+            value_type,
+            ordinal,
+        }
+    }
+
+    pub fn owner(&self) -> &SurfaceStateReferenceOwner {
+        &self.owner
+    }
+
+    pub fn name(&self) -> &ComponentInputName {
+        &self.name
+    }
+
+    pub const fn source(&self) -> StateBindingKey {
+        self.source
+    }
+
+    pub const fn scope(&self) -> StateBindingScope {
+        self.source.scope()
+    }
+
+    pub const fn value_type(&self) -> ComponentStateValueType {
+        self.value_type
+    }
+
+    pub const fn ordinal(&self) -> u16 {
+        self.ordinal
+    }
+
+    pub fn deterministic_id(&self, generation: PackageSnapshotGeneration) -> String {
+        format!(
+            "{}@{}:state.{}:{}:{}:{}",
+            self.owner.deterministic_string(),
+            generation.get(),
+            self.name,
+            self.source.as_str(),
+            self.value_type.as_str(),
+            self.ordinal
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ComponentStateReferenceValue {
+    id: Arc<str>,
+    source_identity: Arc<str>,
+    authorization: Arc<SurfaceStateReferenceAuthorization>,
+    forwarding: Arc<[Arc<str>]>,
+}
+
+impl ComponentStateReferenceValue {
+    fn new(
+        id: Arc<str>,
+        source_identity: Arc<str>,
+        authorization: Arc<SurfaceStateReferenceAuthorization>,
+        forwarding: Arc<[Arc<str>]>,
+    ) -> Self {
+        Self {
+            id,
+            source_identity,
+            authorization,
+            forwarding,
+        }
+    }
+
+    pub fn deterministic_id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn source_identity(&self) -> &str {
+        &self.source_identity
+    }
+
+    pub fn source(&self) -> StateBindingKey {
+        self.authorization.source()
+    }
+
+    pub fn scope(&self) -> StateBindingScope {
+        self.authorization.scope()
+    }
+
+    pub fn value_type(&self) -> ComponentStateValueType {
+        self.authorization.value_type()
+    }
+
+    pub fn authorization(&self) -> &Arc<SurfaceStateReferenceAuthorization> {
+        &self.authorization
+    }
+
+    pub fn forwarding_provenance(&self) -> &[Arc<str>] {
+        &self.forwarding
+    }
+}
+
+impl PartialEq for ComponentStateReferenceValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for ComponentStateReferenceValue {}
+
+impl PartialOrd for ComponentStateReferenceValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ComponentStateReferenceValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+
+impl std::hash::Hash for ComponentStateReferenceValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.id, state);
     }
 }
 
@@ -360,6 +614,7 @@ pub enum ComponentInputValue {
     Color(ComponentColor),
     Length(ComponentLength),
     ResourceReference(Arc<ComponentResourceReferenceValue>),
+    StateReference(Arc<ComponentStateReferenceValue>),
 }
 
 impl ComponentInputValue {
@@ -372,6 +627,7 @@ impl ComponentInputValue {
             Self::Color(_) => ComponentInputType::Color,
             Self::Length(_) => ComponentInputType::Length,
             Self::ResourceReference(_) => ComponentInputType::ResourceReference,
+            Self::StateReference(_) => ComponentInputType::StateReference,
         }
     }
 
@@ -384,6 +640,7 @@ impl ComponentInputValue {
             Self::Color(value) => value.canonical(),
             Self::Length(value) => value.canonical(),
             Self::ResourceReference(value) => value.deterministic_id().to_owned(),
+            Self::StateReference(value) => value.deterministic_id().to_owned(),
         }
     }
 }
@@ -395,6 +652,7 @@ pub struct ComponentInputDeclaration {
     required: bool,
     default: Option<ComponentInputValue>,
     resource_types: Option<ComponentResourceKindSet>,
+    state_value_type: Option<ComponentStateValueType>,
 }
 
 impl ComponentInputDeclaration {
@@ -404,6 +662,7 @@ impl ComponentInputDeclaration {
         required: bool,
         default: Option<ComponentInputValue>,
         resource_types: Option<ComponentResourceKindSet>,
+        state_value_type: Option<ComponentStateValueType>,
     ) -> Self {
         Self {
             name,
@@ -411,6 +670,7 @@ impl ComponentInputDeclaration {
             required,
             default,
             resource_types,
+            state_value_type,
         }
     }
 
@@ -432,6 +692,10 @@ impl ComponentInputDeclaration {
 
     pub fn resource_types(&self) -> Option<ComponentResourceKindSet> {
         self.resource_types
+    }
+
+    pub fn state_value_type(&self) -> Option<ComponentStateValueType> {
+        self.state_value_type
     }
 }
 
@@ -532,6 +796,12 @@ enum ComponentInputBindingValue {
     ForwardedResource {
         input: ComponentInputName,
     },
+    DirectState {
+        authorization: Arc<SurfaceStateReferenceAuthorization>,
+    },
+    ForwardedState {
+        input: ComponentInputName,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -558,6 +828,9 @@ impl ComponentInputBindings {
             if let Some(kinds) = value.declaration.resource_types() {
                 serialized.push_str(&kinds.canonical_string());
             }
+            if let Some(value_type) = value.declaration.state_value_type() {
+                serialized.push_str(value_type.as_str());
+            }
             serialized.push(':');
             match &value.value {
                 ComponentInputBindingValue::Literal(literal) => {
@@ -581,6 +854,20 @@ impl ComponentInputBindings {
                 }
                 ComponentInputBindingValue::ForwardedResource { input } => {
                     serialized.push_str("forward:");
+                    serialized.push_str(input.as_str());
+                }
+                ComponentInputBindingValue::DirectState { authorization } => {
+                    serialized.push_str("state-direct:");
+                    serialized.push_str(&authorization.owner().deterministic_string());
+                    serialized.push(':');
+                    serialized.push_str(authorization.name().as_str());
+                    serialized.push(':');
+                    serialized.push_str(authorization.source().as_str());
+                    serialized.push(':');
+                    serialized.push_str(authorization.value_type().as_str());
+                }
+                ComponentInputBindingValue::ForwardedState { input } => {
+                    serialized.push_str("state-forward:");
                     serialized.push_str(input.as_str());
                 }
             }
@@ -621,6 +908,12 @@ pub(crate) fn parse_component_input_default(
             return Err(PackageLoadError::new(
                 PackageErrorKind::ComponentResourceReferenceDefaultForbidden,
                 "resource-reference component inputs cannot declare defaults",
+            ));
+        }
+        (ComponentInputType::StateReference, _) => {
+            return Err(PackageLoadError::new(
+                PackageErrorKind::ComponentStateReferenceDefaultForbidden,
+                "state-reference component inputs cannot declare defaults",
             ));
         }
         _ => {
@@ -698,6 +991,10 @@ fn parse_component_input_literal(
         ComponentInputType::ResourceReference => Err(PackageLoadError::new(
             PackageErrorKind::ComponentResourceReferenceAssignmentMalformed,
             "resource-reference inputs require a typed `resource:` or `input:` assignment",
+        )),
+        ComponentInputType::StateReference => Err(PackageLoadError::new(
+            PackageErrorKind::ComponentStateReferenceAssignmentMalformed,
+            "state-reference inputs require a typed `state:` or `input:` assignment",
         )),
     }
 }
@@ -1075,6 +1372,7 @@ pub enum ComponentInputConsumerKind {
     StateText,
     StateToken,
     StateValue,
+    BooleanEnabled,
 }
 
 impl ComponentInputConsumerKind {
@@ -1083,6 +1381,16 @@ impl ComponentInputConsumerKind {
             Self::StateText => "state-text",
             Self::StateToken => "state-token",
             Self::StateValue => "state-value",
+            Self::BooleanEnabled => "boolean-enabled",
+        }
+    }
+
+    pub const fn projection(self) -> StateValueKind {
+        match self {
+            Self::StateText => StateValueKind::Text,
+            Self::StateToken => StateValueKind::Token,
+            Self::StateValue => StateValueKind::Value,
+            Self::BooleanEnabled => StateValueKind::Boolean,
         }
     }
 }
@@ -1485,6 +1793,8 @@ impl PreparedDocument {
             fallback_nodes: Vec::new(),
             resource_usages: Vec::new(),
             resource_reference_values: 0,
+            state_reference_values: 0,
+            state_consumer_bindings: 0,
             projection_node_ordinals: BTreeMap::new(),
         };
         let children = instantiate_nodes(
@@ -1546,6 +1856,8 @@ pub struct PreparedDocumentStats {
     pub expanded_nodes: usize,
     pub maximum_nesting_depth: usize,
     pub resource_reference_values: usize,
+    pub state_reference_values: usize,
+    pub state_consumer_bindings: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1808,6 +2120,8 @@ pub struct ComponentInputConsumerRecord {
     template_source_ordinal: u32,
     kind: ComponentInputConsumerKind,
     input: ComponentInputName,
+    state_reference: Option<Arc<ComponentStateReferenceValue>>,
+    state_binding_id: Option<Arc<str>>,
 }
 
 impl ComponentInputConsumerRecord {
@@ -1829,6 +2143,18 @@ impl ComponentInputConsumerRecord {
 
     pub fn input(&self) -> &ComponentInputName {
         &self.input
+    }
+
+    pub fn state_reference(&self) -> Option<&Arc<ComponentStateReferenceValue>> {
+        self.state_reference.as_ref()
+    }
+
+    pub fn state_binding_id(&self) -> Option<&str> {
+        self.state_binding_id.as_deref()
+    }
+
+    pub fn is_live_state_reference(&self) -> bool {
+        self.state_reference.is_some()
     }
 }
 
@@ -1861,6 +2187,8 @@ struct InstantiationState<'a> {
     fallback_nodes: Vec<ComponentFallbackNodeProvenance>,
     resource_usages: Vec<ComponentResourceUsage>,
     resource_reference_values: usize,
+    state_reference_values: usize,
+    state_consumer_bindings: usize,
     projection_node_ordinals: BTreeMap<ComponentSlotProjectionId, u32>,
 }
 
@@ -1983,6 +2311,101 @@ fn resolve_instance_input_bindings(
                     ),
                 ))
             }
+            ComponentInputBindingValue::DirectState { authorization } => {
+                if binding.declaration.state_value_type() != Some(authorization.value_type()) {
+                    return Err(PackageLoadError::new(
+                        PackageErrorKind::ComponentStateReferenceAssignmentTypeMismatch,
+                        format!(
+                            "state-reference input `{}` direct source type changed during instantiation",
+                            binding.declaration.name()
+                        ),
+                    ));
+                }
+                let scope_identity = match authorization.scope() {
+                    StateBindingScope::Process => "process".to_owned(),
+                    StateBindingScope::Output => {
+                        format!("output-document-{}", state.document_serial)
+                    }
+                    StateBindingScope::Surface => format!(
+                        "surface-{}-document-{}",
+                        authorization.owner().surface_id(),
+                        state.document_serial
+                    ),
+                };
+                let source_identity: Arc<str> = Arc::from(format!(
+                    "state-source:{}:{}:{}@{}",
+                    authorization.source().as_str(),
+                    authorization.scope().as_str(),
+                    scope_identity,
+                    state.generation.get()
+                ));
+                let id: Arc<str> = Arc::from(format!(
+                    "state-input-direct:{}:{}:{}:{}:{}@{}",
+                    state.document_serial,
+                    instance.deterministic_string(),
+                    binding.declaration.name(),
+                    authorization.deterministic_id(state.generation),
+                    invocation_source_ordinal,
+                    state.generation.get()
+                ));
+                ComponentInputValue::StateReference(Arc::new(ComponentStateReferenceValue::new(
+                    id,
+                    source_identity,
+                    Arc::clone(authorization),
+                    Arc::from([]),
+                )))
+            }
+            ComponentInputBindingValue::ForwardedState { input } => {
+                let caller = caller_inputs
+                    .and_then(|inputs| inputs.get(input))
+                    .and_then(|value| match value {
+                        ComponentInputValue::StateReference(value) => Some(Arc::clone(value)),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::ComponentStateReferenceForwardingSourceUnknown,
+                            format!(
+                                "forwarded state-reference input `{input}` has no concrete caller value"
+                            ),
+                        )
+                    })?;
+                if binding.declaration.state_value_type() != Some(caller.value_type()) {
+                    return Err(PackageLoadError::new(
+                        PackageErrorKind::ComponentStateReferenceForwardingTypeMismatch,
+                        format!(
+                            "forwarded state type `{}` is incompatible with input `{}`",
+                            caller.value_type().as_str(),
+                            binding.declaration.name()
+                        ),
+                    ));
+                }
+                let id: Arc<str> = Arc::from(format!(
+                    "state-input-forward:{}:{}:{}:{}:{}@{}",
+                    caller.deterministic_id(),
+                    state.document_serial,
+                    instance.deterministic_string(),
+                    binding.declaration.name(),
+                    invocation_source_ordinal,
+                    state.generation.get()
+                ));
+                let mut forwarding = caller.forwarding_provenance().to_vec();
+                if forwarding.len() >= MAX_COMPONENT_NESTING_DEPTH {
+                    return Err(PackageLoadError::new(
+                        PackageErrorKind::ComponentStateReferenceForwardingDepth,
+                        format!(
+                            "state-reference forwarding exceeds {MAX_COMPONENT_NESTING_DEPTH} hops"
+                        ),
+                    ));
+                }
+                forwarding.push(Arc::clone(&id));
+                ComponentInputValue::StateReference(Arc::new(ComponentStateReferenceValue::new(
+                    id,
+                    Arc::clone(&caller.source_identity),
+                    Arc::clone(caller.authorization()),
+                    forwarding.into(),
+                )))
+            }
         };
         if matches!(value, ComponentInputValue::ResourceReference(_)) {
             state.resource_reference_values = state
@@ -1999,6 +2422,23 @@ fn resolve_instance_input_bindings(
                     PackageErrorKind::ComponentResourceReferenceValueLimit,
                     format!(
                         "prepared root exceeds {MAX_RESOURCE_REFERENCE_VALUES_PER_PREPARED_ROOT} resource-reference values"
+                    ),
+                ));
+            }
+        }
+        if matches!(value, ComponentInputValue::StateReference(_)) {
+            state.state_reference_values =
+                state.state_reference_values.checked_add(1).ok_or_else(|| {
+                    PackageLoadError::new(
+                        PackageErrorKind::ComponentStateReferenceValueLimit,
+                        "state-reference value count overflowed",
+                    )
+                })?;
+            if state.state_reference_values > MAX_STATE_REFERENCE_VALUES_PER_PREPARED_ROOT {
+                return Err(PackageLoadError::new(
+                    PackageErrorKind::ComponentStateReferenceValueLimit,
+                    format!(
+                        "prepared root exceeds {MAX_STATE_REFERENCE_VALUES_PER_PREPARED_ROOT} state-reference values"
                     ),
                 ));
             }
@@ -2293,14 +2733,41 @@ pub(crate) fn build_component_catalog(
     })
 }
 
+pub(crate) struct RootSurfaceAssignmentContext<'a> {
+    resource_owner: Option<&'a SurfaceResourceOwner>,
+    resources: &'a [ComponentResourceDeclaration],
+    state_references: &'a [Arc<SurfaceStateReferenceAuthorization>],
+}
+
+impl<'a> RootSurfaceAssignmentContext<'a> {
+    pub(crate) fn new(
+        resource_owner: &'a SurfaceResourceOwner,
+        resources: &'a [ComponentResourceDeclaration],
+        state_references: &'a [Arc<SurfaceStateReferenceAuthorization>],
+    ) -> Self {
+        Self {
+            resource_owner: Some(resource_owner),
+            resources,
+            state_references,
+        }
+    }
+
+    pub(crate) const fn headless() -> Self {
+        Self {
+            resource_owner: None,
+            resources: &[],
+            state_references: &[],
+        }
+    }
+}
+
 pub(crate) fn prepare_root_document(
     html: &str,
     logical_path: &str,
     owner: &ResolvedPackage,
     catalog: &ComponentCatalog,
     resources: &ComponentResourceCatalog,
-    surface_owner: Option<&SurfaceResourceOwner>,
-    surface_resources: &[ComponentResourceDeclaration],
+    surface: RootSurfaceAssignmentContext<'_>,
 ) -> Result<PreparedDocument, PackageLoadError> {
     reject_duplicate_control_attributes(html, logical_path)?;
     let document = HtmlDocument::from_html(html, parser_config());
@@ -2313,8 +2780,9 @@ pub(crate) fn prepare_root_document(
         logical_path,
         owner,
         catalog,
-        surface_owner,
-        surface_resources,
+        surface_owner: surface.resource_owner,
+        surface_resources: surface.resources,
+        surface_state_references: surface.state_references,
     };
     let nodes = document
         .get_node(0)
@@ -2363,6 +2831,7 @@ struct RootNormalizationContext<'a> {
     catalog: &'a ComponentCatalog,
     surface_owner: Option<&'a SurfaceResourceOwner>,
     surface_resources: &'a [ComponentResourceDeclaration],
+    surface_state_references: &'a [Arc<SurfaceStateReferenceAuthorization>],
 }
 
 #[derive(Clone, Copy)]
@@ -2707,6 +3176,7 @@ fn normalize_root_node(
         catalog,
         surface_owner,
         surface_resources,
+        surface_state_references,
     } = context;
     let source_ordinal = next_ordinal(&mut state.ordinal, owner.id(), logical_path)?;
     let node = document
@@ -2805,6 +3275,7 @@ fn normalize_root_node(
                     surface_owner,
                     surface_resources,
                     &[],
+                    surface_state_references,
                 )?;
                 let children = node
                     .children
@@ -3067,6 +3538,37 @@ fn parse_component_input_reference(
     })
 }
 
+fn parse_surface_state_reference(
+    value: &str,
+    owner: &PackageId,
+    logical_source: &str,
+) -> Result<ComponentInputName, PackageLoadError> {
+    let Some(name) = value.strip_prefix("state:") else {
+        return Err(component_error(
+            PackageErrorKind::ComponentStateReferenceAssignmentMalformed,
+            owner,
+            logical_source,
+            "state-reference direct assignment must use `state:<alias>`",
+        ));
+    };
+    if name.is_empty() || name.contains(['/', '?', '#', '%', ':']) || value.contains("//") {
+        return Err(component_error(
+            PackageErrorKind::ComponentStateReferenceAssignmentMalformed,
+            owner,
+            logical_source,
+            "state-reference assignment must contain one unescaped surface alias name",
+        ));
+    }
+    ComponentInputName::parse(name).map_err(|_| {
+        component_error(
+            PackageErrorKind::ComponentStateReferenceAssignmentMalformed,
+            owner,
+            logical_source,
+            "state-reference assignment contains an invalid surface alias name",
+        )
+    })
+}
+
 fn validate_component_input_consumer(
     element: &blitz_dom::ElementData,
     children: &[UnresolvedTemplateNode],
@@ -3082,25 +3584,45 @@ fn validate_component_input_consumer(
     )>,
     PackageLoadError,
 > {
-    let Some(kind_name) = element_attr(element, BUILTIN_ATTRIBUTE) else {
-        return Ok(None);
-    };
-    let (kind, allowed_tags): (ComponentInputConsumerKind, &[&str]) = match kind_name {
-        "state-text" => (
-            ComponentInputConsumerKind::StateText,
-            &["span", "p", "output"],
+    let state_kind =
+        element_attr(element, BUILTIN_ATTRIBUTE).and_then(|kind_name| match kind_name {
+            "state-text" => Some((
+                ComponentInputConsumerKind::StateText,
+                &["span", "p", "output"][..],
+            )),
+            "state-token" => Some((
+                ComponentInputConsumerKind::StateToken,
+                &["div", "span", "section"][..],
+            )),
+            "state-value" => Some((ComponentInputConsumerKind::StateValue, &["data"][..])),
+            _ => None,
+        });
+    let enabled_binding = element_attr(element, ENABLED_BIND_ATTRIBUTE)
+        .filter(|binding| binding.starts_with("input."));
+    let (kind, allowed_tags, binding, kind_name) = match (state_kind, enabled_binding) {
+        (Some((kind, allowed_tags)), None) => {
+            let Some(binding) = element_attr(element, BIND_ATTRIBUTE)
+                .filter(|binding| binding.starts_with("input."))
+            else {
+                return Ok(None);
+            };
+            (kind, allowed_tags, binding, kind.as_str())
+        }
+        (None, Some(binding)) if element_attr(element, BUILTIN_ATTRIBUTE).is_none() => (
+            ComponentInputConsumerKind::BooleanEnabled,
+            &["button"][..],
+            binding,
+            "boolean-enabled",
         ),
-        "state-token" => (
-            ComponentInputConsumerKind::StateToken,
-            &["div", "span", "section"],
-        ),
-        "state-value" => (ComponentInputConsumerKind::StateValue, &["data"]),
-        _ => return Ok(None),
-    };
-    let Some(binding) =
-        element_attr(element, BIND_ATTRIBUTE).filter(|binding| binding.starts_with("input."))
-    else {
-        return Ok(None);
+        (None, None) => return Ok(None),
+        _ => {
+            return Err(component_error(
+                PackageErrorKind::ComponentStateReferenceConsumerMalformed,
+                owner,
+                logical_source,
+                "a component state consumer must use exactly one input binding",
+            ));
+        }
     };
     let tag = element.name.local.as_ref();
     if !allowed_tags.contains(&tag) {
@@ -3111,16 +3633,18 @@ fn validate_component_input_consumer(
             format!("`{kind_name}` cannot use component element `<{tag}>`"),
         ));
     }
-    if children.iter().any(|node| {
-        matches!(
-            node,
-            UnresolvedTemplateNode::Element { .. }
-                | UnresolvedTemplateNode::ResourceImage { .. }
-                | UnresolvedTemplateNode::InputResourceImage { .. }
-                | UnresolvedTemplateNode::Use { .. }
-                | UnresolvedTemplateNode::InputConsumer { .. }
-        )
-    }) {
+    if kind != ComponentInputConsumerKind::BooleanEnabled
+        && children.iter().any(|node| {
+            matches!(
+                node,
+                UnresolvedTemplateNode::Element { .. }
+                    | UnresolvedTemplateNode::ResourceImage { .. }
+                    | UnresolvedTemplateNode::InputResourceImage { .. }
+                    | UnresolvedTemplateNode::Use { .. }
+                    | UnresolvedTemplateNode::InputConsumer { .. }
+            )
+        })
+    {
         return Err(component_error(
             PackageErrorKind::ComponentInputConsumerTypeMismatch,
             owner,
@@ -3137,6 +3661,7 @@ fn validate_component_input_consumer(
             ComponentInputConsumerKind::StateText | ComponentInputConsumerKind::StateToken => {
                 matches!(name, BUILTIN_ATTRIBUTE | BIND_ATTRIBUTE)
             }
+            ComponentInputConsumerKind::BooleanEnabled => name == ENABLED_BIND_ATTRIBUTE,
         };
         if name.starts_with("data-htm-") && !allowed {
             return Err(component_error(
@@ -3222,19 +3747,37 @@ fn validate_component_input_consumer(
         })?;
     let compatible = match kind {
         ComponentInputConsumerKind::StateText => {
-            declaration.input_type() != ComponentInputType::ResourceReference
+            declaration.input_type() == ComponentInputType::StateReference
+                && declaration.state_value_type() == Some(ComponentStateValueType::String)
+                || !matches!(
+                    declaration.input_type(),
+                    ComponentInputType::ResourceReference | ComponentInputType::StateReference
+                )
         }
-        ComponentInputConsumerKind::StateToken => matches!(
-            declaration.input_type(),
-            ComponentInputType::Token | ComponentInputType::Boolean
-        ),
+        ComponentInputConsumerKind::StateToken => {
+            matches!(
+                declaration.input_type(),
+                ComponentInputType::Token | ComponentInputType::Boolean
+            ) || declaration.input_type() == ComponentInputType::StateReference
+                && declaration.state_value_type() == Some(ComponentStateValueType::Token)
+        }
         ComponentInputConsumerKind::StateValue => {
             declaration.input_type() == ComponentInputType::Number
+                || declaration.input_type() == ComponentInputType::StateReference
+                    && declaration.state_value_type() == Some(ComponentStateValueType::Number)
+        }
+        ComponentInputConsumerKind::BooleanEnabled => {
+            declaration.input_type() == ComponentInputType::StateReference
+                && declaration.state_value_type() == Some(ComponentStateValueType::Boolean)
         }
     };
     if !compatible {
         return Err(component_error(
-            PackageErrorKind::ComponentInputConsumerTypeMismatch,
+            if declaration.input_type() == ComponentInputType::StateReference {
+                PackageErrorKind::ComponentStateReferenceConsumerWrongType
+            } else {
+                PackageErrorKind::ComponentInputConsumerTypeMismatch
+            },
             owner,
             logical_source,
             format!(
@@ -4015,6 +4558,7 @@ fn resolve_nodes(
                         .get(owner)
                         .map(Arc::as_ref)
                         .unwrap_or(&[]),
+                    &[],
                 )?;
                 let children = children
                     .into_iter()
@@ -4092,6 +4636,7 @@ fn resolve_component_input_bindings(
     caller_surface: Option<&SurfaceResourceOwner>,
     caller_resources: &[ComponentResourceDeclaration],
     caller_inputs: &[ComponentInputDeclaration],
+    caller_state_references: &[Arc<SurfaceStateReferenceAuthorization>],
 ) -> Result<ComponentInputBindings, PackageLoadError> {
     let supplied: BTreeMap<_, _> = supplied.into_iter().collect();
     for name in supplied.keys() {
@@ -4252,6 +4797,124 @@ fn resolve_component_input_bindings(
                 };
                 (value, ComponentInputProvenance::Supplied)
             }
+            Some(literal) if declaration.input_type() == ComponentInputType::StateReference => {
+                let expected = declaration.state_value_type().ok_or_else(|| {
+                    component_error(
+                        PackageErrorKind::InvalidComponentStateReferenceInputDeclaration,
+                        owner,
+                        logical_source,
+                        format!(
+                            "component `{component}` state-reference input `{}` has no value type",
+                            declaration.name()
+                        ),
+                    )
+                })?;
+                let value = if literal.starts_with("state:") {
+                    if caller_definition.is_some() || caller_surface.is_none() {
+                        return Err(component_error(
+                            PackageErrorKind::ComponentStateReferenceAliasWrongSurface,
+                            owner,
+                            logical_source,
+                            "only a surface root may establish a direct state-reference assignment",
+                        ));
+                    }
+                    let alias = parse_surface_state_reference(literal, owner, logical_source)?;
+                    let authorization = caller_state_references
+                        .iter()
+                        .find(|authorization| authorization.name() == &alias)
+                        .cloned()
+                        .ok_or_else(|| {
+                            component_error(
+                                PackageErrorKind::ComponentStateReferenceAliasUnknown,
+                                owner,
+                                logical_source,
+                                format!(
+                                    "component `{component}` input `{}` references unknown surface state alias `{alias}`",
+                                    declaration.name()
+                                ),
+                            )
+                        })?;
+                    if authorization.value_type() != expected {
+                        return Err(component_error(
+                            PackageErrorKind::ComponentStateReferenceAssignmentTypeMismatch,
+                            owner,
+                            logical_source,
+                            format!(
+                                "component `{component}` input `{}` requires `{}`, but surface state alias `{alias}` is `{}`",
+                                declaration.name(),
+                                expected.as_str(),
+                                authorization.value_type().as_str()
+                            ),
+                        ));
+                    }
+                    ComponentInputBindingValue::DirectState { authorization }
+                } else if literal.starts_with("input:") {
+                    let name = parse_component_input_reference(literal, owner, logical_source)
+                        .map_err(|_| {
+                            component_error(
+                                PackageErrorKind::ComponentStateReferenceAssignmentMalformed,
+                                owner,
+                                logical_source,
+                                "state-reference forwarding must use `input:<name>`",
+                            )
+                        })?;
+                    if caller_definition.is_none() {
+                        return Err(component_error(
+                            PackageErrorKind::ComponentStateReferenceForwardingSourceWrongType,
+                            owner,
+                            logical_source,
+                            "surface roots cannot forward a component state input",
+                        ));
+                    }
+                    let source = caller_inputs
+                        .iter()
+                        .find(|input| input.name() == &name)
+                        .ok_or_else(|| {
+                            component_error(
+                                PackageErrorKind::ComponentStateReferenceForwardingSourceUnknown,
+                                owner,
+                                logical_source,
+                                format!("forwarded component input `{name}` is not declared"),
+                            )
+                        })?;
+                    if source.input_type() != ComponentInputType::StateReference {
+                        return Err(component_error(
+                            PackageErrorKind::ComponentStateReferenceForwardingSourceWrongType,
+                            owner,
+                            logical_source,
+                            format!("component input `{name}` is not state-reference typed"),
+                        ));
+                    }
+                    if source.state_value_type() != Some(expected) {
+                        return Err(component_error(
+                            PackageErrorKind::ComponentStateReferenceForwardingTypeMismatch,
+                            owner,
+                            logical_source,
+                            format!(
+                                "forwarded state input `{name}` has type `{}`, but target input `{}` requires `{}`",
+                                source
+                                    .state_value_type()
+                                    .map(ComponentStateValueType::as_str)
+                                    .unwrap_or("missing"),
+                                declaration.name(),
+                                expected.as_str()
+                            ),
+                        ));
+                    }
+                    ComponentInputBindingValue::ForwardedState { input: name }
+                } else {
+                    return Err(component_error(
+                        PackageErrorKind::ComponentStateReferenceAssignmentMalformed,
+                        owner,
+                        logical_source,
+                        format!(
+                            "component `{component}` input `{}` requires `state:<alias>` or `input:<name>`",
+                            declaration.name()
+                        ),
+                    ));
+                };
+                (value, ComponentInputProvenance::Supplied)
+            }
             Some(literal) => (
                 ComponentInputBindingValue::Literal(
                     parse_component_input_literal(declaration.input_type(), literal).map_err(
@@ -4279,6 +4942,8 @@ fn resolve_component_input_bindings(
                     return Err(component_error(
                         if declaration.input_type() == ComponentInputType::ResourceReference {
                             PackageErrorKind::ComponentResourceReferenceAssignmentMissing
+                        } else if declaration.input_type() == ComponentInputType::StateReference {
+                            PackageErrorKind::ComponentStateReferenceAssignmentMissing
                         } else {
                             PackageErrorKind::ComponentInputMissingRequired
                         },
@@ -4444,7 +5109,13 @@ fn validate_prepared_expansion(
         source: Arc<crate::ComponentResourceSource>,
     }
 
-    type ValidationInputs = BTreeMap<ComponentInputName, ValidationResourceValue>;
+    #[derive(Clone)]
+    enum ValidationInputValue {
+        Resource(ValidationResourceValue),
+        State(Arc<SurfaceStateReferenceAuthorization>),
+    }
+
+    type ValidationInputs = BTreeMap<ComponentInputName, ValidationInputValue>;
 
     struct ValidationProjections<'a> {
         plans: &'a [ComponentProjectionPlan],
@@ -4460,6 +5131,8 @@ fn validate_prepared_expansion(
         maximum_depth: usize,
         paths: Vec<String>,
         resource_reference_values: usize,
+        state_reference_values: usize,
+        state_consumer_bindings: usize,
         resource_reference_origins:
             BTreeMap<PreparedResourceReferenceBindingKey, ResourceOriginAssociation>,
     }
@@ -4528,9 +5201,9 @@ fn validate_prepared_expansion(
                             ),
                         ));
                     }
-                    ValidationResourceValue {
+                    ValidationInputValue::Resource(ValidationResourceValue {
                         source: Arc::clone(origin.source()),
-                    }
+                    })
                 }
                 ComponentInputBindingValue::ForwardedResource { input } => {
                     let value = caller_inputs.get(input).cloned().ok_or_else(|| {
@@ -4539,38 +5212,105 @@ fn validate_prepared_expansion(
                             format!("forwarded resource-reference input `{input}` has no value"),
                         )
                     })?;
+                    let ValidationInputValue::Resource(resource) = &value else {
+                        return Err(PackageLoadError::new(
+                            PackageErrorKind::ComponentResourceReferenceForwardingSourceWrongType,
+                            format!("forwarded input `{input}` is not a resource reference"),
+                        ));
+                    };
                     if !binding
                         .declaration
                         .resource_types()
-                        .is_some_and(|accepted| accepted.contains(value.source.kind()))
+                        .is_some_and(|accepted| accepted.contains(resource.source.kind()))
                     {
                         return Err(PackageLoadError::new(
                             PackageErrorKind::ComponentResourceReferenceForwardingKindsIncompatible,
                             format!(
                                 "forwarded resource-reference input `{input}` has incompatible kind `{}`",
-                                value.source.kind().as_str()
+                                resource.source.kind().as_str()
+                            ),
+                        ));
+                    }
+                    value
+                }
+                ComponentInputBindingValue::DirectState { authorization } => {
+                    if binding.declaration.state_value_type() != Some(authorization.value_type()) {
+                        return Err(PackageLoadError::new(
+                            PackageErrorKind::ComponentStateReferenceAssignmentTypeMismatch,
+                            format!(
+                                "state-reference input `{}` rejects source `{}` type `{}`",
+                                binding.declaration.name(),
+                                authorization.source().as_str(),
+                                authorization.value_type().as_str()
+                            ),
+                        ));
+                    }
+                    ValidationInputValue::State(Arc::clone(authorization))
+                }
+                ComponentInputBindingValue::ForwardedState { input } => {
+                    let value = caller_inputs.get(input).cloned().ok_or_else(|| {
+                        PackageLoadError::new(
+                            PackageErrorKind::ComponentStateReferenceForwardingSourceUnknown,
+                            format!("forwarded state-reference input `{input}` has no value"),
+                        )
+                    })?;
+                    let ValidationInputValue::State(authorization) = &value else {
+                        return Err(PackageLoadError::new(
+                            PackageErrorKind::ComponentStateReferenceForwardingSourceWrongType,
+                            format!("forwarded input `{input}` is not a state reference"),
+                        ));
+                    };
+                    if binding.declaration.state_value_type() != Some(authorization.value_type()) {
+                        return Err(PackageLoadError::new(
+                            PackageErrorKind::ComponentStateReferenceForwardingTypeMismatch,
+                            format!(
+                                "forwarded state-reference input `{input}` has incompatible type `{}`",
+                                authorization.value_type().as_str()
                             ),
                         ));
                     }
                     value
                 }
             };
-            state.resource_reference_values = state
-                .resource_reference_values
-                .checked_add(1)
-                .ok_or_else(|| {
-                    PackageLoadError::new(
-                        PackageErrorKind::ComponentResourceReferenceValueLimit,
-                        "prepared resource-reference value count overflowed",
-                    )
-                })?;
-            if state.resource_reference_values > MAX_RESOURCE_REFERENCE_VALUES_PER_PREPARED_ROOT {
-                return Err(PackageLoadError::new(
-                    PackageErrorKind::ComponentResourceReferenceValueLimit,
-                    format!(
-                        "prepared root exceeds {MAX_RESOURCE_REFERENCE_VALUES_PER_PREPARED_ROOT} resource-reference values"
-                    ),
-                ));
+            match &value {
+                ValidationInputValue::Resource(_) => {
+                    state.resource_reference_values = state
+                        .resource_reference_values
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            PackageLoadError::new(
+                                PackageErrorKind::ComponentResourceReferenceValueLimit,
+                                "prepared resource-reference value count overflowed",
+                            )
+                        })?;
+                    if state.resource_reference_values
+                        > MAX_RESOURCE_REFERENCE_VALUES_PER_PREPARED_ROOT
+                    {
+                        return Err(PackageLoadError::new(
+                            PackageErrorKind::ComponentResourceReferenceValueLimit,
+                            format!(
+                                "prepared root exceeds {MAX_RESOURCE_REFERENCE_VALUES_PER_PREPARED_ROOT} resource-reference values"
+                            ),
+                        ));
+                    }
+                }
+                ValidationInputValue::State(_) => {
+                    state.state_reference_values =
+                        state.state_reference_values.checked_add(1).ok_or_else(|| {
+                            PackageLoadError::new(
+                                PackageErrorKind::ComponentStateReferenceValueLimit,
+                                "prepared state-reference value count overflowed",
+                            )
+                        })?;
+                    if state.state_reference_values > MAX_STATE_REFERENCE_VALUES_PER_PREPARED_ROOT {
+                        return Err(PackageLoadError::new(
+                            PackageErrorKind::ComponentStateReferenceValueLimit,
+                            format!(
+                                "prepared root exceeds {MAX_STATE_REFERENCE_VALUES_PER_PREPARED_ROOT} state-reference values"
+                            ),
+                        ));
+                    }
+                }
             }
             values.insert(binding.declaration.name().clone(), value);
         }
@@ -4616,9 +5356,29 @@ fn validate_prepared_expansion(
                 }
                 ComponentTemplateNode::ResourceImage { .. }
                 | ComponentTemplateNode::InputResourceImage { .. } => {}
-                ComponentTemplateNode::InputConsumer { children, .. } => {
-                    // Materialization always appends one canonical value text node.
-                    add_expanded(state, 1)?;
+                ComponentTemplateNode::InputConsumer {
+                    children,
+                    consumer_kind,
+                    input,
+                    ..
+                } => {
+                    if let Some(ValidationInputValue::State(authorization)) =
+                        current_inputs.get(input)
+                    {
+                        if authorization.value_type().projection() != consumer_kind.projection() {
+                            return Err(PackageLoadError::new(
+                                PackageErrorKind::ComponentStateReferenceConsumerWrongType,
+                                format!(
+                                    "state-reference input `{input}` type `{}` is incompatible with `{}`",
+                                    authorization.value_type().as_str(),
+                                    consumer_kind.as_str()
+                                ),
+                            ));
+                        }
+                        increment_state_consumer_binding_count(&mut state.state_consumer_bindings)?;
+                    } else if *consumer_kind != ComponentInputConsumerKind::BooleanEnabled {
+                        add_expanded(state, 1)?;
+                    }
                     visit(
                         children,
                         state,
@@ -4754,6 +5514,8 @@ fn validate_prepared_expansion(
         maximum_depth: 0,
         paths: Vec::new(),
         resource_reference_values: 0,
+        state_reference_values: 0,
+        state_consumer_bindings: 0,
         resource_reference_origins: BTreeMap::new(),
     };
     visit(
@@ -4771,6 +5533,8 @@ fn validate_prepared_expansion(
         expanded_nodes: state.expanded,
         maximum_nesting_depth: state.maximum_depth,
         resource_reference_values: state.resource_reference_values,
+        state_reference_values: state.state_reference_values,
+        state_consumer_bindings: state.state_consumer_bindings,
     };
     Ok((
         stats,
@@ -5002,10 +5766,21 @@ fn instantiate_nodes(
                     )
                 })?;
                 let mut attributes = attributes.clone();
-                let (display, runtime_attribute) =
-                    materialize_component_input(*consumer_kind, value, *value_format)?;
-                if let Some((name, value)) = runtime_attribute {
-                    set_template_attribute(&mut attributes, name, &value);
+                let state_reference = match value {
+                    ComponentInputValue::StateReference(value) => Some(Arc::clone(value)),
+                    _ => None,
+                };
+                let materialized = if state_reference.is_none() {
+                    Some(materialize_component_input(
+                        *consumer_kind,
+                        value,
+                        *value_format,
+                    )?)
+                } else {
+                    None
+                };
+                if let Some((_, Some((name, value)))) = &materialized {
+                    set_template_attribute(&mut attributes, name, value);
                 }
                 let slot = document.mutate().create_element(name.clone(), attributes);
                 record_descendant(context.instance, *source_ordinal, slot, placement, state);
@@ -5018,16 +5793,38 @@ fn instantiate_nodes(
                     invocation_path,
                     state,
                 )?;
-                let text = document.mutate().create_text_node(&display);
-                record_descendant(context.instance, *source_ordinal, text, placement, state);
-                child_slots.push(text);
+                if *consumer_kind != ComponentInputConsumerKind::BooleanEnabled {
+                    let display = materialized
+                        .as_ref()
+                        .map(|(display, _)| display.as_str())
+                        .unwrap_or("");
+                    let text = document.mutate().create_text_node(display);
+                    record_descendant(context.instance, *source_ordinal, text, placement, state);
+                    child_slots.push(text);
+                }
                 document.mutate().append_children(slot, &child_slots);
+                let state_binding_id = state_reference.as_ref().map(|value| {
+                    Arc::from(format!(
+                        "state-consumer:{}:{}:{}:{}:{}:{}",
+                        state.document_serial,
+                        instance_id.deterministic_string(),
+                        slot,
+                        value.deterministic_id(),
+                        consumer_kind.as_str(),
+                        source_ordinal
+                    ))
+                });
+                if state_reference.is_some() {
+                    increment_state_consumer_binding_count(&mut state.state_consumer_bindings)?;
+                }
                 state.input_consumers.push(ComponentInputConsumerRecord {
                     instance_id: instance_id.clone(),
                     node_slot: slot,
                     template_source_ordinal: *source_ordinal,
                     kind: *consumer_kind,
                     input: input.clone(),
+                    state_reference,
+                    state_binding_id,
                 });
                 created.push(slot);
             }
@@ -5212,7 +6009,10 @@ fn materialize_component_input(
 ) -> Result<MaterializedComponentInput, PackageLoadError> {
     match kind {
         ComponentInputConsumerKind::StateText => {
-            if matches!(value, ComponentInputValue::ResourceReference(_)) {
+            if matches!(
+                value,
+                ComponentInputValue::ResourceReference(_) | ComponentInputValue::StateReference(_)
+            ) {
                 return Err(PackageLoadError::new(
                     PackageErrorKind::ComponentInputConsumerTypeMismatch,
                     "state-text cannot consume a resource-reference component input",
@@ -5260,6 +6060,10 @@ fn materialize_component_input(
                 formatted.value.map(|value| ("value", value)),
             ))
         }
+        ComponentInputConsumerKind::BooleanEnabled => Err(PackageLoadError::new(
+            PackageErrorKind::ComponentStateReferenceConsumerWrongType,
+            "Boolean enabled consumers require a state-reference component input",
+        )),
     }
 }
 

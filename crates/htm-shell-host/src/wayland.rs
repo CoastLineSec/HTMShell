@@ -24,6 +24,10 @@ use htm_runtime::{
 };
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::fd::BorrowedFd;
+#[cfg(feature = "gpu-renderer")]
+use std::fs::{File, OpenOptions};
+#[cfg(feature = "gpu-renderer")]
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 #[cfg(feature = "gpu-renderer")]
 use std::ptr::NonNull;
@@ -63,6 +67,59 @@ const WL_SEAT_RELEASE_VERSION: u32 = 5;
 const WL_SHM_RELEASE_VERSION: u32 = 2;
 const FRACTIONAL_SCALE_VERSION: u32 = 1;
 const VIEWPORTER_VERSION: u32 = 1;
+#[cfg(feature = "gpu-renderer")]
+const NATIVE_REPRODUCER_LOG_ENV: &str = "HTMSHELL_M9_P5A_NATIVE_REPRO_LOG";
+
+#[cfg(feature = "gpu-renderer")]
+struct NativeReproducerTrace {
+    run_id: String,
+    writer: BufWriter<File>,
+}
+
+#[cfg(feature = "gpu-renderer")]
+impl NativeReproducerTrace {
+    fn from_environment() -> Result<Option<Self>, String> {
+        let Some(path) = std::env::var_os(NATIVE_REPRODUCER_LOG_ENV) else {
+            return Ok(None);
+        };
+        if path.is_empty() {
+            return Err(format!("{NATIVE_REPRODUCER_LOG_ENV} is empty"));
+        }
+        let path = PathBuf::from(path);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&path)
+            .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+        let mut trace = Self {
+            run_id: format!("m9-p5a-native-repro-{}", std::process::id()),
+            writer: BufWriter::new(file),
+        };
+        trace.write(serde_json::json!({
+            "event": "run_started",
+            "log_schema": 1,
+        }))?;
+        Ok(Some(trace))
+    }
+
+    fn write(&mut self, mut record: serde_json::Value) -> Result<(), String> {
+        let object = record
+            .as_object_mut()
+            .ok_or_else(|| "native reproducer record is not an object".to_owned())?;
+        object.insert(
+            "diagnostic_run_id".into(),
+            serde_json::Value::String(self.run_id.clone()),
+        );
+        serde_json::to_writer(&mut self.writer, &record)
+            .map_err(|error| format!("cannot serialize native reproducer record: {error}"))?;
+        self.writer
+            .write_all(b"\n")
+            .and_then(|()| self.writer.flush())
+            .and_then(|()| self.writer.get_ref().sync_data())
+            .map_err(|error| format!("cannot persist native reproducer record: {error}"))
+    }
+}
 
 #[cfg(feature = "gpu-renderer")]
 fn internal_gpu_renderer_requested() -> bool {
@@ -295,6 +352,9 @@ pub struct GpuSurfaceHostSummary {
     pub resource_bytes: u64,
     pub resource_uploads: u64,
     pub cache_hits: u64,
+    pub effect_image_handle_creations: u64,
+    pub effect_image_handle_reuses: u64,
+    pub effect_image_handle_replacements: u64,
     pub last_error: String,
 }
 
@@ -429,6 +489,40 @@ enum SurfaceKind {
     SingleOverlay,
     Panel,
     Overlay,
+}
+
+#[cfg(feature = "gpu-renderer")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum DiagnosticRevisionInitiator {
+    #[default]
+    Unknown,
+    SurfaceInitialization,
+    ComponentClockMutation,
+    PointerMotion,
+    PointerButton,
+    ViewportChange,
+    SurfaceMap,
+    SurfaceStateMutation,
+    OutputScaleChange,
+    RendererRecovery,
+}
+
+#[cfg(feature = "gpu-renderer")]
+impl DiagnosticRevisionInitiator {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::SurfaceInitialization => "surface-initialization",
+            Self::ComponentClockMutation => "clock-state-fanout",
+            Self::PointerMotion => "pointer-motion",
+            Self::PointerButton => "pointer-button",
+            Self::ViewportChange => "viewport-update",
+            Self::SurfaceMap => "surface-map",
+            Self::SurfaceStateMutation => "surface-state-mutation",
+            Self::OutputScaleChange => "output-scale-change",
+            Self::RendererRecovery => "renderer-recovery",
+        }
+    }
 }
 
 impl SurfaceKind {
@@ -660,6 +754,36 @@ struct ShellSurfaceState {
     pending_binding_mutation_started: Option<Instant>,
     binding_commit_started: Option<Instant>,
     #[cfg(feature = "gpu-renderer")]
+    diagnostic_clock_value: String,
+    #[cfg(feature = "gpu-renderer")]
+    diagnostic_clock_sequence: u64,
+    #[cfg(feature = "gpu-renderer")]
+    diagnostic_clock_provider_generation: u64,
+    #[cfg(feature = "gpu-renderer")]
+    diagnostic_conservative_full_repaint_requested: bool,
+    #[cfg(feature = "gpu-renderer")]
+    diagnostic_scene_revision: u64,
+    #[cfg(feature = "gpu-renderer")]
+    diagnostic_prior_scene_revision: u64,
+    #[cfg(feature = "gpu-renderer")]
+    diagnostic_revision_reason: &'static str,
+    #[cfg(feature = "gpu-renderer")]
+    diagnostic_revision_initiator: DiagnosticRevisionInitiator,
+    #[cfg(feature = "gpu-renderer")]
+    diagnostic_pending_revision_initiator: DiagnosticRevisionInitiator,
+    #[cfg(feature = "gpu-renderer")]
+    diagnostic_revision_caused_additional_commit: bool,
+    #[cfg(feature = "gpu-renderer")]
+    diagnostic_associated_native_commit: Option<u64>,
+    #[cfg(feature = "gpu-renderer")]
+    diagnostic_prior_persistent_backing_revision: Option<u64>,
+    #[cfg(feature = "gpu-renderer")]
+    diagnostic_full_repaint_decision: bool,
+    #[cfg(feature = "gpu-renderer")]
+    diagnostic_damage_decision: String,
+    #[cfg(feature = "gpu-renderer")]
+    diagnostic_native_commit_serial: u64,
+    #[cfg(feature = "gpu-renderer")]
     presenter: SurfacePresenter,
     #[cfg(feature = "gpu-renderer")]
     gpu_consecutive_timeouts: u8,
@@ -770,6 +894,8 @@ struct State {
     gpu: Option<LiveGpuPresenter>,
     #[cfg(feature = "gpu-renderer")]
     gpu_device_generation: u64,
+    #[cfg(feature = "gpu-renderer")]
+    native_reproducer_trace: Option<NativeReproducerTrace>,
 }
 
 impl State {
@@ -846,6 +972,14 @@ impl State {
             gpu: None,
             #[cfg(feature = "gpu-renderer")]
             gpu_device_generation: 0,
+            #[cfg(feature = "gpu-renderer")]
+            native_reproducer_trace: match NativeReproducerTrace::from_environment() {
+                Ok(trace) => trace,
+                Err(error) => {
+                    eprintln!("htmshell-live: native reproducer trace disabled: {error}");
+                    None
+                }
+            },
         }
     }
 
@@ -999,6 +1133,37 @@ impl State {
             scaled_commit_started: None,
             pending_binding_mutation_started: None,
             binding_commit_started: None,
+            #[cfg(feature = "gpu-renderer")]
+            diagnostic_clock_value: String::new(),
+            #[cfg(feature = "gpu-renderer")]
+            diagnostic_clock_sequence: 0,
+            #[cfg(feature = "gpu-renderer")]
+            diagnostic_clock_provider_generation: 0,
+            #[cfg(feature = "gpu-renderer")]
+            diagnostic_conservative_full_repaint_requested: false,
+            #[cfg(feature = "gpu-renderer")]
+            diagnostic_scene_revision: 0,
+            #[cfg(feature = "gpu-renderer")]
+            diagnostic_prior_scene_revision: 0,
+            #[cfg(feature = "gpu-renderer")]
+            diagnostic_revision_reason: "unknown",
+            #[cfg(feature = "gpu-renderer")]
+            diagnostic_revision_initiator: DiagnosticRevisionInitiator::SurfaceInitialization,
+            #[cfg(feature = "gpu-renderer")]
+            diagnostic_pending_revision_initiator:
+                DiagnosticRevisionInitiator::SurfaceInitialization,
+            #[cfg(feature = "gpu-renderer")]
+            diagnostic_revision_caused_additional_commit: false,
+            #[cfg(feature = "gpu-renderer")]
+            diagnostic_associated_native_commit: None,
+            #[cfg(feature = "gpu-renderer")]
+            diagnostic_prior_persistent_backing_revision: None,
+            #[cfg(feature = "gpu-renderer")]
+            diagnostic_full_repaint_decision: false,
+            #[cfg(feature = "gpu-renderer")]
+            diagnostic_damage_decision: "not-presented".into(),
+            #[cfg(feature = "gpu-renderer")]
+            diagnostic_native_commit_serial: 0,
             #[cfg(feature = "gpu-renderer")]
             presenter: SurfacePresenter::new(0),
             #[cfg(feature = "gpu-renderer")]
@@ -1364,6 +1529,7 @@ impl State {
         };
         let backend = gpu.backend_info();
         let (entries, bytes, uploads, hits) = gpu.resource_statistics();
+        let statistics = gpu.statistics();
         let successful_gpu_frame = self.surfaces[index].presenter.gpu_succeeded();
         let summary = &mut self.surfaces[index].summary.gpu;
         summary.successful_gpu_frame = successful_gpu_frame;
@@ -1376,6 +1542,163 @@ impl State {
         summary.resource_bytes = bytes;
         summary.resource_uploads = uploads;
         summary.cache_hits = hits;
+        summary.effect_image_handle_creations = statistics.gpu_effect_image_handle_creations;
+        summary.effect_image_handle_reuses = statistics.gpu_effect_image_handle_reuses;
+        summary.effect_image_handle_replacements = statistics.gpu_effect_image_handle_replacements;
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    fn native_reproducer_record(
+        &self,
+        index: usize,
+        event: &'static str,
+    ) -> Option<serde_json::Value> {
+        self.native_reproducer_trace.as_ref()?;
+        let surface = self.surfaces.get(index)?;
+        let runtime = surface.runtime.as_ref()?;
+        let package_generation = runtime.package_snapshot_generation()?;
+        let document_generation = runtime.snapshot().ok()?.document_identity.serial;
+        let state_consumer = runtime.component_input_consumers().iter().find(|consumer| {
+            consumer
+                .state_reference()
+                .is_some_and(|value| value.source() == StateBindingKey::ClockTime)
+        });
+        let component_instance_identity =
+            state_consumer.map(|consumer| consumer.instance_id().deterministic_string());
+        let component_state_binding_identity = state_consumer
+            .and_then(|consumer| consumer.state_binding_id())
+            .map(str::to_owned);
+
+        let mut raster_usages = runtime
+            .component_resource_usages()
+            .iter()
+            .filter(|usage| usage.source().kind().as_str() == "raster")
+            .collect::<Vec<_>>();
+        raster_usages.sort_by_key(|usage| usage.template_source_ordinal());
+        let mut svg_usages = runtime
+            .component_resource_usages()
+            .iter()
+            .filter(|usage| usage.source().kind().as_str() == "svg")
+            .collect::<Vec<_>>();
+        svg_usages.sort_by_key(|usage| usage.template_source_ordinal());
+        let source_identity = |usage: &&htm_runtime::ComponentResourceUsage| {
+            usage.source().id().deterministic_string(package_generation)
+        };
+        let unfiltered_raster_source_identity = raster_usages.first().map(source_identity);
+        let filtered_raster_source_identity = raster_usages.get(1).map(source_identity);
+        let svg_source_identity = svg_usages.first().map(source_identity);
+
+        let gpu = self.gpu.as_ref();
+        let gpu_statistics = gpu.map(LiveGpuPresenter::statistics).unwrap_or_default();
+        let backend = gpu.map(LiveGpuPresenter::backend_info);
+        let effect_image_present = gpu_statistics.gpu_effect_image_last_diagnostic_id != 0;
+        let output_identity = surface
+            .instance_context
+            .as_ref()
+            .map(|(_, output)| output.clone())
+            .unwrap_or_else(|| format!("output-global-{}", surface.output_key.global_name));
+        let persistent_backing_revision = gpu.and_then(|gpu| {
+            gpu.persistent_backing_revision(RenderSurfaceId {
+                instance: surface.owner,
+                generation: surface.role_generation,
+            })
+        });
+        let outstanding_callbacks = u64::from(surface.scheduler.frame_callback_outstanding());
+        let native_presenter_owner_count = u64::from(surface.presenter.gpu_succeeded());
+
+        let surface_record = serde_json::json!({
+            "output_identity": output_identity,
+            "output_global_name": surface.output_key.global_name,
+            "output_generation": surface.output_key.generation,
+            "surface_identity": format!("surface:{}@{}", surface.owner, surface.role_generation),
+            "surface_owner": surface.owner,
+            "surface_role_generation": surface.role_generation,
+            "surface_template": surface.template_id.as_str(),
+            "package_generation": package_generation.get(),
+            "document_generation": document_generation,
+            "component_instance_identity": component_instance_identity,
+        });
+        let state_record = serde_json::json!({
+            "clock_provider_generation": surface.diagnostic_clock_provider_generation,
+            "clock_semantic_sequence": surface.diagnostic_clock_sequence,
+            "displayed_clock_value": surface.diagnostic_clock_value.as_str(),
+            "visible_update_number": runtime.diagnostic_component_clock_update_count(),
+            "component_state_binding_identity": component_state_binding_identity,
+            "conservative_full_repaint_requested": surface.diagnostic_conservative_full_repaint_requested,
+        });
+        let resource_record = serde_json::json!({
+            "unfiltered_raster_source_identity": unfiltered_raster_source_identity,
+            "filtered_raster_source_identity": filtered_raster_source_identity,
+            "svg_source_identity": svg_source_identity,
+        });
+        let effect_record = serde_json::json!({
+            "layer_ordinal": effect_image_present.then_some(gpu_statistics.gpu_effect_image_last_layer_ordinal),
+            "layer_width": effect_image_present.then_some(gpu_statistics.gpu_effect_image_last_width),
+            "layer_height": effect_image_present.then_some(gpu_statistics.gpu_effect_image_last_height),
+            "image_diagnostic_id": effect_image_present.then_some(gpu_statistics.gpu_effect_image_last_diagnostic_id),
+            "cache_created_count": gpu_statistics.gpu_effect_image_handle_creations,
+            "cache_reused_count": gpu_statistics.gpu_effect_image_handle_reuses,
+            "cache_replaced_count": gpu_statistics.gpu_effect_image_handle_replacements,
+        });
+        let render_record = serde_json::json!({
+            "persistent_backing_revision": persistent_backing_revision,
+            "scene_revision": surface.diagnostic_scene_revision,
+            "full_repaint_decision": surface.diagnostic_full_repaint_decision,
+            "damage_decision": surface.diagnostic_damage_decision.as_str(),
+        });
+        let revision_record = serde_json::json!({
+            "prior_revision": surface.diagnostic_prior_scene_revision,
+            "new_revision": surface.diagnostic_scene_revision,
+            "reason_category": surface.diagnostic_revision_reason,
+            "initiating_call_site": surface.diagnostic_revision_initiator.as_str(),
+            "caused_additional_native_commit": surface.diagnostic_revision_caused_additional_commit,
+            "associated_native_commit_identifier": surface.diagnostic_associated_native_commit,
+            "prior_persistent_backing_revision": surface.diagnostic_prior_persistent_backing_revision,
+            "new_persistent_backing_revision": persistent_backing_revision,
+        });
+        let presentation_record = serde_json::json!({
+            "native_commit_serial": surface.diagnostic_native_commit_serial,
+            "frame_callbacks_requested_count": surface.summary.gpu.frame_callbacks_requested,
+            "frame_callbacks_completed_count": surface.summary.gpu.frame_callbacks_completed,
+            "outstanding_callback_count": outstanding_callbacks,
+            "cpu_full_frame_fallback_count": surface.summary.gpu.cpu_fallbacks,
+            "gpu_readback_count": 0,
+            "shm_frame_count": surface.summary.gpu.shm_frames,
+            "native_presenter_owner_count": native_presenter_owner_count,
+        });
+        let backend_record = serde_json::json!({
+            "adapter": backend.as_ref().map(|info| info.adapter.as_str()),
+            "backend": backend.as_ref().map(|info| info.graphics_api.as_str()),
+            "driver": backend.as_ref().map(|info| info.driver.as_str()),
+        });
+
+        Some(serde_json::json!({
+            "event": event,
+            "surface": surface_record,
+            "state": state_record,
+            "resources": resource_record,
+            "effect": effect_record,
+            "render": render_record,
+            "revision_transition": revision_record,
+            "presentation": presentation_record,
+            "backend": backend_record,
+        }))
+    }
+
+    #[cfg(feature = "gpu-renderer")]
+    fn trace_native_reproducer_event(&mut self, index: usize, event: &'static str) {
+        let Some(record) = self.native_reproducer_record(index, event) else {
+            return;
+        };
+        let result = self
+            .native_reproducer_trace
+            .as_mut()
+            .expect("record requires an enabled native reproducer trace")
+            .write(record);
+        if let Err(error) = result {
+            eprintln!("htmshell-live: native reproducer trace stopped: {error}");
+            self.native_reproducer_trace = None;
+        }
     }
 
     #[cfg(feature = "gpu-renderer")]
@@ -2109,8 +2432,12 @@ impl State {
 
     fn fanout_clock_update(&mut self, update: &ClockUpdate) {
         let started = Instant::now();
+        #[cfg(feature = "gpu-renderer")]
+        let clock_provider_generation = self.clock.summary().generation;
         let mut visited = std::collections::BTreeSet::new();
         let mut changed_documents = std::collections::BTreeSet::new();
+        #[cfg(feature = "gpu-renderer")]
+        let mut diagnostic_changed_documents = std::collections::BTreeSet::new();
         let mut elements = 0usize;
         let mut panel_frames = 0usize;
         let mut closed_frames_suppressed = 0usize;
@@ -2125,11 +2452,24 @@ impl State {
                 }
                 visited.insert(surface.owner);
                 let values = [(StateBindingKey::ClockTime, snapshot.display_text.clone())];
+                #[cfg(feature = "gpu-renderer")]
+                let diagnostic_updates_before = runtime.diagnostic_component_clock_update_count();
                 match runtime.apply_bound_text(&values) {
                     Ok(binding) => {
                         elements = elements.saturating_add(binding.changed_elements);
                         if binding.changed_elements > 0 {
                             changed_documents.insert(surface.owner);
+                            #[cfg(feature = "gpu-renderer")]
+                            {
+                                surface.diagnostic_clock_value = snapshot.display_text.clone();
+                                surface.diagnostic_clock_sequence = snapshot.sequence;
+                                surface.diagnostic_clock_provider_generation =
+                                    clock_provider_generation;
+                                surface.diagnostic_conservative_full_repaint_requested = runtime
+                                    .diagnostic_component_clock_update_count()
+                                    > diagnostic_updates_before;
+                                diagnostic_changed_documents.insert(surface.owner);
+                            }
                         }
                     }
                     Err(error) => {
@@ -2189,6 +2529,11 @@ impl State {
                 surface
                     .pending_binding_mutation_started
                     .get_or_insert_with(Instant::now);
+                #[cfg(feature = "gpu-renderer")]
+                {
+                    surface.diagnostic_pending_revision_initiator =
+                        DiagnosticRevisionInitiator::ComponentClockMutation;
+                }
                 surface.scheduler.mark_dirty();
                 if surface.kind == SurfaceKind::Panel {
                     panel_frames = panel_frames.saturating_add(1);
@@ -2205,6 +2550,12 @@ impl State {
             failures,
             elapsed_us(started),
         );
+        #[cfg(feature = "gpu-renderer")]
+        for owner in diagnostic_changed_documents {
+            if let Some(index) = self.surface_index_by_owner(owner) {
+                self.trace_native_reproducer_event(index, "clock_mutation");
+            }
+        }
     }
 
     fn destroy_surface_owner(&mut self, owner: u64) {
@@ -2289,6 +2640,9 @@ impl State {
         prepared: LiveGpuPreparedFrame,
         error: LiveGpuError,
     ) -> Result<GpuFrameAttempt, ShellHostError> {
+        self.surfaces[index].diagnostic_scene_revision = prepared.scene_revision();
+        self.surfaces[index].diagnostic_full_repaint_decision = prepared.full_repaint_decision();
+        self.surfaces[index].diagnostic_damage_decision = "cpu-fallback".into();
         self.fall_back_gpu_surface(index, &error);
         let frame = self.surfaces[index]
             .runtime
@@ -2312,12 +2666,40 @@ impl State {
     ) -> Result<GpuFrameAttempt, ShellHostError> {
         let owner = self.surfaces[index].owner;
         let generation = self.surfaces[index].role_generation;
-        let Some(prepared) = self.surfaces[index]
+        let render_surface = RenderSurfaceId {
+            instance: owner,
+            generation,
+        };
+        let prior_persistent_backing_revision = self
+            .gpu
+            .as_ref()
+            .and_then(|gpu| gpu.persistent_backing_revision(render_surface));
+        let prior_revision = self.surfaces[index]
+            .runtime
+            .as_ref()
+            .expect("runtime initialized before presentation")
+            .diagnostic_scene_revision_sequence();
+        let prepared = self.surfaces[index]
             .runtime
             .as_mut()
             .expect("runtime initialized before presentation")
-            .prepare_gpu_pending_for(request, owner, generation)?
-        else {
+            .prepare_gpu_pending_for(request, owner, generation)?;
+        let new_revision = self.surfaces[index]
+            .runtime
+            .as_ref()
+            .expect("runtime initialized before presentation")
+            .diagnostic_scene_revision_sequence();
+        let revision_initiator =
+            std::mem::take(&mut self.surfaces[index].diagnostic_pending_revision_initiator);
+        let Some(prepared) = prepared else {
+            self.surfaces[index].diagnostic_prior_scene_revision = prior_revision;
+            self.surfaces[index].diagnostic_scene_revision = new_revision;
+            self.surfaces[index].diagnostic_revision_reason = "scene-rebuild";
+            self.surfaces[index].diagnostic_revision_initiator = revision_initiator;
+            self.surfaces[index].diagnostic_revision_caused_additional_commit = false;
+            self.surfaces[index].diagnostic_associated_native_commit = None;
+            self.surfaces[index].diagnostic_prior_persistent_backing_revision =
+                prior_persistent_backing_revision;
             self.surfaces[index].scheduler.mark_clean();
             self.surfaces[index]
                 .summary
@@ -2327,8 +2709,28 @@ impl State {
                 .gpu
                 .duplicate_frame_suppressions
                 .saturating_add(1);
+            self.trace_native_reproducer_event(index, "revision_transition");
             return Ok(GpuFrameAttempt::NoFrame);
         };
+        self.surfaces[index].diagnostic_prior_scene_revision = prior_revision;
+        self.surfaces[index].diagnostic_scene_revision = prepared.scene_revision();
+        self.surfaces[index].diagnostic_revision_reason =
+            if revision_initiator == DiagnosticRevisionInitiator::ComponentClockMutation {
+                "component-dom-mutation"
+            } else {
+                prepared.diagnostic_revision_reason_category()
+            };
+        self.surfaces[index].diagnostic_revision_initiator = revision_initiator;
+        self.surfaces[index].diagnostic_revision_caused_additional_commit = true;
+        self.surfaces[index].diagnostic_associated_native_commit = Some(
+            self.surfaces[index]
+                .summary
+                .frames_committed
+                .saturating_add(1),
+        );
+        self.surfaces[index].diagnostic_prior_persistent_backing_revision =
+            prior_persistent_backing_revision;
+        self.surfaces[index].diagnostic_full_repaint_decision = prepared.full_repaint_decision();
         self.surfaces[index].summary.gpu.frames_planned = self.surfaces[index]
             .summary
             .gpu
@@ -2397,6 +2799,8 @@ impl State {
                 wayland_surface.frame(qh, CallbackData::Frame { owner, generation });
                 wayland_surface.commit();
                 self.surfaces[index].scheduler.frame_committed();
+                self.surfaces[index].diagnostic_pending_revision_initiator =
+                    DiagnosticRevisionInitiator::RendererRecovery;
                 self.surfaces[index].scheduler.mark_dirty();
                 self.surfaces[index].summary.gpu.frame_callbacks_requested = self.surfaces[index]
                     .summary
@@ -2487,6 +2891,11 @@ impl State {
             GpuWaylandDamageMode::Buffer => (physical_damage.len(), authoritative_full_damage),
             GpuWaylandDamageMode::SurfaceFull => (1, true),
         };
+        self.surfaces[index].diagnostic_damage_decision = match damage_mode {
+            GpuWaylandDamageMode::Buffer if authoritative_full_damage => "gpu-buffer-full".into(),
+            GpuWaylandDamageMode::Buffer => "gpu-buffer-partial".into(),
+            GpuWaylandDamageMode::SurfaceFull => "gpu-surface-full".into(),
+        };
         let wayland_damaged_pixels = if wayland_full_damage {
             u64::from(request.buffer_width) * u64::from(request.buffer_height)
         } else {
@@ -2573,12 +2982,16 @@ impl State {
             match reconfigured {
                 Ok(configuration) => {
                     self.record_gpu_configuration(index, &configuration);
+                    self.surfaces[index].diagnostic_pending_revision_initiator =
+                        DiagnosticRevisionInitiator::RendererRecovery;
                     self.surfaces[index].scheduler.mark_dirty();
                     reconfigured_after_present = true;
                 }
                 Err(error) => {
                     self.record_gpu_render_error(index, &error);
                     self.fall_back_gpu_surface(index, &error);
+                    self.surfaces[index].diagnostic_pending_revision_initiator =
+                        DiagnosticRevisionInitiator::RendererRecovery;
                     self.surfaces[index].scheduler.mark_dirty();
                 }
             }
@@ -2727,6 +3140,11 @@ impl State {
             }
             surface_state.runtime = Some(runtime);
             if surface_state.desired_mapped {
+                #[cfg(feature = "gpu-renderer")]
+                {
+                    surface_state.diagnostic_pending_revision_initiator =
+                        DiagnosticRevisionInitiator::SurfaceInitialization;
+                }
                 surface_state.scheduler.mark_dirty();
             } else {
                 surface_state.scheduler.stop_scheduling();
@@ -2741,6 +3159,11 @@ impl State {
         {
             let runtime = surface_state.runtime.as_mut().expect("initialized above");
             if runtime.set_viewport(logical_width, logical_height)? {
+                #[cfg(feature = "gpu-renderer")]
+                {
+                    surface_state.diagnostic_pending_revision_initiator =
+                        DiagnosticRevisionInitiator::ViewportChange;
+                }
                 surface_state.scheduler.mark_dirty();
             }
         }
@@ -2938,6 +3361,10 @@ impl State {
         surface_state.scale_state.mark_applied();
         surface_state.summary.frames_committed =
             surface_state.summary.frames_committed.saturating_add(1);
+        #[cfg(feature = "gpu-renderer")]
+        {
+            surface_state.diagnostic_native_commit_serial = surface_state.summary.frames_committed;
+        }
         surface_state.summary.logical_width = logical_width;
         surface_state.summary.logical_height = logical_height;
         surface_state.summary.buffer_width = presented.buffer_width;
@@ -3063,6 +3490,8 @@ impl State {
         surface_state.summary.last_attribute_mutation_us =
             milliseconds_to_microseconds(runtime_measurements.last_attribute_mutation_ms);
         surface_state.refresh_pool_summary();
+        #[cfg(feature = "gpu-renderer")]
+        self.trace_native_reproducer_event(index, "native_commit");
         if !was_mapped {
             self.reconcile_pipewire_demand()?;
         }
@@ -3083,6 +3512,11 @@ impl State {
             .map(|runtime| runtime.pointer_move(x, y));
         match result {
             Some(Ok(true)) => {
+                #[cfg(feature = "gpu-renderer")]
+                {
+                    surface.diagnostic_pending_revision_initiator =
+                        DiagnosticRevisionInitiator::PointerMotion;
+                }
                 surface.scheduler.mark_dirty();
                 let action = surface.runtime.as_mut().and_then(LiveDocument::take_action);
                 if let Some(action) = action
@@ -3115,6 +3549,11 @@ impl State {
             .map(|runtime| runtime.pointer_primary(pressed));
         match result {
             Some(Ok(true)) => {
+                #[cfg(feature = "gpu-renderer")]
+                {
+                    self.surfaces[index].diagnostic_pending_revision_initiator =
+                        DiagnosticRevisionInitiator::PointerButton;
+                }
                 self.surfaces[index].scheduler.mark_dirty();
                 let action = self.surfaces[index]
                     .runtime
@@ -3565,6 +4004,11 @@ impl State {
             if let Some(runtime) = &mut self.surfaces[index].runtime {
                 runtime.update_overlay_state(count, &last_action)?;
             }
+            #[cfg(feature = "gpu-renderer")]
+            {
+                self.surfaces[index].diagnostic_pending_revision_initiator =
+                    DiagnosticRevisionInitiator::SurfaceMap;
+            }
             self.surfaces[index].scheduler.mark_dirty();
         }
         self.refresh_manifest_surface_bindings(overlay_owner)?;
@@ -3643,6 +4087,11 @@ impl State {
                 .transpose()?
                 .unwrap_or(false);
             if legacy_changed {
+                #[cfg(feature = "gpu-renderer")]
+                {
+                    self.surfaces[index].diagnostic_pending_revision_initiator =
+                        DiagnosticRevisionInitiator::SurfaceStateMutation;
+                }
                 self.surfaces[index].scheduler.mark_dirty();
             }
         }
@@ -3682,6 +4131,11 @@ impl State {
             surface
                 .pending_binding_mutation_started
                 .get_or_insert_with(Instant::now);
+            #[cfg(feature = "gpu-renderer")]
+            {
+                surface.diagnostic_pending_revision_initiator =
+                    DiagnosticRevisionInitiator::SurfaceStateMutation;
+            }
             surface.scheduler.mark_dirty();
         }
         Ok(changed)
@@ -3860,6 +4314,8 @@ impl State {
         {
             self.first_overlay_frame_latency_us = elapsed_us(started);
         }
+        #[cfg(feature = "gpu-renderer")]
+        self.trace_native_reproducer_event(index, "frame_callback");
         if kind == SurfaceKind::SingleOverlay
             && let SessionOptions::Single(options) = &self.options
             && (options
@@ -5147,6 +5603,11 @@ impl Dispatch<ZwlrLayerSurfaceV1, LayerData> for State {
                 surface.map_state.configured(surface.desired_mapped);
                 surface.summary.configure_count = surface.summary.configure_count.saturating_add(1);
                 if surface.desired_mapped {
+                    #[cfg(feature = "gpu-renderer")]
+                    {
+                        surface.diagnostic_pending_revision_initiator =
+                            DiagnosticRevisionInitiator::SurfaceMap;
+                    }
                     surface.scheduler.mark_dirty();
                 }
                 if surface.summary.first_configure_us == 0 {
@@ -5211,6 +5672,11 @@ impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, ScaleData> for State 
                     surface.summary.preferred_scale_changes.saturating_add(1);
                 surface.pending_scale_started = Some(Instant::now());
                 if surface.desired_mapped {
+                    #[cfg(feature = "gpu-renderer")]
+                    {
+                        surface.diagnostic_pending_revision_initiator =
+                            DiagnosticRevisionInitiator::OutputScaleChange;
+                    }
                     surface.scheduler.mark_dirty();
                 }
             }

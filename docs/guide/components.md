@@ -2,7 +2,7 @@
 
 HTMShell schema version 2 packages can export inert, reusable HTML fragments. A component definition is parsed and validated once while an immutable package snapshot candidate is built. An explicit `htm-use` then creates a fresh instance by cloning normalized template nodes. No source text is substituted or reparsed per instance.
 
-Components may declare bounded literal or required resource-reference inputs, up to 32 default or named content slots, up to 16 package-owned stylesheets, and up to 32 static raster or simple SVG resources. Surfaces may declare up to 32 strict local resources for typed assignment. Components still have no local IDs, local state, implicit actions or service state, repeat integration, SVG subresources, CSS URL assets, or fonts.
+Components may declare bounded literal, required resource-reference, or required state-reference inputs, up to 32 default or named content slots, up to 16 package-owned stylesheets, and up to 32 static raster or simple SVG resources. Surfaces may declare up to 32 strict local resources and 64 strict local state aliases for typed assignment. Components still have no local IDs, local state, implicit actions or service discovery, repeat integration, SVG subresources, CSS URL assets, or fonts.
 
 ## Export a definition
 
@@ -54,7 +54,7 @@ Both `shell` and `library` packages may declare an optional ordered `components`
 }
 ```
 
-Each entry has `name`, `source`, an optional ordered `inputs` array of literal or required resource-reference declarations, an optional ordered `slots` array, an optional ordered `styles` array, and an optional ordered `resources` array. The manifest owns the public export, input, slot, stylesheet association, and resource association tables. A template found in a file is not exported implicitly.
+Each entry has `name`, `source`, an optional ordered `inputs` array of literal, required resource-reference, or required state-reference declarations, an optional ordered `slots` array, an optional ordered `styles` array, and an optional ordered `resources` array. The manifest owns the public export, input, slot, stylesheet association, and resource association tables. A template found in a file is not exported implicitly.
 
 Only the root shell package owns surfaces and topology. A library component always renders inside the root-owned document that explicitly instantiates it.
 
@@ -85,7 +85,7 @@ A definition may contain ordinary text and layout elements, ordinary classes, in
 The component profile rejects:
 
 - `action-button`, `clock-text`, `repeat`, `range-control`, `peak-monitor`, and contextual repeat forms;
-- arbitrary state references, action references, service references, and other runtime `data-htm-*` behavior;
+- direct service state names, action references, service references, and runtime `data-htm-*` behavior outside the exact state-reference consumers;
 - undeclared or duplicate `slot` elements, invalid slot names or routing, nested slot fallback, and slot elements outside component definitions;
 - `id`, `for`, fragment references, and supported ARIA local-reference attributes;
 - scripts, style elements, stylesheet links, `@import`, `url()`, and URL-valued CSS;
@@ -109,7 +109,7 @@ It can use a direct library dependency through the declaring package's alias:
 
 A nested component resolves references in its definition owner's package scope. Bare references select an export in that package. Qualified references use one direct dependency alias from that package. Parent aliases, transitive aliases, package IDs, filesystem paths, `self`, and `root` do not leak into the scope.
 
-`htm-use` requires one `component` attribute. Its only other accepted attributes are declared `input-*` assignments. Literal inputs accept typed literals. Resource-reference inputs accept caller-local `resource:name` or static `input:name` forwarding. It accepts no `id`, `class`, `style`, or unprefixed input. Renderable direct children are accepted only when they route to a declared slot. Unknown references, attributes, inputs, slots, or unroutable content reject the complete candidate. Schema version 1 and manifestless headless roots cannot use `htm-use`.
+`htm-use` requires one `component` attribute. Its only other accepted attributes are declared `input-*` assignments. Literal inputs accept typed literals. Resource-reference inputs accept caller-local `resource:name` or static `input:name` forwarding. State-reference inputs accept surface-local `state:name` assignment at a root or static `input:name` forwarding inside a component. It accepts no `id`, `class`, `style`, or unprefixed input. Renderable direct children are accepted only when they route to a declared slot. Unknown references, attributes, inputs, slots, or unroutable content reject the complete candidate. Schema version 1 and manifestless headless roots cannot use `htm-use`.
 
 ## Literal inputs
 
@@ -171,7 +171,7 @@ Components consume a value only through their nearest host's `input.<name>` name
 </template>
 ```
 
-Nested components receive only their own declared values. Literal parent inputs are not inherited or forwarded. Placeholder scanning, interpolation, expressions, state-reference inputs, and action-reference inputs do not exist.
+Nested components receive only their own declared values. Literal parent inputs are not inherited or forwarded. Placeholder scanning, interpolation, expressions, and action-reference inputs do not exist.
 
 ## Resource-reference inputs
 
@@ -225,6 +225,51 @@ All direct assignments, forwarding plans, kind checks, required values, and imag
 Strict surface resources do not replace ordinary root resource loading. Existing root-relative images, external SVG, CSS resources, fonts, caching, and symlink behavior remain unchanged. Root `<img src="resource:name">` and root `<img src="input:name">` are still invalid.
 
 See the [resource-reference input reference](../types/HTMShell.Component/ResourceReferenceInput.md).
+
+## State-reference inputs
+
+A reusable component may require one surface-authorized finite state projection:
+
+```json
+{
+  "name": "time",
+  "type": "state-reference",
+  "valueType": "string",
+  "required": true
+}
+```
+
+`valueType` is exactly `string`, `number`, `boolean`, or `token`. State references are required-only and have no default or null form. A schema version 2 panel or overlay authorizes up to 64 aliases with exact `name`, `source`, and `valueType` fields:
+
+```json
+"stateReferences": [
+  {
+    "name": "current-time",
+    "source": "clock.time",
+    "valueType": "string"
+  }
+]
+```
+
+Only finite non-contextual sources in the documented source table are eligible. The alias is visible only to assignments made by that surface root. It creates no consumer binding or provider demand by itself.
+
+A surface assigns an alias with `state:name`:
+
+```html
+<htm-use component="clock-label" input-time="state:current-time"></htm-use>
+```
+
+A component cannot name a provider source or surface alias. It can only forward a received value to an exactly type-compatible child:
+
+```html
+<htm-use component="nested-label" input-time="input:time"></htm-use>
+```
+
+Component-owned and fallback nodes consume a received value through the existing finite consumer declarations and `data-htm-bind="input.name"`. Text, token, and numeric consumers require `string`, `token`, and `number` respectively. A component-owned button may use `data-htm-enabled-bind="input.name"` for a `boolean` projection. Projected caller nodes retain caller scope and do not gain the callee input.
+
+Candidate preparation resolves authorization, assignment, forwarding, and consumer plans without activating subscriptions. Live bindings activate after publication and reuse the existing provider snapshots, demand accounting, equal-value suppression, batching, and output-local frame scheduling. Temporary provider unavailability preserves the binding and uses the source's existing typed unavailable projection. Closed retained overlays may retain demand and update retained DOM state but present no frames while closed.
+
+See the [state-reference input reference](../types/HTMShell.Component/StateReferenceInput.md) for the eligible source table, exact consumer compatibility, identities, lifecycle, and limits.
 
 ## Content slots
 
@@ -395,6 +440,9 @@ All package manifests, component sources, component references, component cycles
 | String input | 4,096 UTF-8 bytes |
 | Supplied literal bytes per invocation | 16 KiB |
 | Concrete resource-reference values per prepared root | 16,384 |
+| State-reference aliases per surface | 64 |
+| Concrete state-reference values per prepared root | 16,384 |
+| State consumer bindings per prepared root | 50,000 |
 | Slots per component | 32 |
 | Slot name | 64 bytes |
 | Stylesheets per component | 16 |
@@ -421,6 +469,6 @@ All package manifests, component sources, component references, component cycles
 
 Component references form a separately validated dependency graph. Direct, indirect, and cross-package recursion cannot become current. The dependency-first definition order is deterministic, shared definitions are parsed once, and diamonds reuse one immutable definition.
 
-See the [package graph example](../../examples/package-graph/shell.json), the [local package guide](packages.md), the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference, the [component input reference](../types/HTMShell.Component/Input.md), the [resource-reference input reference](../types/HTMShell.Component/ResourceReferenceInput.md), the [slot reference](../types/HTMShell.Component/Slot.md), the [component style reference](../types/HTMShell.Component/Style.md), and the [component resource reference](../types/HTMShell.Component/Resource.md).
+See the [package graph example](../../examples/package-graph/shell.json), the [local package guide](packages.md), the [`HTMShell.Component`](../types/HTMShell.Component/README.md) reference, the [component input reference](../types/HTMShell.Component/Input.md), the [resource-reference input reference](../types/HTMShell.Component/ResourceReferenceInput.md), the [state-reference input reference](../types/HTMShell.Component/StateReferenceInput.md), the [slot reference](../types/HTMShell.Component/Slot.md), the [component style reference](../types/HTMShell.Component/Style.md), and the [component resource reference](../types/HTMShell.Component/Resource.md).
 
-Local ID scoping, host styling, slotted-content selectors, package-global library styles, dynamic state and action bindings, repeat integration, advanced or subresource-bearing component SVG, CSS URL assets, fonts, optional or dynamic resource inputs, and hot reload remain unavailable.
+Local ID scoping, host styling, slotted-content selectors, package-global library styles, dynamic state rebinding, action-reference inputs, repeat or contextual state integration, advanced or subresource-bearing component SVG, CSS URL assets, fonts, optional reference inputs, and hot reload remain unavailable.

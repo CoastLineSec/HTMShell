@@ -37,6 +37,13 @@
           "type": "svg",
           "source": "assets/surface-symbol.svg"
         }
+      ],
+      "stateReferences": [
+        {
+          "name": "current-time",
+          "source": "clock.time",
+          "valueType": "string"
+        }
       ]
     },
     {
@@ -55,6 +62,13 @@
           "name": "surface-symbol",
           "type": "svg",
           "source": "assets/surface-symbol.svg"
+        }
+      ],
+      "stateReferences": [
+        {
+          "name": "current-time",
+          "source": "clock.time",
+          "valueType": "string"
         }
       ]
     }

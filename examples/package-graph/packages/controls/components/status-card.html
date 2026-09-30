@@ -88,3 +88,16 @@
 <template data-htm-component="intrinsic-image">
   <htm-use component="resource-forwarder" input-icon="resource:status-orb"></htm-use>
 </template>
+
+<template data-htm-component="state-dashboard">
+  <section class="state-reference-card">
+    <strong>Live state reference</strong>
+    <htm-use component="shared.state-forwarder" input-time="input:time"></htm-use>
+    <slot>
+      <span
+        class="state-reference-fallback"
+        data-htm-element="state-text"
+        data-htm-bind="input.time"></span>
+    </slot>
+  </section>
+</template>

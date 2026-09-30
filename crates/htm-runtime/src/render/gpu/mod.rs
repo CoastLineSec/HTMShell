@@ -97,6 +97,13 @@ pub(crate) struct GpuStatistics {
     pub gpu_color_filter_pipeline_failures: u64,
     pub gpu_color_filter_device_resets: u64,
     pub gpu_color_filter_pixels: u64,
+    pub gpu_effect_image_handle_creations: u64,
+    pub gpu_effect_image_handle_reuses: u64,
+    pub gpu_effect_image_handle_replacements: u64,
+    pub gpu_effect_image_last_layer_ordinal: u64,
+    pub gpu_effect_image_last_width: u32,
+    pub gpu_effect_image_last_height: u32,
+    pub gpu_effect_image_last_diagnostic_id: u64,
     pub gpu_blur_layer_creations: u64,
     pub gpu_blur_layer_reuses: u64,
     pub gpu_blur_gaussian_frames: u64,
@@ -322,6 +329,7 @@ pub(crate) struct VelloOffscreenRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     renderer: vello::Renderer,
+    effect_image_cache: color_effects::EffectImageCache,
     color_effect_pipeline: Option<color_effects::ColorEffectPipeline>,
     blur_effect_pipelines: Option<blur_effects::BlurEffectPipelines>,
     shadow_effect_pipelines: Option<shadow_effects::ShadowEffectPipelines>,
@@ -459,6 +467,7 @@ impl VelloOffscreenRenderer {
             device,
             queue,
             renderer,
+            effect_image_cache: color_effects::EffectImageCache::default(),
             color_effect_pipeline: None,
             blur_effect_pipelines: None,
             shadow_effect_pipelines: None,
@@ -799,6 +808,7 @@ impl Renderer for VelloOffscreenRenderer {
                 &self.device,
                 &self.queue,
                 &mut self.renderer,
+                &mut self.effect_image_cache,
                 &mut self.color_effect_pipeline,
                 &mut self.blur_effect_pipelines,
                 &mut self.shadow_effect_pipelines,
@@ -945,6 +955,7 @@ impl Renderer for VelloOffscreenRenderer {
                 true,
             )
         })?;
+        self.effect_image_cache = color_effects::EffectImageCache::default();
         self.color_effect_pipeline = None;
         self.blur_effect_pipelines = None;
         self.shadow_effect_pipelines = None;
@@ -1297,18 +1308,22 @@ mod tests {
     use super::*;
     use crate::model::{LogicalRect, ViewportSpec};
     use crate::render::{
-        BlurEffect, CanonicalF32, ColorEffect, ColorEffectKind, DropShadowEffect, EffectColor,
-        ForegroundEffect, ForegroundEffectCoverage, ForegroundEffectId,
+        BlurEffect, CanonicalF32, ColorEffect, ColorEffectKind, CpuRenderSession, DropShadowEffect,
+        EffectColor, ForegroundEffect, ForegroundEffectCoverage, ForegroundEffectId,
         ForegroundEffectLayerMetadata, ForegroundEffectList, FrameReason, FrameReasonSet,
         ResourceKind, ResourceOwner, RetainedScene, SceneBounds, SceneDelta, SceneNode,
         SceneNodeId, SceneResource, SceneResourceKey, SceneSubpart,
     };
-    use crate::{ExperimentalDocumentIdentity, ExperimentalNodeIdentity};
+    use crate::{
+        ExperimentalDocumentIdentity, ExperimentalNodeIdentity, LiveDocument, LiveDocumentKind,
+        PackageSnapshotLoader, StateBindingKey,
+    };
     use anyrender::render_to_buffer;
     use anyrender_vello_cpu::VelloCpuImageRenderer;
     use blitz_dom::{DocumentConfig, StyleThreading};
     use blitz_html::{HtmlDocument, HtmlProvider};
     use blitz_traits::shell::{ColorScheme, Viewport};
+    use std::path::Path;
     use std::sync::Arc;
     use vello::peniko::{
         BlendMode, Blob, Color, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat,
@@ -2710,6 +2725,112 @@ mod tests {
             renderer.statistics(),
             renderer.cache_usage(),
         );
+    }
+
+    #[test]
+    #[ignore = "requires a compatible Vulkan or GLES adapter"]
+    fn hardware_component_state_repaint_retains_package_graph_images() {
+        fn render_gpu_frame(
+            renderer: &mut VelloOffscreenRenderer,
+            frame: &crate::LiveGpuPreparedFrame,
+        ) -> Vec<u8> {
+            let plan = frame.plan();
+            let target = RenderTarget {
+                width: plan.physical_width,
+                height: plan.physical_height,
+                pixel_format: PixelFormat::PremultipliedRgba8,
+            };
+            if !renderer.targets.contains_key(&plan.surface) {
+                renderer.create_target(plan.surface, target).unwrap();
+            }
+            renderer
+                .prepare(
+                    plan,
+                    GpuPreparedScene::from_cpu(
+                        plan.document,
+                        frame.prepared().prepared.clone(),
+                        plan.scene.live_resources(),
+                        collect_effect_plans(&plan.scene),
+                    ),
+                )
+                .unwrap();
+            let result = renderer.render(plan, target).unwrap();
+            renderer.readback(result).unwrap()
+        }
+
+        let manifest =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/package-graph/shell.json");
+        let snapshot = PackageSnapshotLoader::new()
+            .load_manifest(manifest)
+            .unwrap();
+        let panel = snapshot
+            .root_manifest()
+            .unwrap()
+            .surfaces
+            .iter()
+            .find(|surface| surface.id() == "panel")
+            .unwrap();
+        let mut live = LiveDocument::load_surface_snapshot(
+            Arc::clone(&snapshot),
+            panel,
+            LiveDocumentKind::Panel,
+            3440,
+            52,
+        )
+        .unwrap();
+        let request = crate::LiveRenderRequest::new(3440, 52, 120).unwrap();
+        let mut gpu = VelloOffscreenRenderer::new(false).unwrap();
+        let mut cpu = CpuRenderSession::default();
+
+        live.apply_bound_text(&[(StateBindingKey::ClockTime, "10:01".to_owned())])
+            .unwrap();
+        let initial = live
+            .prepare_gpu_pending_for(request, 91, 1)
+            .unwrap()
+            .unwrap();
+        let initial_expected = cpu.render_prepared_cpu(initial.prepared()).unwrap().pixels;
+        let initial_actual = render_gpu_frame(&mut gpu, &initial);
+        let initial_difference = pixel_difference_metrics(&initial_expected, &initial_actual);
+        let initial_resources: Vec<_> = initial
+            .plan()
+            .scene
+            .live_resources()
+            .into_iter()
+            .filter(|(id, _)| matches!(id.kind, ResourceKind::RasterImage | ResourceKind::Svg))
+            .collect();
+        live.accept_gpu_frame(initial);
+
+        for minute in 2..=6 {
+            live.apply_bound_text(&[(StateBindingKey::ClockTime, format!("10:{minute:02}"))])
+                .unwrap();
+            let updated = live
+                .prepare_gpu_pending_for(request, 91, 1)
+                .unwrap()
+                .unwrap();
+            let updated_expected = cpu.render_prepared_cpu(updated.prepared()).unwrap().pixels;
+            let updated_actual = render_gpu_frame(&mut gpu, &updated);
+            let updated_difference = pixel_difference_metrics(&updated_expected, &updated_actual);
+            let updated_resources: Vec<_> = updated
+                .plan()
+                .scene
+                .live_resources()
+                .into_iter()
+                .filter(|(id, _)| matches!(id.kind, ResourceKind::RasterImage | ResourceKind::Svg))
+                .collect();
+            assert_eq!(updated_resources, initial_resources);
+            assert_tolerant_pixels(&updated_expected, &updated_actual, 4, 5.0);
+            assert!(
+                updated_difference.1 <= initial_difference.1 + 0.5,
+                "frame {minute} CPU/Vello divergence grew from {:.3}% to {:.3}%",
+                initial_difference.1,
+                updated_difference.1
+            );
+            live.accept_gpu_frame(updated);
+        }
+        let statistics = gpu.statistics();
+        assert!(statistics.gpu_effect_image_handle_creations > 0);
+        assert!(statistics.gpu_effect_image_handle_reuses > 0);
+        assert_eq!(statistics.gpu_effect_image_handle_replacements, 0);
     }
 
     #[test]

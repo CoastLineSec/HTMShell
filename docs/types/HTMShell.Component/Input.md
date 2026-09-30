@@ -28,7 +28,7 @@ A schema version 2 component export may declare at most 64 ordered inputs:
 }
 ```
 
-Literal declarations contain exactly `name`, `type`, and either `required: true` or `default`. `required: false` is valid only with a default. A required literal input cannot have a default. Resource-reference declarations use the additional `resourceTypes` field and are always required. Unknown declaration fields, duplicate names, unsupported types, and invalid defaults reject the complete package candidate.
+Literal declarations contain exactly `name`, `type`, and either `required: true` or `default`. `required: false` is valid only with a default. A required literal input cannot have a default. Resource-reference declarations use `resourceTypes`. State-reference declarations use one exact `valueType`. Both reference families are required-only. Unknown declaration fields, duplicate names, unsupported types, and invalid defaults reject the complete package candidate.
 
 ## Name
 
@@ -64,7 +64,20 @@ The seventh type is `resource-reference`. It carries one immutable caller-owned 
 }
 ```
 
-Resource-reference inputs have no optional, null, or default form. See [`HTMShell.Component.ResourceReferenceInput`](ResourceReferenceInput.md) for assignment, forwarding, image consumption, ownership, and limits. State-reference and action-reference inputs are not supported. A literal string that resembles `resource:name` or `input:name` remains a string when the target declaration has a literal type.
+Resource-reference inputs have no optional, null, or default form. See [`HTMShell.Component.ResourceReferenceInput`](ResourceReferenceInput.md) for assignment, forwarding, image consumption, ownership, and limits.
+
+The eighth type is `state-reference`. It carries one read-only live finite state projection authorized by the calling surface. Its declaration requires `valueType` set to `string`, `number`, `boolean`, or `token`, plus `required: true`:
+
+```json
+{
+  "name": "time",
+  "type": "state-reference",
+  "valueType": "string",
+  "required": true
+}
+```
+
+State-reference inputs have no optional, null, or default form. See [`HTMShell.Component.StateReferenceInput`](StateReferenceInput.md) for surface authorization, assignment, forwarding, consumers, availability, demand, and limits. Action-reference inputs are not supported. A literal string that resembles `resource:name`, `state:name`, or `input:name` remains a string when the target declaration has a literal type.
 
 ## Invocation
 
@@ -79,15 +92,15 @@ Pass values with `input-<name>`:
 </htm-use>
 ```
 
-`component` remains required. Every other attribute must be an `input-*` attribute matching one declared input. A resource-reference target accepts a direct caller-owned `resource:name` assignment or static `input:name` forwarding. Unprefixed inputs, undeclared inputs, duplicate attributes, presence-only booleans, `id`, `class`, `style`, `slot`, and arbitrary host attributes are invalid. One use supplies at most 64 input attributes and 16 KiB of literal attribute bytes.
+`component` remains required. Every other attribute must be an `input-*` attribute matching one declared input. A resource-reference target accepts direct caller-owned `resource:name` assignment or static `input:name` forwarding. A state-reference target accepts a surface-local `state:name` assignment at the root or static `input:name` forwarding in a component. Unprefixed inputs, undeclared inputs, duplicate attributes, presence-only booleans, `id`, `class`, `style`, `slot`, and arbitrary host attributes are invalid. One use supplies at most 64 input attributes and 16 KiB of literal attribute bytes.
 
 Renderable invocation children are accepted only when they route to a declared default or named slot. Inputs and projection remain separate contracts. See [slots](Slot.md).
 
 ## Required values and defaults
 
-Required values must be present at every use. Literal defaults are parsed and normalized while the package candidate is built. Resource-reference defaults are forbidden. An invalid default, missing required value, unknown input, invalid supplied literal, unresolved resource, incompatible resource kind, or invalid forwarding relation rejects the complete candidate before a surface or renderer observes it.
+Required values must be present at every use. Literal defaults are parsed and normalized while the package candidate is built. Resource-reference and state-reference defaults are forbidden. An invalid default, missing required value, unknown input, invalid supplied literal, unresolved resource or state alias, incompatible resource kind or state projection, or invalid forwarding relation rejects the complete candidate before a surface or renderer observes it.
 
-Resolved instance maps preserve declaration order and are immutable. A defaulted literal and an explicitly supplied equivalent literal produce the same semantic input version. Invocation attribute order and raw equivalent spellings do not affect that version. Resource-reference assignments and forwarding hops have distinct generation-safe value identities while sharing the underlying neutral source. Input values do not define component instance, descendant DOM, or scene identity.
+Resolved instance maps preserve declaration order and are immutable. A defaulted literal and an explicitly supplied equivalent literal produce the same semantic input version. Invocation attribute order and raw equivalent spellings do not affect that version. Resource-reference and state-reference assignments and forwarding hops have distinct generation-safe value identities while sharing the underlying source. Input values do not define component instance, descendant DOM, or scene identity.
 
 ## Local visibility
 
@@ -97,7 +110,7 @@ The nearest component host exposes its map through:
 input.<name>
 ```
 
-This namespace is instance-local and does not exist in root documents. A nested component receives only explicitly assigned values. It does not inherit or discover parent or sibling inputs. A component may statically forward a resource-reference value with `input-child="input:parent"` when the parent accepted-kind set is a subset of the child set.
+This namespace is instance-local and does not exist in root documents. A nested component receives only explicitly assigned values. It does not inherit or discover parent or sibling inputs. A component may statically forward a resource-reference value when the parent accepted-kind set is a subset of the child set. It may statically forward a state-reference value when both declarations use the exact same `valueType`.
 
 Three existing display declarations can consume compatible local values:
 
@@ -106,6 +119,15 @@ Three existing display declarations can consume compatible local values:
 | `state-text` | `string`, `number`, `boolean`, `token`, `color`, `length` |
 | `state-token` | `token`, `boolean` |
 | `state-value` | `number`, raw format only |
+
+State-reference inputs use a narrower exact compatibility table:
+
+| Consumer | State `valueType` |
+| --- | --- |
+| `state-text` with `data-htm-bind="input.name"` | `string` |
+| `state-token` with `data-htm-bind="input.name"` | `token` |
+| `state-value` with `data-htm-bind="input.name"` | `number` |
+| Component-owned `button` with `data-htm-enabled-bind="input.name"` | `boolean` |
 
 Example:
 
@@ -119,7 +141,7 @@ Example:
 </template>
 ```
 
-These consumers resolve from immutable host-local data. They create no process-global state key, state subscription, action lookup, resource lookup, native-service demand, thread, timer, or renderer-specific state.
+Literal consumers resolve from immutable host-local data and create no state demand. State-reference consumers attach to an already-resolved finite source after publication and use the existing provider snapshots, demand accounting, equal-value suppression, and update scheduler. They add no registry lookup, polling, worker, executor, or renderer-specific state.
 
 Resource-reference values have one separate consumer:
 
@@ -129,7 +151,7 @@ Resource-reference values have one separate consumer:
 
 Only component-owned or component-fallback HTML `<img src>` accepts that form. The binding is resolved before publication and does not enter the ordinary URL loader. Other elements, ordinary attributes, SVG image references, `srcset`, and CSS cannot consume it.
 
-Text nodes, ordinary attributes, and CSS are not scanned for placeholders. String substitution, interpolation, expressions, implicit input forwarding, component-local IDs, repeat integration, and hot reload are not supported. Component stylesheets are static and do not interpolate input values.
+Text nodes, ordinary attributes, and CSS are not scanned for placeholders. String substitution, interpolation, expressions, implicit input forwarding, component-local IDs, repeat or contextual state integration, and hot reload are not supported. Component stylesheets are static and do not interpolate input values.
 
 ## Limits
 
@@ -142,3 +164,6 @@ Text nodes, ordinary attributes, and CSS are not scanned for placeholders. Strin
 | Supplied literal bytes per invocation | 16 KiB |
 | Resource-reference kinds per declaration | 2 |
 | Concrete resource-reference values per prepared root | 16,384 |
+| Surface state-reference aliases | 64 |
+| Concrete state-reference values per prepared root | 16,384 |
+| State consumer bindings per prepared root | 50,000 |

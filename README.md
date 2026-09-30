@@ -53,10 +53,12 @@ Local schema version 2 packages provide validated reverse-DNS identities,
 optional SemVer metadata, and bounded offline library dependency graphs.
 Only the root shell package creates panel and overlay surfaces. Shell and
 library packages may export inert static HTML components with explicit,
-deterministic instantiation, literal and required static resource-reference
-inputs, bounded default or named content slots, package-owned scoped
+deterministic instantiation, literal, required static resource-reference, and
+required read-only state-reference inputs, bounded default or named content slots, package-owned scoped
 stylesheets, and declared static raster or simple SVG resources. Strict
 surface-local catalogs can pass caller-owned images into component image nodes
-without exposing path authority. SVG subresources, CSS URL assets, component
-fonts, optional or dynamic resource inputs, and hot reload are not yet
+without exposing path authority. Strict surface-local state aliases can pass
+finite provider-owned scalar state into exact component consumers without
+exposing registry authority. SVG subresources, CSS URL assets, component
+fonts, optional or dynamic reference inputs, action references, and hot reload are not yet
 available.
