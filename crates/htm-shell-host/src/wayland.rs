@@ -3257,9 +3257,7 @@ impl State {
                 ));
             }
         };
-        self.battery
-            .request_profile(profile)
-            .map_err(ShellHostError::Wayland)?;
+        self.battery.invoke_profile(profile);
         Ok(())
     }
 

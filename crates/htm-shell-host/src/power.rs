@@ -2818,6 +2818,13 @@ enum ProfileRequestDecision {
     Send,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProfileInvocationOutcome {
+    Accepted,
+    Unchanged,
+    Unavailable,
+}
+
 fn profile_request_decision(
     snapshot: &PowerProfilesSnapshot,
     pending: Option<PowerProfile>,
@@ -2846,6 +2853,18 @@ fn profile_request_decision(
 }
 
 impl PowerService {
+    // User invocation failures are contained outcomes, not host-fatal errors.
+    pub(crate) fn invoke_profile(&mut self, profile: PowerProfile) -> ProfileInvocationOutcome {
+        match self.request_profile(profile) {
+            Ok(true) => ProfileInvocationOutcome::Accepted,
+            Ok(false) => ProfileInvocationOutcome::Unchanged,
+            Err(_) => {
+                self.core.summary.profile_request_failures =
+                    self.core.summary.profile_request_failures.saturating_add(1);
+                ProfileInvocationOutcome::Unavailable
+            }
+        }
+    }
     pub(crate) fn upower_subscriber_count(&self) -> usize {
         self.core.upower_subscribers
     }
@@ -3467,6 +3486,34 @@ mod tests {
         assert_eq!(service.core.subscriber_count(), 1);
         service.core.profile_subscribers = 0;
         assert_eq!(service.core.subscriber_count(), 0);
+    }
+
+    #[test]
+    fn profile_invocation_failure_is_contained_and_does_not_queue_or_retry() {
+        let mut service = PowerService::default();
+        assert_eq!(
+            service.invoke_profile(PowerProfile::Balanced),
+            ProfileInvocationOutcome::Unavailable
+        );
+        service.core.snapshot.profiles.available = true;
+        assert_eq!(
+            service.invoke_profile(PowerProfile::Performance),
+            ProfileInvocationOutcome::Unavailable
+        );
+        // Availability can change between UI activation and transport dispatch.
+        assert_eq!(
+            service.invoke_profile(PowerProfile::Balanced),
+            ProfileInvocationOutcome::Unavailable
+        );
+        assert_eq!(service.core.summary.profile_request_failures, 3);
+        assert!(service.pending_profile.is_none());
+        assert!(service.queued_profile.is_none());
+        service.core.snapshot.profiles.current = PowerProfile::Balanced;
+        assert_eq!(
+            service.invoke_profile(PowerProfile::Balanced),
+            ProfileInvocationOutcome::Unchanged
+        );
+        assert_eq!(service.core.summary.profile_request_failures, 3);
     }
 
     #[test]
