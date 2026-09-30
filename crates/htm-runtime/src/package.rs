@@ -3508,111 +3508,7 @@ impl<'a> GraphBuilder<'a> {
         package: &ResolvedPackage,
         logical_path: &ComponentStylesheetPath,
     ) -> Result<String, PackageLoadError> {
-        let logical = logical_path.as_str();
-        let mut requested = package.canonical_root().to_path_buf();
-        let components = logical.split('/').collect::<Vec<_>>();
-        for (index, component) in components.iter().enumerate() {
-            requested.push(component);
-            let metadata = self.file_system.metadata(&requested).map_err(|error| {
-                let kind = if error.kind() == io::ErrorKind::NotFound {
-                    PackageErrorKind::ComponentStylesheetMissing
-                } else {
-                    PackageErrorKind::ComponentStylesheetReadFailure
-                };
-                io_package_error(
-                    kind,
-                    "inspect component stylesheet path",
-                    Path::new(logical),
-                    error,
-                )
-                .in_package(package.id().to_string())
-            })?;
-            if metadata.kind == PackageFileKind::Symlink {
-                return Err(PackageLoadError::new(
-                    PackageErrorKind::ComponentStylesheetSymlink,
-                    "component stylesheet path contains a symbolic link",
-                )
-                .in_package(package.id().to_string())
-                .at(logical));
-            }
-            let final_component = index + 1 == components.len();
-            let expected_kind = if final_component {
-                PackageFileKind::File
-            } else {
-                PackageFileKind::Directory
-            };
-            if metadata.kind != expected_kind {
-                return Err(PackageLoadError::new(
-                    PackageErrorKind::ComponentStylesheetSpecialFile,
-                    if final_component {
-                        "component stylesheet is not a regular file"
-                    } else {
-                        "component stylesheet path component is not a directory"
-                    },
-                )
-                .in_package(package.id().to_string())
-                .at(logical));
-            }
-            if final_component && metadata.len > MAX_COMPONENT_STYLESHEET_BYTES {
-                return Err(PackageLoadError::new(
-                    PackageErrorKind::ComponentStylesheetTooLarge,
-                    format!(
-                        "component stylesheet is {} bytes; limit is {MAX_COMPONENT_STYLESHEET_BYTES}",
-                        metadata.len
-                    ),
-                )
-                .in_package(package.id().to_string())
-                .at(logical));
-            }
-        }
-        let canonical = self.file_system.canonicalize(&requested).map_err(|error| {
-            io_package_error(
-                PackageErrorKind::ComponentStylesheetMissing,
-                "resolve component stylesheet",
-                Path::new(logical),
-                error,
-            )
-            .in_package(package.id().to_string())
-        })?;
-        if !canonical.starts_with(package.canonical_root())
-            || !canonical.starts_with(&self.composition_root)
-        {
-            return Err(PackageLoadError::new(
-                PackageErrorKind::InvalidComponentStylesheetPath,
-                "component stylesheet resolves outside its owning package",
-            )
-            .in_package(package.id().to_string())
-            .at(logical));
-        }
-        let bytes = self
-            .file_system
-            .read_bounded(&canonical, MAX_COMPONENT_STYLESHEET_BYTES)
-            .map_err(|error| {
-                io_package_error(
-                    PackageErrorKind::ComponentStylesheetReadFailure,
-                    "read component stylesheet",
-                    Path::new(logical),
-                    error,
-                )
-                .in_package(package.id().to_string())
-            })?;
-        if bytes.len() as u64 > MAX_COMPONENT_STYLESHEET_BYTES {
-            return Err(PackageLoadError::new(
-                PackageErrorKind::ComponentStylesheetTooLarge,
-                format!("component stylesheet exceeds {MAX_COMPONENT_STYLESHEET_BYTES} bytes"),
-            )
-            .in_package(package.id().to_string())
-            .at(logical));
-        }
-        self.budget.account(bytes.len())?;
-        String::from_utf8(bytes).map_err(|_| {
-            PackageLoadError::new(
-                PackageErrorKind::ComponentStylesheetReadFailure,
-                "component stylesheet is not UTF-8",
-            )
-            .in_package(package.id().to_string())
-            .at(logical)
-        })
+        self.read_component_text(package, logical_path.as_str(), true)
     }
 
     fn read_component_source(
@@ -3620,74 +3516,75 @@ impl<'a> GraphBuilder<'a> {
         package: &ResolvedPackage,
         logical_source: &str,
     ) -> Result<String, PackageLoadError> {
-        let mut requested = package.canonical_root().to_path_buf();
-        let components: Vec<_> = logical_source.split('/').collect();
-        for (index, component) in components.iter().enumerate() {
-            requested.push(component);
-            let metadata = self.file_system.metadata(&requested).map_err(|error| {
-                io_package_error(
-                    PackageErrorKind::ComponentSourceMissing,
-                    "inspect component source path",
-                    Path::new(logical_source),
-                    error,
-                )
-                .in_package(package.id().to_string())
-            })?;
-            if metadata.kind == PackageFileKind::Symlink {
-                return Err(PackageLoadError::new(
-                    PackageErrorKind::ComponentSourceSymlink,
-                    "component source path contains a symbolic link",
-                )
-                .in_package(package.id().to_string())
-                .at(logical_source));
-            }
-            let final_component = index + 1 == components.len();
-            let expected_kind = if final_component {
-                PackageFileKind::File
-            } else {
-                PackageFileKind::Directory
-            };
-            if metadata.kind != expected_kind {
-                return Err(PackageLoadError::new(
-                    PackageErrorKind::ComponentSourceInvalidType,
-                    if final_component {
-                        "component source is not a regular file"
-                    } else {
-                        "component source path component is not a directory"
-                    },
-                )
-                .in_package(package.id().to_string())
-                .at(logical_source));
-            }
-        }
-        let canonical = self.file_system.canonicalize(&requested).map_err(|error| {
-            io_package_error(
+        self.read_component_text(package, logical_source, false)
+    }
+
+    fn read_component_text(
+        &mut self,
+        package: &ResolvedPackage,
+        logical: &str,
+        stylesheet: bool,
+    ) -> Result<String, PackageLoadError> {
+        let (limit, missing, symlink, special, too_large, read_failure) = if stylesheet {
+            (
+                MAX_COMPONENT_STYLESHEET_BYTES,
+                PackageErrorKind::ComponentStylesheetMissing,
+                PackageErrorKind::ComponentStylesheetSymlink,
+                PackageErrorKind::ComponentStylesheetSpecialFile,
+                PackageErrorKind::ComponentStylesheetTooLarge,
+                PackageErrorKind::ComponentStylesheetReadFailure,
+            )
+        } else {
+            (
+                MAX_COMPONENT_SOURCE_BYTES,
                 PackageErrorKind::ComponentSourceMissing,
-                "resolve component source",
-                Path::new(logical_source),
-                error,
+                PackageErrorKind::ComponentSourceSymlink,
+                PackageErrorKind::ComponentSourceInvalidType,
+                PackageErrorKind::ComponentSourceTooLarge,
+                PackageErrorKind::ComponentSourceParse,
             )
-            .in_package(package.id().to_string())
-        })?;
-        if !canonical.starts_with(package.canonical_root())
-            || !canonical.starts_with(&self.composition_root)
-        {
-            return Err(PackageLoadError::new(
-                PackageErrorKind::DependencyEscape,
-                "component source resolves outside its owning package",
-            )
-            .in_package(package.id().to_string())
-            .at(logical_source));
-        }
-        read_text_file(
-            self.file_system,
-            &canonical,
-            MAX_COMPONENT_SOURCE_BYTES,
-            &mut self.budget,
-            PackageErrorKind::ComponentSourceTooLarge,
-            logical_source,
-        )
-        .map_err(|error| error.in_package(package.id().to_string()))
+        };
+        // The root descriptor pins authority; every child is opened relative to
+        // it without following links, and the opened file is checked before/after
+        // reading. A prior canonical pathname is not used as read authority.
+        let bytes = self
+            .file_system
+            .read_regular_nofollow(package.canonical_root(), logical, limit)
+            .map_err(|error| {
+                let error = match error {
+                    SecureReadError::Missing(error) => {
+                        io_package_error(missing, "read component file", Path::new(logical), error)
+                    }
+                    SecureReadError::Io(error) => io_package_error(
+                        read_failure,
+                        "read component file",
+                        Path::new(logical),
+                        error,
+                    ),
+                    SecureReadError::Symlink => PackageLoadError::new(
+                        symlink,
+                        "component file path contains a symbolic link",
+                    ),
+                    SecureReadError::Special => {
+                        PackageLoadError::new(special, "component file is not a regular file")
+                    }
+                    SecureReadError::TooLarge => PackageLoadError::new(
+                        too_large,
+                        format!("component file exceeds {limit} bytes"),
+                    ),
+                    SecureReadError::Mutation => PackageLoadError::new(
+                        read_failure,
+                        "component file changed during bounded read",
+                    ),
+                };
+                error.in_package(package.id().to_string()).at(logical)
+            })?;
+        self.budget.account(bytes.len())?;
+        String::from_utf8(bytes).map_err(|_| {
+            PackageLoadError::new(read_failure, "component file is not UTF-8")
+                .in_package(package.id().to_string())
+                .at(logical)
+        })
     }
 
     fn finish(
@@ -6179,6 +6076,76 @@ mod tests {
         metadata_calls: AtomicU64,
         final_kind: PackageFileKind,
         mutate_after_read: bool,
+    }
+
+    #[derive(Debug)]
+    struct ComponentDescriptorFailure {
+        logical: &'static str,
+        fail: AtomicBool,
+    }
+
+    impl ReadOnlyPackageFileSystem for ComponentDescriptorFailure {
+        fn metadata(&self, path: &Path) -> io::Result<PackageFileMetadata> {
+            LocalPackageFileSystem.metadata(path)
+        }
+        fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+            LocalPackageFileSystem.canonicalize(path)
+        }
+        fn read_bounded(&self, path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+            assert!(
+                !path.ends_with("component.html") && !path.ends_with("component.css"),
+                "component reads must use descriptor-bound authority"
+            );
+            LocalPackageFileSystem.read_bounded(path, limit)
+        }
+        fn read_regular_nofollow(
+            &self,
+            root: &Path,
+            logical: &str,
+            limit: u64,
+        ) -> Result<Vec<u8>, SecureReadError> {
+            if logical == self.logical && self.fail.load(Ordering::Relaxed) {
+                return Err(SecureReadError::Mutation);
+            }
+            LocalPackageFileSystem.read_regular_nofollow(root, logical, limit)
+        }
+    }
+
+    #[test]
+    fn component_descriptor_read_failures_preserve_current_snapshot() {
+        for (logical, expected) in [
+            ("component.html", PackageErrorKind::ComponentSourceParse),
+            (
+                "component.css",
+                PackageErrorKind::ComponentStylesheetReadFailure,
+            ),
+        ] {
+            let fixture = Fixture::new();
+            let mut manifest: serde_json::Value =
+                serde_json::from_str(&v2_shell("org.example.shell", None, "[]")).unwrap();
+            manifest["components"] = serde_json::json!([{
+                "name":"test-component", "source":"component.html", "styles":["component.css"]
+            }]);
+            fixture.write_root(&manifest.to_string());
+            fs::write(
+                fixture.root.join("component.html"),
+                r#"<template data-htm-component="test-component"><span>Content</span></template>"#,
+            )
+            .unwrap();
+            fs::write(fixture.root.join("component.css"), "span { color: red }").unwrap();
+            let file_system = Arc::new(ComponentDescriptorFailure {
+                logical,
+                fail: AtomicBool::new(false),
+            });
+            let mut loader = PackageSnapshotLoader::with_file_system(file_system.clone());
+            let first = loader.load_manifest(fixture.manifest()).unwrap();
+            file_system.fail.store(true, Ordering::Relaxed);
+            assert_eq!(
+                loader.load_manifest(fixture.manifest()).unwrap_err().kind(),
+                expected
+            );
+            assert!(Arc::ptr_eq(loader.current().unwrap(), &first));
+        }
     }
 
     impl ReadOnlyPackageFileSystem for ModeledSecureReadFileSystem {
