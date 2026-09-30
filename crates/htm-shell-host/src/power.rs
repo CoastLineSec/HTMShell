@@ -2877,6 +2877,10 @@ impl PowerService {
         &self.core.snapshot
     }
 
+    pub(crate) fn connection_generation(&self) -> u64 {
+        self.core.connection_generation
+    }
+
     pub(crate) fn summary(&self) -> PowerServiceSummary {
         let mut summary = self.core.summary.clone();
         summary.subscribers = self.core.subscriber_count();

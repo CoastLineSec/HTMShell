@@ -615,6 +615,8 @@ pub struct LiveDocument {
     component_instances: Vec<crate::ComponentInstanceRecord>,
     component_descendants: Vec<crate::ComponentDescendantProvenance>,
     component_input_consumers: Vec<crate::ComponentInputConsumerRecord>,
+    state_reference_context: Option<crate::state_identity::StateReferenceContext>,
+    state_provider_versions: BTreeMap<crate::StateProviderIdentity, crate::StateValueVersion>,
     component_slot_projections: Vec<crate::ComponentSlotProjectionRecord>,
     projected_component_nodes: Vec<crate::ProjectedNodeProvenance>,
     component_fallback_nodes: Vec<crate::ComponentFallbackNodeProvenance>,
@@ -1204,6 +1206,8 @@ impl LiveDocument {
             component_instances,
             component_descendants,
             component_input_consumers,
+            state_reference_context: None,
+            state_provider_versions: BTreeMap::new(),
             component_slot_projections,
             projected_component_nodes,
             component_fallback_nodes,
@@ -1739,6 +1743,101 @@ impl LiveDocument {
 
     pub fn component_input_consumers(&self) -> &[crate::ComponentInputConsumerRecord] {
         &self.component_input_consumers
+    }
+
+    /// Attach host scope metadata once. This does not select or rebind a source.
+    pub fn activate_state_reference_scopes(
+        &mut self,
+        output_global: u32,
+        output_generation: u64,
+        surface_owner: u64,
+        surface_generation: u64,
+    ) -> Result<(), RuntimeError> {
+        let context = crate::state_identity::StateReferenceContext {
+            output_global,
+            output_generation,
+            surface_owner,
+            surface_generation,
+        };
+        if self
+            .state_reference_context
+            .is_some_and(|prior| prior != context)
+        {
+            return Err(RuntimeError::InvalidMutationTarget(
+                "live state source scope cannot be rebound".into(),
+            ));
+        }
+        self.state_reference_context = Some(context);
+        Ok(())
+    }
+
+    /// Record the already-validated provider snapshot version before applying it.
+    /// An old incarnation or sequence cannot replace current live metadata.
+    pub fn record_state_provider_version(
+        &mut self,
+        provider: crate::StateProviderIdentity,
+        version: crate::StateValueVersion,
+    ) -> bool {
+        self.record_state_provider_versions(&[(provider, version)])
+    }
+
+    pub fn record_state_provider_versions(
+        &mut self,
+        versions: &[(crate::StateProviderIdentity, crate::StateValueVersion)],
+    ) -> bool {
+        let mut providers = BTreeSet::new();
+        if versions.iter().any(|(provider, version)| {
+            !providers.insert(*provider)
+                || self
+                    .state_provider_versions
+                    .get(provider)
+                    .is_some_and(|prior| version < prior)
+        }) {
+            return false;
+        }
+        for &(provider, version) in versions {
+            self.state_provider_versions.insert(provider, version);
+        }
+        true
+    }
+
+    pub fn live_state_consumer_metadata(&self) -> Vec<crate::LiveStateConsumerMetadata> {
+        self.component_input_consumers
+            .iter()
+            .filter_map(|consumer| {
+                let reference = consumer.state_reference()?;
+                let provider = crate::StateProviderIdentity::for_binding(reference.source());
+                let version = self.state_provider_versions.get(&provider).copied();
+                let scope = crate::state_identity::resolve_scope(
+                    reference.scope(),
+                    self.state_reference_context,
+                );
+                Some(crate::LiveStateConsumerMetadata {
+                    binding_identity: consumer.state_binding_id()?.to_owned(),
+                    assignment_identity: reference.deterministic_id().to_owned(),
+                    source_route_identity: reference.source_route_identity().to_owned(),
+                    resolved_scope: scope,
+                    source_identity: version
+                        .map(|version| version.incarnation)
+                        .or_else(|| {
+                            (provider == crate::StateProviderIdentity::Shell).then_some(
+                                crate::StateProviderIncarnation {
+                                    connection_epoch: 0,
+                                    source_generation: 0,
+                                },
+                            )
+                        })
+                        .zip(scope)
+                        .map(|(incarnation, scope)| crate::LiveStateSourceIdentity {
+                            source: reference.source().as_str(),
+                            scope,
+                            provider,
+                            incarnation,
+                        }),
+                    value_version: version,
+                })
+            })
+            .collect()
     }
 
     pub fn component_slot_projections(&self) -> &[crate::ComponentSlotProjectionRecord] {

@@ -189,11 +189,15 @@ Repeat collections, repeat-item projections, PipeWire channel and link item stat
 
 ## Values, ownership, and identity
 
-The immutable reference value retains one finite source key, its projection type and scope, the originating surface authorization, a generation-safe source identity, direct assignment identity, and bounded forwarding provenance. It does not copy provider state into a second mutable store.
+The immutable reference value retains one finite source key, its projection type and scope rule, the originating surface authorization, a provider-route identity, direct assignment identity, and bounded forwarding provenance. The route does not contain a package generation, document serial, or provider connection epoch. It is not a live provider incarnation. It does not copy provider state into a second mutable store.
 
 The provider or surface owns the source. The final component instance owns each consumer binding. Passing the same source at two call sites creates two assignments, while several consumers may share the provider source and existing provider state. Component instance identity does not depend on a current state value.
 
-Source identity, surface authorization identity, direct assignment identity, forwarding identity, consumer-binding identity, and live value version are separate. Provider updates change the provider generation or semantic sequence, not component or assignment identity. Package replacement creates fresh prepared values and output-local bindings.
+During live activation, the host attaches the actual numeric output generation and logical surface-instance generation. Live source identity combines the finite route, that resolved scope, and the provider connection epoch and source generation. Panel and overlay consumers on one output share output-scoped source identity; another output does not. Process-scoped identities contain no output name or document identity. A headless prepared value has no invented output scope or provider epoch.
+
+Provider-backed value versions contain the connection epoch, source generation, and semantic sequence from the existing Clock, UPower, Power Profiles, or PipeWire snapshot. Stale versions cannot replace newer live metadata or values. Shell-owned scalar routes use the host scope generation rather than an external transport epoch; they do not currently expose a provider semantic sequence, so that version is omitted rather than fabricated.
+
+Source identity, surface authorization identity, direct assignment identity, forwarding identity, consumer-binding identity, and live value version are separate. Provider updates change the provider incarnation or semantic sequence, not component or assignment identity. Package replacement creates fresh prepared values and output-local bindings. Live metadata is diagnostic information, not a stable public interchange format.
 
 ## Availability and updates
 
@@ -232,4 +236,3 @@ Counters use checked arithmetic. Exact supported boundaries pass and one over re
 State-reference inputs are read-only. Action references, mutable setters, component-local state, optional or default references, generic expressions, conditionals, repeat or contextual state forwarding, dynamic source selection, runtime rebinding, resource-valued state, and runtime image state are not supported.
 
 See [component inputs](Input.md), [components](README.md), [local packages](../../guide/packages.md), [live state](../../guide/state-and-actions.md), and [`ShellManifest`](../HTMShell/ShellManifest.md).
-

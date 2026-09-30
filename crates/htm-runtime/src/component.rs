@@ -345,7 +345,7 @@ impl SurfaceStateReferenceAuthorization {
 #[derive(Debug, Clone)]
 pub struct ComponentStateReferenceValue {
     id: Arc<str>,
-    source_identity: Arc<str>,
+    source_route_identity: Arc<str>,
     authorization: Arc<SurfaceStateReferenceAuthorization>,
     forwarding: Arc<[Arc<str>]>,
 }
@@ -353,13 +353,13 @@ pub struct ComponentStateReferenceValue {
 impl ComponentStateReferenceValue {
     fn new(
         id: Arc<str>,
-        source_identity: Arc<str>,
+        source_route_identity: Arc<str>,
         authorization: Arc<SurfaceStateReferenceAuthorization>,
         forwarding: Arc<[Arc<str>]>,
     ) -> Self {
         Self {
             id,
-            source_identity,
+            source_route_identity,
             authorization,
             forwarding,
         }
@@ -369,8 +369,9 @@ impl ComponentStateReferenceValue {
         &self.id
     }
 
-    pub fn source_identity(&self) -> &str {
-        &self.source_identity
+    /// Definition-shared finite route, not a concrete provider incarnation.
+    pub fn source_route_identity(&self) -> &str {
+        &self.source_route_identity
     }
 
     pub fn source(&self) -> StateBindingKey {
@@ -2321,23 +2322,10 @@ fn resolve_instance_input_bindings(
                         ),
                     ));
                 }
-                let scope_identity = match authorization.scope() {
-                    StateBindingScope::Process => "process".to_owned(),
-                    StateBindingScope::Output => {
-                        format!("output-document-{}", state.document_serial)
-                    }
-                    StateBindingScope::Surface => format!(
-                        "surface-{}-document-{}",
-                        authorization.owner().surface_id(),
-                        state.document_serial
-                    ),
-                };
-                let source_identity: Arc<str> = Arc::from(format!(
-                    "state-source:{}:{}:{}@{}",
+                let source_route_identity: Arc<str> = Arc::from(format!(
+                    "state-route:{}:{}",
                     authorization.source().as_str(),
                     authorization.scope().as_str(),
-                    scope_identity,
-                    state.generation.get()
                 ));
                 let id: Arc<str> = Arc::from(format!(
                     "state-input-direct:{}:{}:{}:{}:{}@{}",
@@ -2350,7 +2338,7 @@ fn resolve_instance_input_bindings(
                 ));
                 ComponentInputValue::StateReference(Arc::new(ComponentStateReferenceValue::new(
                     id,
-                    source_identity,
+                    source_route_identity,
                     Arc::clone(authorization),
                     Arc::from([]),
                 )))
@@ -2401,7 +2389,7 @@ fn resolve_instance_input_bindings(
                 forwarding.push(Arc::clone(&id));
                 ComponentInputValue::StateReference(Arc::new(ComponentStateReferenceValue::new(
                     id,
-                    Arc::clone(&caller.source_identity),
+                    Arc::clone(&caller.source_route_identity),
                     Arc::clone(caller.authorization()),
                     forwarding.into(),
                 )))

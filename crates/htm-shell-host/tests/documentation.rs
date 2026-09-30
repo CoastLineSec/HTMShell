@@ -779,7 +779,7 @@ fn component_documentation_matches_the_composition_contract() {
         "\"state_value_type\"",
         "\"state_reference_values\"",
         "\"state_consumer_bindings\"",
-        "\"state_source_identity\"",
+        "\"state_source_route_identity\"",
         "\"state_authorization\"",
         "\"state_binding_identity\"",
         "\"resource_source_identity\"",

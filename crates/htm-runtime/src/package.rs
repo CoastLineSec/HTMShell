@@ -1429,7 +1429,7 @@ struct ComponentInputValueDiagnostic {
     resource_source_identity: Option<String>,
     resource_semantic_version: Option<String>,
     resource_owner: Option<String>,
-    state_source_identity: Option<String>,
+    state_source_route_identity: Option<String>,
     state_source: Option<&'static str>,
     state_scope: Option<&'static str>,
     state_authorization: Option<String>,
@@ -1443,7 +1443,7 @@ struct ComponentInputConsumerDiagnostic {
     kind: &'static str,
     source_ordinal: u32,
     state_binding_identity: Option<String>,
-    state_source_identity: Option<String>,
+    state_source_route_identity: Option<String>,
     state_source: Option<&'static str>,
     state_projection: Option<&'static str>,
 }
@@ -1917,8 +1917,8 @@ fn prepared_component_diagnostics(
                         }),
                         resource_owner: resource
                             .map(|resource| resource.origin().owner_diagnostic()),
-                        state_source_identity: state_reference
-                            .map(|reference| reference.source_identity().to_owned()),
+                        state_source_route_identity: state_reference
+                            .map(|reference| reference.source_route_identity().to_owned()),
                         state_source: state_reference.map(|reference| reference.source().as_str()),
                         state_scope: state_reference.map(|reference| reference.scope().as_str()),
                         state_authorization: state_reference.map(|reference| {
@@ -1961,9 +1961,9 @@ fn prepared_component_diagnostics(
             kind: consumer.kind().as_str(),
             source_ordinal: consumer.template_source_ordinal(),
             state_binding_identity: consumer.state_binding_id().map(str::to_owned),
-            state_source_identity: consumer
+            state_source_route_identity: consumer
                 .state_reference()
-                .map(|reference| reference.source_identity().to_owned()),
+                .map(|reference| reference.source_route_identity().to_owned()),
             state_source: consumer
                 .state_reference()
                 .map(|reference| reference.source().as_str()),

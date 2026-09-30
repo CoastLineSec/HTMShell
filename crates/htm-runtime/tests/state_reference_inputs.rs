@@ -860,21 +860,21 @@ fn state_reference_identities_share_sources_but_are_output_local() {
         first_consumers[0]
             .state_reference()
             .unwrap()
-            .source_identity(),
+            .source_route_identity(),
         first_consumers[2]
             .state_reference()
             .unwrap()
-            .source_identity()
+            .source_route_identity()
     );
     assert_eq!(
         first_consumers[0]
             .state_reference()
             .unwrap()
-            .source_identity(),
+            .source_route_identity(),
         second_consumers[0]
             .state_reference()
             .unwrap()
-            .source_identity()
+            .source_route_identity()
     );
     assert_ne!(
         first_consumers[0]
@@ -909,6 +909,123 @@ fn state_reference_identities_share_sources_but_are_output_local() {
             .state_reference()
             .unwrap()
             .authorization()
+    );
+}
+
+#[test]
+fn live_source_identity_uses_actual_scope_and_provider_incarnation() {
+    use htm_runtime::{
+        LiveStateScope, StateProviderIdentity, StateProviderIncarnation, StateValueVersion,
+    };
+    let fixture = Fixture::new();
+    let inputs = format!(
+        "[{},{},{}]",
+        state_input("time", "string"),
+        state_input("output", "string"),
+        state_input("surface-label", "string")
+    );
+    fixture.package(
+        &format!("[{}]", export("state-label", &inputs)),
+        r#"<template data-htm-component="state-label"><span data-htm-element="state-text" data-htm-bind="input.time"></span><span data-htm-element="state-text" data-htm-bind="input.output"></span><span data-htm-element="state-text" data-htm-bind="input.surface-label"></span></template>"#,
+        r#"[{"name":"time","source":"clock.time","valueType":"string"},{"name":"output","source":"output.label","valueType":"string"},{"name":"surface-label","source":"surface.template_id","valueType":"string"}]"#,
+        "[]",
+        r#"<htm-use component="state-label" input-time="state:time" input-output="state:output" input-surface-label="state:surface-label"></htm-use>"#,
+    );
+    let snapshot = PackageSnapshotLoader::new()
+        .load_manifest(fixture.root.join("shell.json"))
+        .unwrap();
+    let panel = snapshot
+        .root_manifest()
+        .unwrap()
+        .surfaces
+        .iter()
+        .find(|surface| surface.id() == "panel")
+        .unwrap();
+    let load = || {
+        LiveDocument::load_surface_snapshot(
+            Arc::clone(&snapshot),
+            panel,
+            LiveDocumentKind::Panel,
+            480,
+            96,
+        )
+        .unwrap()
+    };
+    let mut first = load();
+    let mut overlay = load();
+    let mut other = load();
+    assert!(
+        first
+            .live_state_consumer_metadata()
+            .iter()
+            .all(|metadata| metadata.source_identity.is_none())
+    );
+    first
+        .activate_state_reference_scopes(10, 1, 101, 7)
+        .unwrap();
+    overlay
+        .activate_state_reference_scopes(10, 1, 102, 8)
+        .unwrap();
+    other
+        .activate_state_reference_scopes(11, 2, 103, 9)
+        .unwrap();
+    assert!(
+        first
+            .activate_state_reference_scopes(11, 2, 103, 9)
+            .is_err()
+    );
+    let version = StateValueVersion {
+        incarnation: StateProviderIncarnation {
+            connection_epoch: 2,
+            source_generation: 0,
+        },
+        semantic_sequence: 15,
+    };
+    for live in [&mut first, &mut overlay, &mut other] {
+        assert!(live.record_state_provider_version(StateProviderIdentity::Clock, version));
+        live.apply_bound_text(&[(StateBindingKey::ClockTime, "10:01".into())])
+            .unwrap();
+    }
+    let a = first.live_state_consumer_metadata();
+    let b = overlay.live_state_consumer_metadata();
+    let c = other.live_state_consumer_metadata();
+    assert_eq!(a[0].source_identity, b[0].source_identity);
+    assert_eq!(a[0].source_identity, c[0].source_identity);
+    assert_eq!(a[1].source_identity, b[1].source_identity);
+    assert_ne!(a[1].source_identity, c[1].source_identity);
+    assert_ne!(a[2].source_identity, b[2].source_identity);
+    assert_eq!(
+        a[1].resolved_scope,
+        Some(LiveStateScope::Output {
+            global_name: 10,
+            generation: 1
+        })
+    );
+    assert_ne!(a[0].binding_identity, b[0].binding_identity);
+    assert_ne!(a[0].assignment_identity, b[0].assignment_identity);
+    let reconnected = StateValueVersion {
+        incarnation: StateProviderIncarnation {
+            connection_epoch: 3,
+            source_generation: 0,
+        },
+        semantic_sequence: 1,
+    };
+    assert!(first.record_state_provider_version(StateProviderIdentity::Clock, reconnected));
+    let after = first.live_state_consumer_metadata();
+    assert_ne!(a[0].source_identity, after[0].source_identity);
+    assert_eq!(a[0].assignment_identity, after[0].assignment_identity);
+    assert_eq!(a[0].binding_identity, after[0].binding_identity);
+    assert_eq!(a[0].source_route_identity, after[0].source_route_identity);
+    assert!(!first.record_state_provider_version(StateProviderIdentity::Clock, version));
+    assert!(!first.record_state_provider_versions(&[
+        (StateProviderIdentity::Clock, reconnected),
+        (StateProviderIdentity::Clock, version)
+    ]));
+    assert_eq!(first.live_state_consumer_metadata(), after);
+    assert_eq!(after[0].value_version, Some(reconnected));
+    assert_eq!(
+        after[1].value_version, None,
+        "do not invent a shell-provider semantic sequence"
     );
 }
 

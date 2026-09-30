@@ -22,8 +22,14 @@ mod package;
 mod render;
 mod resource;
 mod scene;
+mod state_identity;
 mod style_owner;
 mod stylesheet;
+
+pub use state_identity::{
+    LiveStateConsumerMetadata, LiveStateScope, LiveStateSourceIdentity, StateProviderIdentity,
+    StateProviderIncarnation, StateValueVersion,
+};
 
 pub use adapter::{run_package, run_package_with_options};
 pub use builtin::{

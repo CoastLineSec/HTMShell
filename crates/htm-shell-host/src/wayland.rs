@@ -15,7 +15,8 @@ use crate::scheduler::{FrameScheduler, ScheduleDecision};
 use htm_runtime::{
     ItemBindingKey, LIVE_SCALE_DENOMINATOR, LiveAction, LiveDocument, LiveDocumentKind,
     MAX_PIPEWIRE_PEAK_DECLARATIONS_PER_TARGET, MAX_PIPEWIRE_PROPERTY_KEYS_PER_PROCESS,
-    PipeWirePeakTarget, RepeatSource, StateBindingKey, StateToken,
+    PipeWirePeakTarget, RepeatSource, StateBindingKey, StateProviderIdentity,
+    StateProviderIncarnation, StateToken, StateValueVersion,
 };
 #[cfg(feature = "gpu-renderer")]
 use htm_runtime::{
@@ -1669,6 +1670,7 @@ impl State {
             "displayed_clock_value": surface.diagnostic_clock_value.as_str(),
             "visible_update_number": runtime.diagnostic_component_clock_update_count(),
             "component_state_binding_identity": component_state_binding_identity,
+            "live_consumer_metadata": runtime.live_state_consumer_metadata(),
             "conservative_full_repaint_requested": surface.diagnostic_conservative_full_repaint_requested,
         });
         let resource_record = serde_json::json!({
@@ -1982,6 +1984,12 @@ impl State {
             panel_preset.thickness,
         )?;
         panel_runtime.set_instance_context(panel.id(), &diagnostic_label)?;
+        panel_runtime.activate_state_reference_scopes(
+            key.global_name,
+            key.generation,
+            panel_owner,
+            panel_generation,
+        )?;
         panel_runtime.update_panel_state(overlay_initially_open, "Ready")?;
         apply_surface_bindings(
             &mut panel_runtime,
@@ -2003,6 +2011,12 @@ impl State {
             1,
         )?;
         overlay_runtime.set_instance_context(overlay.id(), &diagnostic_label)?;
+        overlay_runtime.activate_state_reference_scopes(
+            key.global_name,
+            key.generation,
+            overlay_owner,
+            overlay_generation,
+        )?;
         overlay_runtime.update_overlay_state(0, "Ready")?;
         apply_surface_bindings(
             &mut overlay_runtime,
@@ -2368,6 +2382,18 @@ impl State {
             if runtime.pipewire_demand().is_empty() {
                 continue;
             }
+            if !runtime.record_state_provider_version(
+                StateProviderIdentity::PipeWire,
+                StateValueVersion {
+                    incarnation: StateProviderIncarnation {
+                        connection_epoch: snapshot.connection_generation,
+                        source_generation: 0,
+                    },
+                    semantic_sequence: snapshot.sequence,
+                },
+            ) {
+                continue;
+            }
             let result = (|| {
                 let state = runtime.apply_bound_state(&projections.text, &projections.tokens)?;
                 let values = runtime.apply_bound_values(&projections.values)?;
@@ -2427,6 +2453,7 @@ impl State {
     }
 
     fn fanout_battery_snapshot(&mut self, snapshot: &PowerSnapshot) {
+        let connection_epoch = self.battery.connection_generation();
         let started = Instant::now();
         let projection_started = Instant::now();
         let projections = snapshot.projections();
@@ -2449,6 +2476,30 @@ impl State {
                 > 0
                 || runtime.repeat_source_target_count(RepeatSource::PowerProfileHolds) > 0;
             if !subscribes {
+                continue;
+            }
+            if !runtime.record_state_provider_versions(&[
+                (
+                    StateProviderIdentity::UPower,
+                    StateValueVersion {
+                        incarnation: StateProviderIncarnation {
+                            connection_epoch,
+                            source_generation: snapshot.upower_source_generation,
+                        },
+                        semantic_sequence: snapshot.sequence,
+                    },
+                ),
+                (
+                    StateProviderIdentity::PowerProfiles,
+                    StateValueVersion {
+                        incarnation: StateProviderIncarnation {
+                            connection_epoch,
+                            source_generation: snapshot.profiles.source_generation,
+                        },
+                        semantic_sequence: snapshot.sequence,
+                    },
+                ),
+            ]) {
                 continue;
             }
             documents = documents.saturating_add(1);
@@ -2507,7 +2558,6 @@ impl State {
 
     fn fanout_clock_update(&mut self, update: &ClockUpdate) {
         let started = Instant::now();
-        #[cfg(feature = "gpu-renderer")]
         let clock_provider_generation = self.clock.summary().generation;
         let mut visited = std::collections::BTreeSet::new();
         let mut changed_documents = std::collections::BTreeSet::new();
@@ -2523,6 +2573,18 @@ impl State {
                     continue;
                 };
                 if runtime.text_binding_target_count(StateBindingKey::ClockTime) == 0 {
+                    continue;
+                }
+                if !runtime.record_state_provider_version(
+                    StateProviderIdentity::Clock,
+                    StateValueVersion {
+                        incarnation: StateProviderIncarnation {
+                            connection_epoch: clock_provider_generation,
+                            source_generation: 0,
+                        },
+                        semantic_sequence: snapshot.sequence,
+                    },
+                ) {
                     continue;
                 }
                 visited.insert(surface.owner);
@@ -3187,6 +3249,12 @@ impl State {
                     logical_height,
                 )?,
             };
+            runtime.activate_state_reference_scopes(
+                surface_state.output_key.global_name,
+                surface_state.output_key.generation,
+                surface_state.owner,
+                surface_state.instance_generation,
+            )?;
             if let Some((template_id, output_label)) = &surface_state.instance_context {
                 runtime.set_instance_context(template_id, output_label)?;
             }
