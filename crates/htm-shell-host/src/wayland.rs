@@ -52,6 +52,8 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 };
 
 const SINGLE_OWNER: u64 = 1;
+// Cursor buffers never belong to a document or its presentation counters.
+const CURSOR_OWNER: u64 = 0;
 const PANEL_OWNER: u64 = 2;
 const OVERLAY_OWNER: u64 = 3;
 const PANEL_NAMESPACE: &str = "htmshell-panel";
@@ -848,6 +850,11 @@ impl ShellSurfaceState {
     }
 }
 
+struct CursorSurface {
+    surface: wl_surface::WlSurface,
+    pool: ShmBufferPool,
+}
+
 struct State {
     options: SessionOptions,
     started: Instant,
@@ -862,6 +869,7 @@ struct State {
     seat_global_name: Option<u32>,
     pointer: Option<wl_pointer::WlPointer>,
     pointer_focus: Option<u64>,
+    cursor: Option<CursorSurface>,
     layer_shell: Option<ZwlrLayerShellV1>,
     viewporter: Option<wp_viewporter::WpViewporter>,
     fractional_scale_manager: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
@@ -938,6 +946,7 @@ impl State {
             seat_global_name: None,
             pointer: None,
             pointer_focus: None,
+            cursor: None,
             layer_shell: None,
             viewporter: None,
             fractional_scale_manager: None,
@@ -3537,6 +3546,54 @@ impl State {
         Ok(())
     }
 
+    fn establish_arrow_cursor(
+        &mut self,
+        pointer: &wl_pointer::WlPointer,
+        serial: u32,
+        qh: &QueueHandle<Self>,
+    ) -> Result<(), ShellHostError> {
+        if self.cursor.is_none() {
+            let compositor = self
+                .compositor
+                .as_ref()
+                .ok_or(ShellHostError::MissingGlobal("wl_compositor"))?;
+            let shm = self
+                .shm
+                .as_ref()
+                .ok_or(ShellHostError::MissingGlobal("wl_shm"))?;
+            let mut pool = ShmBufferPool::new(CURSOR_OWNER);
+            pool.ensure_size(shm, qh, crate::cursor::SIZE, crate::cursor::SIZE)?;
+            let (_, buffer, _) = pool
+                .acquire_and_write(&crate::cursor::arrow_pixels())?
+                .ok_or_else(|| ShellHostError::Buffer("cursor buffer unavailable".into()))?;
+            let surface = compositor.create_surface(
+                qh,
+                SurfaceData {
+                    owner: CURSOR_OWNER,
+                },
+            );
+            // set_cursor assigns the cursor role before its first buffer commit.
+            pointer.set_cursor(
+                serial,
+                Some(&surface),
+                crate::cursor::HOTSPOT.0,
+                crate::cursor::HOTSPOT.1,
+            );
+            surface.attach(Some(&buffer), 0, 0);
+            surface.damage(0, 0, crate::cursor::SIZE as i32, crate::cursor::SIZE as i32);
+            surface.commit();
+            self.cursor = Some(CursorSurface { surface, pool });
+        } else if let Some(cursor) = &self.cursor {
+            pointer.set_cursor(
+                serial,
+                Some(&cursor.surface),
+                crate::cursor::HOTSPOT.0,
+                crate::cursor::HOTSPOT.1,
+            );
+        }
+        Ok(())
+    }
+
     fn pointer_move(&mut self, owner: u64, x: f64, y: f64) {
         let Some(index) = self.surface_index_by_owner(owner) else {
             return;
@@ -4505,6 +4562,10 @@ impl State {
         for index in 0..self.surfaces.len() {
             self.release_gpu_surface(index, true);
         }
+        if let Some(cursor) = &self.cursor {
+            cursor.surface.attach(None, 0, 0);
+            cursor.surface.commit();
+        }
         for surface in &mut self.surfaces {
             if surface.mapped || surface.desired_mapped {
                 if let Some(wayland_surface) = &surface.surface {
@@ -4522,9 +4583,17 @@ impl State {
 
     fn all_released(&self) -> bool {
         self.surfaces.iter().all(ShellSurfaceState::all_released)
+            && self
+                .cursor
+                .as_ref()
+                .is_none_or(|cursor| cursor.pool.all_released())
     }
 
     fn destroy_objects(&mut self) {
+        if let Some(mut cursor) = self.cursor.take() {
+            cursor.surface.destroy();
+            cursor.pool.destroy_all();
+        }
         #[cfg(feature = "gpu-renderer")]
         {
             for index in 0..self.surfaces.len() {
@@ -5503,14 +5572,15 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
 impl Dispatch<wl_pointer::WlPointer, ()> for State {
     fn event(
         state: &mut Self,
-        _: &wl_pointer::WlPointer,
+        pointer: &wl_pointer::WlPointer,
         event: wl_pointer::Event,
         _: &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         match event {
             wl_pointer::Event::Enter {
+                serial,
                 surface,
                 surface_x,
                 surface_y,
@@ -5527,6 +5597,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                     })
                     .map(|candidate| candidate.owner);
                 if let Some(owner) = owner {
+                    if let Err(error) = state.establish_arrow_cursor(pointer, serial, qh) {
+                        eprintln!("htmshell-live: cannot establish arrow cursor: {error}");
+                    }
                     if state.pointer_focus != Some(owner) {
                         state.clear_pointer_focus();
                         state.pointer_focus = Some(owner);
@@ -5768,7 +5841,13 @@ impl Dispatch<wl_buffer::WlBuffer, BufferData> for State {
         _: &QueueHandle<Self>,
     ) {
         if matches!(event, wl_buffer::Event::Release) {
-            state.on_buffer_release(data.owner, data.id);
+            if data.owner == CURSOR_OWNER {
+                if let Some(cursor) = &mut state.cursor {
+                    cursor.pool.release(data.id);
+                }
+            } else {
+                state.on_buffer_release(data.owner, data.id);
+            }
         }
     }
 }

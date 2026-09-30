@@ -5,6 +5,7 @@
 
 mod buffer;
 mod clock;
+mod cursor;
 mod error;
 mod lifecycle;
 mod manifest;
