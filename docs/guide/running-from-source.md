@@ -7,7 +7,15 @@ HTMShell currently runs from its Cargo workspace. There is no packaged installat
 - Rust 1.97 or newer, with Cargo
 - A C linker and `pkg-config`
 - Development files for the system `libdbus-1` library
-- A Wayland compositor with layer shell
+- Development headers and libraries for `libpipewire-0.3` and `libspa-0.2`
+- Clang and `libclang`, used to generate the PipeWire and SPA Rust bindings
+
+These are build-time requirements, including for a CPU-only build. PipeWire is a
+host build dependency even when no audio service is used at runtime.
+
+Running native surfaces additionally requires a Wayland compositor with layer
+shell. The GPU renderer requires a compatible Vulkan or OpenGL ES driver; a
+Wayland session is not needed for manifest validation or ordinary unit tests.
 
 The locked workspace also contains pinned Git dependencies. Cargo must fetch them once before an offline build can succeed.
 
