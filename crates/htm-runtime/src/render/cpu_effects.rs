@@ -642,7 +642,7 @@ fn apply_ordered_color_matrices(
     pixels: &mut [u8],
     effects: &[ForegroundEffect],
 ) -> Result<(), BackendError> {
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         let alpha = f32::from(pixel[3]) / 255.0;
         let mut straight = if pixel[3] == 0 {
             [0.0, 0.0, 0.0, 0.0]

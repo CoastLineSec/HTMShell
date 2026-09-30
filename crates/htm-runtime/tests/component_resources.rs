@@ -117,7 +117,9 @@ fn png() -> Vec<u8> {
 
 fn jpeg() -> Vec<u8> {
     let rgb = rgba_pixels()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|pixel| pixel[..3].iter().copied())
         .collect::<Vec<_>>();
     let mut bytes = Vec::new();
@@ -328,7 +330,9 @@ fn png_jpeg_and_static_webp_decode_once_and_materialize_owned_usages() {
     assert!(
         jpeg_source
             .rgba8()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .all(|pixel| pixel[3] == 255)
     );
     let webp_source = snapshot
@@ -344,7 +348,9 @@ fn png_jpeg_and_static_webp_decode_once_and_materialize_owned_usages() {
     assert_eq!(
         webp_source
             .rgba8()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|pixel| pixel[3])
             .collect::<Vec<_>>(),
         vec![255, 128, 0, 255]

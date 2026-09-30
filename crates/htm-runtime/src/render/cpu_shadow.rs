@@ -127,7 +127,9 @@ pub(super) fn apply_cpu_drop_shadow(
     }
     if color[3] == 0.0
         || pixels
-            .chunks_exact(RGBA_CHANNELS)
+            .as_chunks::<RGBA_CHANNELS>()
+            .0
+            .iter()
             .all(|pixel| pixel[3] == 0)
     {
         return Ok(CpuDropShadowResult {
@@ -154,7 +156,7 @@ pub(super) fn apply_cpu_drop_shadow(
         committed_surface_bytes,
         blur_scratch.allocated_bytes(),
     )?;
-    for (mask_alpha, pixel) in mask.iter_mut().zip(pixels.chunks_exact(RGBA_CHANNELS)) {
+    for (mask_alpha, pixel) in mask.iter_mut().zip(pixels.as_chunks::<RGBA_CHANNELS>().0) {
         *mask_alpha = pixel[3];
     }
 
@@ -464,7 +466,7 @@ mod tests {
             );
             assert_eq!(output.blur_algorithm, Some(algorithm));
             assert!(output.blur_pass_count > 0);
-            assert!(output.pixels.chunks_exact(4).all(|pixel| {
+            assert!(output.pixels.as_chunks::<4>().0.iter().all(|pixel| {
                 pixel[0] <= pixel[3] && pixel[1] <= pixel[3] && pixel[2] <= pixel[3]
             }));
         }
@@ -555,7 +557,7 @@ mod tests {
                 width * height * 4,
             )
             .unwrap();
-            assert!(result.pixels.chunks_exact(4).all(|pixel| {
+            assert!(result.pixels.as_chunks::<4>().0.iter().all(|pixel| {
                 pixel[0] <= pixel[3]
                     && pixel[1] <= pixel[3]
                     && pixel[2] <= pixel[3]
@@ -603,7 +605,9 @@ mod tests {
                 alpha_sum = alpha_sum.saturating_add(
                     result
                         .pixels
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|pixel| u64::from(pixel[3]))
                         .sum::<u64>(),
                 );

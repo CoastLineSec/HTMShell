@@ -1077,8 +1077,22 @@ mod tests {
         );
         assert!(session.renderer.last_effect_statistics.shadow_mask_pixels > 0);
         assert!(session.renderer.last_effect_statistics.shadow_scratch_bytes > 0);
-        assert!(first.pixels.chunks_exact(4).any(|pixel| pixel[0] > 0));
-        assert!(first.pixels.chunks_exact(4).any(|pixel| pixel[2] > 0));
+        assert!(
+            first
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[0] > 0)
+        );
+        assert!(
+            first
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[2] > 0)
+        );
 
         let second = render(&mut session, &mut document);
         assert_eq!(first.pixels, second.pixels);
@@ -1126,13 +1140,17 @@ mod tests {
             assert!(
                 first
                     .pixels
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .any(|pixel| pixel[2] > pixel[0])
             );
             assert!(
                 first
                     .pixels
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .all(|pixel| pixel[0] <= pixel[3]
                         && pixel[1] <= pixel[3]
                         && pixel[2] <= pixel[3])
@@ -1242,7 +1260,9 @@ mod tests {
             assert!(
                 first
                     .pixels
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .all(|pixel| pixel[0] <= pixel[3]
                         && pixel[1] <= pixel[3]
                         && pixel[2] <= pixel[3])
@@ -1267,13 +1287,20 @@ mod tests {
             let second = render_html(&html, dimension, dimension);
             assert_eq!(first.pixels, second.pixels, "sigma={sigma}");
             assert!(
-                first.pixels.chunks_exact(4).any(|pixel| pixel[3] > 0),
+                first
+                    .pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[3] > 0),
                 "sigma={sigma}"
             );
             assert!(
                 first
                     .pixels
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .all(|pixel| pixel[0] <= pixel[3]
                         && pixel[1] <= pixel[3]
                         && pixel[2] <= pixel[3]),

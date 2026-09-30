@@ -82,10 +82,12 @@ pub fn convert_premultiplied_rgba_to_argb8888(
         .chunks_exact(packed_row)
         .zip(destination.chunks_exact_mut(stride))
     {
-        for (rgba, argb) in source_row
-            .chunks_exact(4)
-            .zip(destination_row[..packed_row].chunks_exact_mut(4))
-        {
+        for (rgba, argb) in source_row.as_chunks::<4>().0.iter().zip(
+            destination_row[..packed_row]
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut(),
+        ) {
             let value = u32::from(rgba[3]) << 24
                 | u32::from(rgba[0]) << 16
                 | u32::from(rgba[1]) << 8
@@ -115,8 +117,10 @@ mod tests {
         let mut destination = vec![0; layout.byte_len];
         convert_premultiplied_rgba_to_argb8888(&source, &mut destination, layout).unwrap();
         let values: Vec<_> = destination
-            .chunks_exact(4)
-            .map(|bytes| u32::from_ne_bytes(bytes.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| u32::from_ne_bytes(*bytes))
             .collect();
         assert_eq!(
             values,

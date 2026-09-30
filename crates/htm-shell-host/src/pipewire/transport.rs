@@ -26,7 +26,6 @@ use pipewire::stream::{StreamFlags, StreamListener, StreamRc, StreamState};
 use pipewire::types::ObjectType;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::convert::TryInto;
 use std::ffi::CStr;
 use std::io::Cursor;
 use std::os::fd::AsRawFd;
@@ -199,8 +198,8 @@ fn calculate_interleaved_peaks(
         return None;
     }
     let mut maxima = [0.0f32; MAX_AUDIO_CHANNELS];
-    for (index, sample) in samples.chunks_exact(4).enumerate() {
-        let value = f32::from_le_bytes(sample.try_into().expect("four-byte chunk"));
+    for (index, sample) in samples.as_chunks::<4>().0.iter().enumerate() {
+        let value = f32::from_le_bytes(*sample);
         if value.is_finite() {
             let channel = index % channels;
             maxima[channel] = maxima[channel].max(value.abs());

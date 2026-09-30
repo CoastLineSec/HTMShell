@@ -1261,7 +1261,10 @@ fn validate_plan(plan: &FramePlan) -> Result<(), BackendError> {
 }
 
 fn premultiply_rgba8_in_place(pixels: &mut [u8]) {
-    for pixel in pixels.chunks_exact_mut(COPY_BYTES_PER_PIXEL as usize) {
+    for pixel in pixels
+        .as_chunks_mut::<{ COPY_BYTES_PER_PIXEL as usize }>()
+        .0
+    {
         let alpha = u16::from(pixel[3]);
         for channel in &mut pixel[..3] {
             *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
@@ -1722,7 +1725,12 @@ mod tests {
     ) {
         let (observed_error, percentage) = pixel_difference_metrics(expected, actual);
         let mut pixels_exceeding_tolerance = 0usize;
-        for (expected, actual) in expected.chunks_exact(4).zip(actual.chunks_exact(4)) {
+        for (expected, actual) in expected
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(actual.as_chunks::<4>().0.iter())
+        {
             pixels_exceeding_tolerance += usize::from(
                 expected
                     .iter()
@@ -1742,7 +1750,12 @@ mod tests {
         assert_eq!(actual.len(), expected.len());
         let mut differing_pixels = 0usize;
         let mut maximum_error = 0u8;
-        for (expected, actual) in expected.chunks_exact(4).zip(actual.chunks_exact(4)) {
+        for (expected, actual) in expected
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(actual.as_chunks::<4>().0.iter())
+        {
             let different = expected != actual;
             differing_pixels += usize::from(different);
             maximum_error = maximum_error.max(
@@ -3013,7 +3026,7 @@ mod tests {
         let expected = cpu_reference_pixels(&plan, prepared);
         let actual = gpu_pixels(&mut renderer, &plan, recording);
         assert_tolerant_pixels(&expected, &actual, 4, 0.0);
-        assert!(actual.chunks_exact(4).all(|pixel| {
+        assert!(actual.as_chunks::<4>().0.iter().all(|pixel| {
             pixel[0] <= pixel[3]
                 && pixel[1] <= pixel[3]
                 && pixel[2] <= pixel[3]

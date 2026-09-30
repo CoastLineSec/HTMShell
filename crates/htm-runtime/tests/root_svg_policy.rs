@@ -40,7 +40,11 @@ fn renamed_svg_secondary_images_do_not_reach_the_decoder() {
         let mut live = fixture.load().unwrap();
         let pixels = live.render().unwrap().premultiplied_rgba;
         assert!(
-            pixels.chunks_exact(4).all(|pixel| pixel[..3] == [0, 0, 0]),
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[..3] == [0, 0, 0]),
             "{extension}"
         );
     }
@@ -58,7 +62,9 @@ fn inline_svg_subresources_reject_before_layout() {
         live.render()
             .unwrap()
             .premultiplied_rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|pixel| pixel[0] > 0)
     );
 }

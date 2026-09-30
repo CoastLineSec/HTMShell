@@ -316,13 +316,9 @@ fn apply_cpu_blur_channels(
 
     let (mut work, pixel_scratch_reused) =
         scratch.take(width, height, byte_len, committed_surface_bytes)?;
-    let algorithm;
-    let pass_count;
-    let scratch_reused;
-    match parameters {
+    let (algorithm, pass_count, scratch_reused) = match parameters {
         BlurParameters::Identity => unreachable!("identity returned before scratch allocation"),
         BlurParameters::DirectGaussian { kernel } => {
-            algorithm = CpuBlurAlgorithm::DirectGaussian;
             convolve_gaussian_horizontal(
                 &pixels,
                 &mut work,
@@ -343,11 +339,9 @@ fn apply_cpu_blur_channels(
                 &kernel,
             );
             std::mem::swap(&mut pixels, &mut work);
-            pass_count = 2;
-            scratch_reused = pixel_scratch_reused;
+            (CpuBlurAlgorithm::DirectGaussian, 2, pixel_scratch_reused)
         }
         BlurParameters::ThreeBox { passes } => {
-            algorithm = CpuBlurAlgorithm::ThreeBox;
             let spatial_scratch_reused = scratch.prepare_three_box(
                 width,
                 height,
@@ -369,10 +363,13 @@ fn apply_cpu_blur_channels(
                 },
             );
             std::mem::swap(&mut pixels, &mut work);
-            pass_count = 6;
-            scratch_reused = pixel_scratch_reused && spatial_scratch_reused;
+            (
+                CpuBlurAlgorithm::ThreeBox,
+                6,
+                pixel_scratch_reused && spatial_scratch_reused,
+            )
         }
-    }
+    };
     scratch.put(work, width, height);
     Ok(CpuBlurResult {
         pixels,
@@ -609,7 +606,7 @@ fn store_weighted_channels(target: &mut [u8], weighted: &[f64], premultiplied_rg
 }
 
 fn normalize_premultiplied_rgba(pixels: &mut [u8]) {
-    for pixel in pixels.chunks_exact_mut(CHANNELS_PER_PIXEL) {
+    for pixel in pixels.as_chunks_mut::<CHANNELS_PER_PIXEL>().0 {
         let alpha = pixel[3];
         for channel in &mut pixel[..3] {
             *channel = (*channel).min(alpha);
@@ -760,12 +757,16 @@ mod tests {
         assert!(maximum_difference <= 8, "{maximum_difference}");
         let direct_alpha: u64 = direct
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|pixel| u64::from(pixel[3]))
             .sum();
         let box_alpha: u64 = boxes
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|pixel| u64::from(pixel[3]))
             .sum();
         assert!(
@@ -780,12 +781,12 @@ mod tests {
             for sigma in [0.5, 1.0, 1.999, 2.0, 4.0, 64.0] {
                 let input = impulse(width, height, width / 2, height / 2, [64, 32, 16, 128]);
                 let output = blurred(input, width, height, sigma);
-                for pixel in output.pixels.chunks_exact(4) {
+                for pixel in output.pixels.as_chunks::<4>().0.iter() {
                     assert!(pixel[0] <= pixel[3]);
                     assert!(pixel[1] <= pixel[3]);
                     assert!(pixel[2] <= pixel[3]);
                     if pixel[3] == 0 {
-                        assert_eq!(pixel, [0, 0, 0, 0]);
+                        assert_eq!(*pixel, [0, 0, 0, 0]);
                     }
                 }
             }
@@ -827,7 +828,9 @@ mod tests {
             .unwrap();
             assert_eq!(
                 rgba.pixels
-                    .chunks_exact(CHANNELS_PER_PIXEL)
+                    .as_chunks::<CHANNELS_PER_PIXEL>()
+                    .0
+                    .iter()
                     .map(|pixel| pixel[3])
                     .collect::<Vec<_>>(),
                 mask.pixels,
@@ -910,12 +913,12 @@ mod tests {
                     CpuBlurAlgorithm::ThreeBox
                 }
             );
-            for pixel in result.pixels.chunks_exact(4) {
+            for pixel in result.pixels.as_chunks::<4>().0.iter() {
                 assert!(pixel[0] <= pixel[3]);
                 assert!(pixel[1] <= pixel[3]);
                 assert!(pixel[2] <= pixel[3]);
                 if pixel[3] == 0 {
-                    assert_eq!(pixel, [0, 0, 0, 0]);
+                    assert_eq!(*pixel, [0, 0, 0, 0]);
                 }
             }
         }
@@ -951,7 +954,9 @@ mod tests {
                 alpha_sum = alpha_sum.saturating_add(
                     result
                         .pixels
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|pixel| u64::from(pixel[3]))
                         .sum::<u64>(),
                 );

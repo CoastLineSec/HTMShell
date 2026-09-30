@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+#[cfg(feature = "gpu-renderer")]
 const COMPONENT_STATE_BINDING_ID_PREFIX: &str = "\0component-state:";
 #[cfg(feature = "gpu-renderer")]
 const NATIVE_REPRODUCER_LOG_ENV: &str = "HTMSHELL_M9_P5A_NATIVE_REPRO_LOG";
@@ -2911,6 +2912,7 @@ impl LiveDocument {
         let mut pending_text = Vec::new();
         let mut pending_tokens = Vec::new();
         let mut changed_keys = std::collections::BTreeSet::new();
+        #[cfg(feature = "gpu-renderer")]
         let mut component_state_changed = false;
         let mut update = BindingUpdate::default();
         for (key, value) in text_values {
@@ -2938,9 +2940,12 @@ impl LiveDocument {
                 continue;
             }
             let targets = targets.to_vec();
-            component_state_changed |= targets
-                .iter()
-                .any(|target| target.starts_with(COMPONENT_STATE_BINDING_ID_PREFIX));
+            #[cfg(feature = "gpu-renderer")]
+            {
+                component_state_changed |= targets
+                    .iter()
+                    .any(|target| target.starts_with(COMPONENT_STATE_BINDING_ID_PREFIX));
+            }
             for html_id in &targets {
                 let identity = self.builtins.indexed_node(html_id).ok_or_else(|| {
                     RuntimeError::InvalidMutationTarget(format!(
@@ -2980,9 +2985,12 @@ impl LiveDocument {
                 continue;
             }
             let targets = targets.to_vec();
-            component_state_changed |= targets
-                .iter()
-                .any(|target| target.starts_with(COMPONENT_STATE_BINDING_ID_PREFIX));
+            #[cfg(feature = "gpu-renderer")]
+            {
+                component_state_changed |= targets
+                    .iter()
+                    .any(|target| target.starts_with(COMPONENT_STATE_BINDING_ID_PREFIX));
+            }
             for html_id in &targets {
                 let identity = self.builtins.indexed_node(html_id).ok_or_else(|| {
                     RuntimeError::InvalidMutationTarget(format!(
@@ -3064,6 +3072,7 @@ impl LiveDocument {
         let started = Instant::now();
         let mut seen = BTreeSet::new();
         let mut update = BindingUpdate::default();
+        #[cfg(feature = "gpu-renderer")]
         let mut component_state_changed = false;
         for (key, value) in values {
             if !key.supports(StateValueKind::Value) {
@@ -3137,8 +3146,11 @@ impl LiveDocument {
                     self.apply_value_to_node(node, &formatted.display, formatted.value.as_deref())?
                 };
                 if changed {
-                    component_state_changed |=
-                        html_id.starts_with(COMPONENT_STATE_BINDING_ID_PREFIX);
+                    #[cfg(feature = "gpu-renderer")]
+                    {
+                        component_state_changed |=
+                            html_id.starts_with(COMPONENT_STATE_BINDING_ID_PREFIX);
+                    }
                     update.changed_elements = update.changed_elements.saturating_add(1);
                     update.changed_value_elements = update.changed_value_elements.saturating_add(1);
                 }
@@ -3162,6 +3174,7 @@ impl LiveDocument {
         let started = Instant::now();
         let mut seen = BTreeSet::new();
         let mut update = BindingUpdate::default();
+        #[cfg(feature = "gpu-renderer")]
         let mut component_state_changed = false;
         for (key, value) in values {
             if !key.supports(StateValueKind::Boolean) {
@@ -3201,8 +3214,11 @@ impl LiveDocument {
                         declaration.disabled,
                         *value == Some(true),
                     )? {
-                        component_state_changed |=
-                            html_id.starts_with(COMPONENT_STATE_BINDING_ID_PREFIX);
+                        #[cfg(feature = "gpu-renderer")]
+                        {
+                            component_state_changed |=
+                                html_id.starts_with(COMPONENT_STATE_BINDING_ID_PREFIX);
+                        }
                         update.changed_elements = update.changed_elements.saturating_add(1);
                         update.changed_boolean_elements =
                             update.changed_boolean_elements.saturating_add(1);
@@ -3221,7 +3237,11 @@ impl LiveDocument {
                 }
                 update.changed_elements = update.changed_elements.saturating_add(1);
                 update.changed_boolean_elements = update.changed_boolean_elements.saturating_add(1);
-                component_state_changed |= html_id.starts_with(COMPONENT_STATE_BINDING_ID_PREFIX);
+                #[cfg(feature = "gpu-renderer")]
+                {
+                    component_state_changed |=
+                        html_id.starts_with(COMPONENT_STATE_BINDING_ID_PREFIX);
+                }
             }
         }
         if update.changed_elements > 0 {
@@ -5393,7 +5413,13 @@ mod tests {
 
     fn alpha_bounds(frame: &LiveFrame) -> Option<(u32, u32, u32, u32)> {
         let mut bounds: Option<(u32, u32, u32, u32)> = None;
-        for (index, pixel) in frame.premultiplied_rgba.chunks_exact(4).enumerate() {
+        for (index, pixel) in frame
+            .premultiplied_rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .enumerate()
+        {
             if pixel[3] == 0 {
                 continue;
             }
@@ -6893,7 +6919,7 @@ mod tests {
         assert_eq!(frame.input_regions.len(), 1);
         assert!(frame.input_regions[0].width > 0.0);
         assert!(frame.interactive_region.width > 0.0);
-        for pixel in frame.premultiplied_rgba.chunks_exact(4) {
+        for pixel in frame.premultiplied_rgba.as_chunks::<4>().0.iter() {
             assert!(pixel[0] <= pixel[3]);
             assert!(pixel[1] <= pixel[3]);
             assert!(pixel[2] <= pixel[3]);
