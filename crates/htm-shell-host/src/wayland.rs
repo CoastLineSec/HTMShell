@@ -798,6 +798,24 @@ struct PresentedFrame {
     follow_up_required: bool,
 }
 
+#[derive(Default)]
+struct PipeWireHydrationTracker {
+    documents: std::collections::BTreeMap<u64, htm_runtime::PipeWireDocumentDemand>,
+}
+
+impl PipeWireHydrationTracker {
+    fn reconcile(
+        &mut self,
+        current: std::collections::BTreeMap<u64, htm_runtime::PipeWireDocumentDemand>,
+    ) -> bool {
+        let needs_hydration = current
+            .iter()
+            .any(|(document, demand)| self.documents.get(document) != Some(demand));
+        self.documents = current;
+        needs_hydration
+    }
+}
+
 #[cfg(feature = "gpu-renderer")]
 enum GpuFrameAttempt {
     Presented(PresentedFrame),
@@ -887,6 +905,7 @@ struct State {
     clock: ClockService,
     battery: PowerService,
     pipewire: PipeWireSource,
+    pipewire_hydration: PipeWireHydrationTracker,
     #[cfg(feature = "gpu-renderer")]
     gpu_requested: bool,
     #[cfg(feature = "gpu-renderer")]
@@ -965,6 +984,7 @@ impl State {
             clock: ClockService::default(),
             battery: PowerService::default(),
             pipewire: PipeWireSource::default(),
+            pipewire_hydration: PipeWireHydrationTracker::default(),
             #[cfg(feature = "gpu-renderer")]
             gpu_requested: internal_gpu_renderer_requested(),
             #[cfg(feature = "gpu-renderer")]
@@ -2214,7 +2234,19 @@ impl State {
     fn reconcile_pipewire_demand(&mut self) -> Result<(), ShellHostError> {
         let demand = self.aggregate_pipewire_demand()?;
         let demand_changed = self.pipewire.set_demand(demand.clone());
-        if demand_changed || !demand.is_empty() {
+        let documents = self
+            .surfaces
+            .iter()
+            .filter_map(|surface| {
+                let runtime = surface.runtime.as_ref()?;
+                let demand = runtime.pipewire_demand();
+                (!demand.is_empty()).then_some((runtime.document_identity().serial, demand))
+            })
+            .collect();
+        let needs_hydration = self.pipewire_hydration.reconcile(documents);
+        // Actual provider events fan out through their existing notification
+        // path. Unrelated event turns need only hydrate new/changed consumers.
+        if demand_changed || needs_hydration {
             let snapshot = self.pipewire.snapshot().clone();
             self.fanout_pipewire_snapshot(&snapshot, &demand);
         }
@@ -5969,6 +6001,29 @@ mod tests {
         mapping.close();
         mapping.request_map(true);
         assert_eq!(mapping, SurfaceMapState::Closed);
+    }
+
+    #[test]
+    fn pipewire_hydration_is_lifecycle_driven_not_event_turn_driven() {
+        use std::collections::BTreeMap;
+        let mut tracker = PipeWireHydrationTracker::default();
+        let scalar = htm_runtime::PipeWireDocumentDemand {
+            service: true,
+            ..Default::default()
+        };
+        assert!(!tracker.reconcile(BTreeMap::new()));
+        let first = BTreeMap::from([(1, scalar.clone())]);
+        assert!(tracker.reconcile(first.clone()));
+        for _ in 0..1_000 {
+            assert!(!tracker.reconcile(first.clone()));
+        }
+        // Same aggregate capabilities, different document generation.
+        assert!(tracker.reconcile(BTreeMap::from([(2, scalar.clone())])));
+        let both = BTreeMap::from([(2, scalar.clone()), (3, scalar)]);
+        assert!(tracker.reconcile(both.clone()));
+        assert!(!tracker.reconcile(both));
+        assert!(!tracker.reconcile(BTreeMap::new()));
+        assert!(tracker.documents.is_empty());
     }
 
     #[test]

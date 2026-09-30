@@ -1710,6 +1710,10 @@ impl LiveDocument {
         self.measurements
     }
 
+    pub fn document_identity(&self) -> ExperimentalDocumentIdentity {
+        self.document_identity
+    }
+
     pub fn package_root(&self) -> &Path {
         &self.package_root
     }
