@@ -9,6 +9,7 @@ mod component_resource;
 mod component_style;
 mod component_svg;
 mod error;
+mod hit;
 mod identity;
 mod incremental;
 mod live;

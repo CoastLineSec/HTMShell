@@ -4657,6 +4657,7 @@ impl LiveDocument {
     }
 
     fn action_at(&self, x: f32, y: f32) -> Result<Option<PendingActivation>, RuntimeError> {
+        let hit_path = crate::hit::control_hit_path(&self.document, x, y);
         if !self.builtins.is_empty() {
             for monitor in self.peak_monitors.values().chain(
                 self.repeats
@@ -4671,8 +4672,7 @@ impl LiveDocument {
                     if self.node_is_disabled(element.node)? {
                         continue;
                     }
-                    let bounds = self.bounds_for_identity(element.node)?;
-                    if !contains(&bounds, x, y) {
+                    if !self.control_is_hit(element.node.slot, &hit_path) {
                         continue;
                     }
                     let operation = match action {
@@ -4716,8 +4716,7 @@ impl LiveDocument {
                         {
                             continue;
                         }
-                        let bounds = self.bounds_for_identity(element.node)?;
-                        if contains(&bounds, x, y) {
+                        if self.control_is_hit(element.node.slot, &hit_path) {
                             let control = PipeWireControlIdentity {
                                 document_generation: self.document_identity,
                                 locator: PipeWireControlLocator::Repeated {
@@ -4776,14 +4775,7 @@ impl LiveDocument {
                     continue;
                 };
                 let slot = self.identities.resolve(&self.document, target.node)?;
-                let bounds = self.document.get_node(slot).map(node_bounds).ok_or(
-                    RuntimeError::StaleIdentity {
-                        slot: target.node.slot,
-                        generation: target.node.generation,
-                    },
-                )?;
-                validate_rect(&bounds)?;
-                if contains(&bounds, x, y) {
+                if self.control_is_hit(slot, &hit_path) {
                     let control = PipeWireControlIdentity {
                         document_generation: self.document_identity,
                         locator: PipeWireControlLocator::Element(target.id.html_id.clone()),
@@ -4802,7 +4794,13 @@ impl LiveDocument {
             return Ok(None);
         }
         for (selector, action) in self.kind.actions() {
-            if contains(&self.bounds_for(selector)?, x, y) {
+            let slot = required_selector(&self.document, selector)?;
+            if self.control_is_hit(slot, &hit_path)
+                && !self.document.get_node(slot).is_some_and(|node| {
+                    node.element_data()
+                        .is_some_and(|element| element.attr(LocalName::from("disabled")).is_some())
+                })
+            {
                 return Ok(Some(PendingActivation {
                     id: (*selector).to_owned(),
                     action: action.clone(),
@@ -4813,6 +4811,7 @@ impl LiveDocument {
     }
 
     fn range_at(&self, x: f32, y: f32) -> Result<Option<PendingRange>, RuntimeError> {
+        let hit_path = crate::hit::control_hit_path(&self.document, x, y);
         for (repeat_id, repeat) in &self.repeats {
             if repeat.declaration.source != RepeatSource::PipeWireNodes {
                 continue;
@@ -4829,8 +4828,7 @@ impl LiveDocument {
                             if self.node_is_disabled(element.node)? {
                                 continue;
                             }
-                            let bounds = self.bounds_for_identity(element.node)?;
-                            if contains(&bounds, x, y) {
+                            if self.control_is_hit(element.node.slot, &hit_path) {
                                 return Ok(Some(PendingRange {
                                     control: PipeWireControlIdentity {
                                         document_generation: self.document_identity,
@@ -4866,8 +4864,7 @@ impl LiveDocument {
                     if self.node_is_disabled(element.node)? {
                         continue;
                     }
-                    let bounds = self.bounds_for_identity(element.node)?;
-                    if contains(&bounds, x, y) {
+                    if self.control_is_hit(element.node.slot, &hit_path) {
                         return Ok(Some(PendingRange {
                             control: PipeWireControlIdentity {
                                 document_generation: self.document_identity,
@@ -4907,8 +4904,7 @@ impl LiveDocument {
             if self.node_is_disabled(node)? {
                 continue;
             }
-            let bounds = self.bounds_for_identity(node)?;
-            if contains(&bounds, x, y) {
+            if self.control_is_hit(node.slot, &hit_path) {
                 return Ok(Some(PendingRange {
                     control: PipeWireControlIdentity {
                         document_generation: self.document_identity,
@@ -4924,6 +4920,24 @@ impl LiveDocument {
             }
         }
         Ok(None)
+    }
+
+    fn control_is_hit(&self, slot: usize, hit_path: &[usize]) -> bool {
+        let nearest_control = hit_path.iter().find(|candidate| {
+            self.document.get_node(**candidate).is_some_and(|node| {
+                node.element_data().is_some_and(|element| {
+                    matches!(
+                        element.attr(LocalName::from("data-htm-element")),
+                        Some("action-button" | "range-control")
+                    )
+                })
+            })
+        });
+        nearest_control.map_or_else(|| hit_path.contains(&slot), |hit| *hit == slot)
+            && self
+                .document
+                .get_node(slot)
+                .is_some_and(crate::hit::control_accepts_pointer)
     }
 
     fn update_pressed_range(&mut self, x: f32) -> Result<bool, RuntimeError> {
@@ -5297,10 +5311,6 @@ fn checked_point(x: f64, y: f64) -> Result<Point<f32>, RuntimeError> {
     })
 }
 
-fn contains(rect: &LogicalRect, x: f32, y: f32) -> bool {
-    x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height
-}
-
 fn pointer_event(x: f32, y: f32, pressed: bool) -> BlitzPointerEvent {
     BlitzPointerEvent {
         id: BlitzPointerId::Mouse,
@@ -5413,6 +5423,78 @@ mod tests {
         assert!(live.pointer_primary(true).unwrap());
         assert!(live.pointer_primary(false).unwrap());
         live.take_action().expect("action emitted")
+    }
+
+    #[test]
+    fn controls_follow_painted_hits_not_registered_rectangles() {
+        let cases = [
+            ("visibility:hidden", "", 20.0, 20.0, false),
+            ("display:none", "", 20.0, 20.0, false),
+            ("opacity:0", "", 20.0, 20.0, false),
+            ("pointer-events:none", "", 20.0, 20.0, false),
+            (
+                "",
+                "section{width:10px;height:10px;overflow:hidden}",
+                20.0,
+                20.0,
+                false,
+            ),
+            ("border-radius:40px", "", 1.0, 1.0, false),
+            ("transform:translateX(100px)", "", 20.0, 20.0, false),
+            ("transform:translateX(100px)", "", 120.0, 20.0, true),
+            ("", "", 20.0, 20.0, true),
+            ("top:120px", "", 20.0, 140.0, false),
+        ];
+        let root =
+            std::env::temp_dir().join(format!("htmshell-hit-controls-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for (index, (style, extra_css, x, y, expected)) in cases.into_iter().enumerate() {
+            let file = format!("case-{index}.html");
+            std::fs::write(root.join(&file), format!(
+                "<!doctype html><style>html,body{{margin:0;background:black}}section{{position:relative}}button{{position:absolute;left:0;top:0;width:80px;height:40px;padding:0;border:0;background:red;{style}}}{extra_css}</style><body id='panel-root'><section><button id='overlay-toggle' data-htm-element='action-button' data-htm-action='overlay.toggle'><span>Label</span></button></section></body>"
+            )).unwrap();
+            let mut live = LiveDocument::load_surface_document(
+                &root,
+                &file,
+                LiveDocumentKind::Panel,
+                200,
+                100,
+            )
+            .unwrap();
+            let frame = live.render().unwrap();
+            live.pointer_move(x, y).unwrap();
+            live.pointer_primary(true).unwrap();
+            live.pointer_primary(false).unwrap();
+            assert_eq!(
+                live.take_action(),
+                expected.then_some(LiveAction::ToggleOverlay),
+                "case {index}: {style} {extra_css}"
+            );
+            if !expected && index != 3 && x == 20.0 && y == 20.0 {
+                let offset = ((20 * frame.buffer_width + 20) * 4) as usize;
+                assert_eq!(
+                    &frame.premultiplied_rgba[offset..offset + 3],
+                    &[0, 0, 0],
+                    "invisible control case {index}"
+                );
+            }
+        }
+        for (index, cover) in [
+            "<button id='back' data-htm-element='action-button' data-htm-action='power_profile.set_balanced'>Back</button>",
+            "<div id='back'>Noninteractive cover</div>",
+        ].into_iter().enumerate() {
+            let file = format!("overlap-{index}.html");
+            std::fs::write(root.join(&file), format!(
+                "<!doctype html><style>html,body{{margin:0;background:black}}button,#back{{position:absolute;left:0;top:0;width:80px;height:40px;padding:0;border:0}}#overlay-toggle{{z-index:10;background:red}}#back{{z-index:{};background:blue}}</style><body id='panel-root'><button id='overlay-toggle' data-htm-element='action-button' data-htm-action='overlay.toggle'>Front</button>{cover}</body>", if index == 0 {1} else {20}
+            )).unwrap();
+            let mut live = LiveDocument::load_surface_document(&root, &file, LiveDocumentKind::Panel, 200, 100).unwrap();
+            live.render().unwrap();
+            live.pointer_move(20.0, 20.0).unwrap();
+            live.pointer_primary(true).unwrap();
+            live.pointer_primary(false).unwrap();
+            assert_eq!(live.take_action(), (index == 0).then_some(LiveAction::ToggleOverlay));
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn alpha_bounds(frame: &LiveFrame) -> Option<(u32, u32, u32, u32)> {
@@ -5588,7 +5670,9 @@ mod tests {
             "overlay.html",
             LiveDocumentKind::TransientOverlay,
             1100,
-            800,
+            // This test activates controls near the bottom of a populated
+            // inspector. Keep them visible instead of clicking clipped content.
+            2400,
         )
         .unwrap();
         let demand = overlay.pipewire_demand();
