@@ -538,6 +538,7 @@ pub struct LiveRuntimeSnapshot {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct LiveRuntimeMeasurements {
+    pub conservative_full_repaint_requests: u64,
     pub package_read_ms: f64,
     pub html_parse_ms: f64,
     pub initial_resolve_ms: f64,
@@ -1545,6 +1546,10 @@ impl LiveDocument {
 
     #[cfg(feature = "gpu-renderer")]
     fn request_conservative_full_repaint(&mut self) {
+        self.measurements.conservative_full_repaint_requests = self
+            .measurements
+            .conservative_full_repaint_requests
+            .saturating_add(1);
         self.render_session.request_full_repaint();
     }
 
@@ -3038,14 +3043,7 @@ impl LiveDocument {
             .saturating_add(update.suppressed_keys as u64);
         if update.changed_elements > 0 {
             #[cfg(feature = "gpu-renderer")]
-            if component_state_changed
-                && changed_keys.contains(&StateBindingKey::ClockTime)
-                && std::env::var_os(NATIVE_REPRODUCER_LOG_ENV).is_some()
-                && self
-                    .builtins
-                    .indexed_node(NATIVE_REPRODUCER_UPDATE_ID)
-                    .is_some()
-            {
+            if component_state_changed && changed_keys.contains(&StateBindingKey::ClockTime) {
                 self.diagnostic_component_clock_updates = self
                     .diagnostic_component_clock_updates
                     .checked_add(1)
@@ -3054,10 +3052,17 @@ impl LiveDocument {
                             "native reproducer Clock update counter exhausted".into(),
                         )
                     })?;
-                self.set_registered_text(
-                    NATIVE_REPRODUCER_UPDATE_ID,
-                    &format!("Update {}", self.diagnostic_component_clock_updates),
-                )?;
+                if std::env::var_os(NATIVE_REPRODUCER_LOG_ENV).is_some()
+                    && self
+                        .builtins
+                        .indexed_node(NATIVE_REPRODUCER_UPDATE_ID)
+                        .is_some()
+                {
+                    self.set_registered_text(
+                        NATIVE_REPRODUCER_UPDATE_ID,
+                        &format!("Update {}", self.diagnostic_component_clock_updates),
+                    )?;
+                }
             }
             self.resolve();
             #[cfg(feature = "gpu-renderer")]

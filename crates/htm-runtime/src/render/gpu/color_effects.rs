@@ -87,6 +87,7 @@ pub(super) struct EffectImageCache {
     layers: Vec<Vec<CachedEffectImage>>,
     use_sequence: u64,
     next_diagnostic_id: u64,
+    pub(super) frame_bindings: std::collections::BTreeSet<(u64, u32, u32, u64)>,
 }
 
 struct CachedEffectImage {
@@ -134,6 +135,8 @@ impl EffectImageCache {
                 height,
                 cached.diagnostic_id,
             );
+            self.frame_bindings
+                .insert((layer_index as u64, width, height, cached.diagnostic_id));
             return Ok(cached.image.clone());
         }
         if layer.len() >= MAX_EFFECT_IMAGE_HANDLE_VARIANTS_PER_LAYER {
@@ -169,6 +172,8 @@ impl EffectImageCache {
             .gpu_effect_image_handle_creations
             .saturating_add(1);
         record_effect_image_diagnostic(statistics, layer_index, width, height, diagnostic_id);
+        self.frame_bindings
+            .insert((layer_index as u64, width, height, diagnostic_id));
         Ok(image)
     }
 }

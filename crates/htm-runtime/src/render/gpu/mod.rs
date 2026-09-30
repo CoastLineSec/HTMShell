@@ -76,7 +76,7 @@ pub(crate) struct GpuStatistics {
     pub frames_rendered: u64,
     pub full_target_renders: u64,
     pub readbacks: u64,
-    pub resource_uploads: u64,
+    pub resource_admissions: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub cache_evictions: u64,
@@ -275,7 +275,7 @@ impl GpuResourceCache {
                     last_use: self.use_sequence,
                 },
             );
-            statistics.resource_uploads = statistics.resource_uploads.saturating_add(1);
+            statistics.resource_admissions = statistics.resource_admissions.saturating_add(1);
         }
         Ok(())
     }
@@ -2188,7 +2188,7 @@ mod tests {
         cache
             .prepare(DeviceGeneration(1), &plan, &mut statistics)
             .unwrap();
-        assert_eq!(statistics.resource_uploads, 1);
+        assert_eq!(statistics.resource_admissions, 1);
         assert_eq!(statistics.cache_hits, 1);
         assert_eq!(cache.bytes, 128);
 
@@ -2196,7 +2196,7 @@ mod tests {
         cache
             .prepare(DeviceGeneration(1), &plan, &mut statistics)
             .unwrap();
-        assert_eq!(statistics.resource_uploads, 2);
+        assert_eq!(statistics.resource_admissions, 2);
         assert_eq!(cache.entries.len(), 1);
         cache.clear();
         assert!(cache.entries.is_empty());
@@ -2272,7 +2272,7 @@ mod tests {
             .unwrap();
         }
 
-        assert_eq!(statistics.resource_uploads, 501);
+        assert_eq!(statistics.resource_admissions, 501);
         assert_eq!(statistics.cache_hits, 1_000);
         assert_eq!(cache.entries.len(), 1);
         assert_eq!(cache.bytes, 128);
@@ -2600,7 +2600,7 @@ mod tests {
                 .sort_by(|left, right| left.id.cmp(&right.id));
         }
         let expected = cpu_pixels(text_svg_prepared.recording.clone(), &text_svg_plan);
-        let component_svg_uploads = renderer.statistics.resource_uploads;
+        let component_svg_uploads = renderer.statistics.resource_admissions;
         let component_svg_hits = renderer.statistics.cache_hits;
         let pixels = gpu_pixels(
             &mut renderer,
@@ -2608,7 +2608,7 @@ mod tests {
             text_svg_prepared.recording.clone(),
         );
         assert_tolerant_pixels(&expected, &pixels, 8, 8.0);
-        assert!(renderer.statistics.resource_uploads > component_svg_uploads);
+        assert!(renderer.statistics.resource_admissions > component_svg_uploads);
         let pixels = gpu_pixels(&mut renderer, &text_svg_plan, text_svg_prepared.recording);
         assert_tolerant_pixels(&expected, &pixels, 8, 8.0);
         assert!(renderer.statistics.cache_hits > component_svg_hits);

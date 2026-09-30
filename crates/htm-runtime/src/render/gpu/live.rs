@@ -874,15 +874,27 @@ impl LiveGpuPresenter {
         (
             entries,
             bytes,
-            statistics.resource_uploads,
+            statistics.resource_admissions,
             statistics.cache_hits,
         )
+    }
+
+    /// Effect image bindings used by the immediately preceding render call.
+    /// Identifiers are diagnostic ordinals, not texture handles.
+    pub fn effect_image_bindings(&self) -> Vec<(u64, u32, u32, u64)> {
+        self.backend
+            .effect_image_cache
+            .frame_bindings
+            .iter()
+            .copied()
+            .collect()
     }
 
     pub fn render(
         &mut self,
         frame: &LiveGpuPreparedFrame,
     ) -> Result<PendingLiveGpuFrame, LiveGpuError> {
+        self.backend.effect_image_cache.frame_bindings.clear();
         let started = Instant::now();
         let plan = frame.plan();
         validate_plan(plan)?;

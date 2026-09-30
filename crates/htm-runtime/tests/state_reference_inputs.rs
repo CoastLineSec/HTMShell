@@ -944,6 +944,8 @@ fn component_state_mutations_request_a_conservative_gpu_repaint() {
     .unwrap();
     live.apply_bound_text(&[(StateBindingKey::ClockTime, "10:01".to_owned())])
         .unwrap();
+    assert_eq!(live.measurements().conservative_full_repaint_requests, 1);
+    assert_eq!(live.diagnostic_component_clock_update_count(), 1);
     let initial = live
         .prepare_gpu_pending_for(
             htm_runtime::LiveRenderRequest::new(480, 96, 120).unwrap(),
@@ -956,6 +958,11 @@ fn component_state_mutations_request_a_conservative_gpu_repaint() {
 
     live.apply_bound_text(&[(StateBindingKey::ClockTime, "10:02".to_owned())])
         .unwrap();
+    assert_eq!(live.measurements().conservative_full_repaint_requests, 2);
+    assert_eq!(live.diagnostic_component_clock_update_count(), 2);
+    live.apply_bound_text(&[(StateBindingKey::ClockTime, "10:02".to_owned())])
+        .unwrap();
+    assert_eq!(live.measurements().conservative_full_repaint_requests, 2);
     let updated = live
         .prepare_gpu_pending_for(
             htm_runtime::LiveRenderRequest::new(480, 96, 120).unwrap(),

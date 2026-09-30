@@ -73,6 +73,22 @@ const VIEWPORTER_VERSION: u32 = 1;
 const NATIVE_REPRODUCER_LOG_ENV: &str = "HTMSHELL_M9_P5A_NATIVE_REPRO_LOG";
 
 #[cfg(feature = "gpu-renderer")]
+fn callback_trace_record(
+    committed: &serde_json::Value,
+    requested: u64,
+    completed: u64,
+    outstanding: u64,
+) -> serde_json::Value {
+    let mut record = committed.clone();
+    record["event"] = "frame_callback".into();
+    record["metadata_scope"] = "committed_surface_frame".into();
+    record["presentation"]["frame_callbacks_requested_count"] = requested.into();
+    record["presentation"]["frame_callbacks_completed_count"] = completed.into();
+    record["presentation"]["outstanding_callback_count"] = outstanding.into();
+    record
+}
+
+#[cfg(feature = "gpu-renderer")]
 struct NativeReproducerTrace {
     run_id: String,
     writer: BufWriter<File>,
@@ -100,7 +116,7 @@ impl NativeReproducerTrace {
         };
         trace.write(serde_json::json!({
             "event": "run_started",
-            "log_schema": 1,
+            "log_schema": 2,
         }))?;
         Ok(Some(trace))
     }
@@ -352,7 +368,7 @@ pub struct GpuSurfaceHostSummary {
     pub duplicate_frame_suppressions: u64,
     pub resource_entries: usize,
     pub resource_bytes: u64,
-    pub resource_uploads: u64,
+    pub resource_admissions: u64,
     pub cache_hits: u64,
     pub effect_image_handle_creations: u64,
     pub effect_image_handle_reuses: u64,
@@ -786,6 +802,8 @@ struct ShellSurfaceState {
     #[cfg(feature = "gpu-renderer")]
     diagnostic_native_commit_serial: u64,
     #[cfg(feature = "gpu-renderer")]
+    diagnostic_committed_record: Option<serde_json::Value>,
+    #[cfg(feature = "gpu-renderer")]
     presenter: SurfacePresenter,
     #[cfg(feature = "gpu-renderer")]
     gpu_consecutive_timeouts: u8,
@@ -1195,6 +1213,8 @@ impl State {
             #[cfg(feature = "gpu-renderer")]
             diagnostic_native_commit_serial: 0,
             #[cfg(feature = "gpu-renderer")]
+            diagnostic_committed_record: None,
+            #[cfg(feature = "gpu-renderer")]
             presenter: SurfacePresenter::new(0),
             #[cfg(feature = "gpu-renderer")]
             gpu_consecutive_timeouts: 0,
@@ -1558,7 +1578,7 @@ impl State {
             return;
         };
         let backend = gpu.backend_info();
-        let (entries, bytes, uploads, hits) = gpu.resource_statistics();
+        let (entries, bytes, admissions, hits) = gpu.resource_statistics();
         let statistics = gpu.statistics();
         let successful_gpu_frame = self.surfaces[index].presenter.gpu_succeeded();
         let summary = &mut self.surfaces[index].summary.gpu;
@@ -1570,7 +1590,7 @@ impl State {
         summary.device_generation = backend.device_generation;
         summary.resource_entries = entries;
         summary.resource_bytes = bytes;
-        summary.resource_uploads = uploads;
+        summary.resource_admissions = admissions;
         summary.cache_hits = hits;
         summary.effect_image_handle_creations = statistics.gpu_effect_image_handle_creations;
         summary.effect_image_handle_reuses = statistics.gpu_effect_image_handle_reuses;
@@ -1599,29 +1619,24 @@ impl State {
             .and_then(|consumer| consumer.state_binding_id())
             .map(str::to_owned);
 
-        let mut raster_usages = runtime
+        let resource_usages: Vec<_> = runtime
             .component_resource_usages()
             .iter()
-            .filter(|usage| usage.source().kind().as_str() == "raster")
-            .collect::<Vec<_>>();
-        raster_usages.sort_by_key(|usage| usage.template_source_ordinal());
-        let mut svg_usages = runtime
-            .component_resource_usages()
-            .iter()
-            .filter(|usage| usage.source().kind().as_str() == "svg")
-            .collect::<Vec<_>>();
-        svg_usages.sort_by_key(|usage| usage.template_source_ordinal());
-        let source_identity = |usage: &&htm_runtime::ComponentResourceUsage| {
-            usage.source().id().deterministic_string(package_generation)
-        };
-        let unfiltered_raster_source_identity = raster_usages.first().map(source_identity);
-        let filtered_raster_source_identity = raster_usages.get(1).map(source_identity);
-        let svg_source_identity = svg_usages.first().map(source_identity);
+            .map(|usage| {
+                serde_json::json!({
+                    "usage_identity": usage.id().deterministic_string(),
+                    "source_identity": usage.source().id().deterministic_string(package_generation),
+                    "resource_kind": usage.source().kind().as_str(),
+                    "template_node_ordinal": usage.template_source_ordinal(),
+                    // Declaration order cannot establish effect membership.
+                    "effect_membership": "not_collected",
+                })
+            })
+            .collect();
 
         let gpu = self.gpu.as_ref();
         let gpu_statistics = gpu.map(LiveGpuPresenter::statistics).unwrap_or_default();
         let backend = gpu.map(LiveGpuPresenter::backend_info);
-        let effect_image_present = gpu_statistics.gpu_effect_image_last_diagnostic_id != 0;
         let output_identity = surface
             .instance_context
             .as_ref()
@@ -1657,15 +1672,14 @@ impl State {
             "conservative_full_repaint_requested": surface.diagnostic_conservative_full_repaint_requested,
         });
         let resource_record = serde_json::json!({
-            "unfiltered_raster_source_identity": unfiltered_raster_source_identity,
-            "filtered_raster_source_identity": filtered_raster_source_identity,
-            "svg_source_identity": svg_source_identity,
+            "document_usages": resource_usages,
+            "actual_atlas_upload_events": null,
+            "atlas_residency": "not_exposed_by_backend",
         });
         let effect_record = serde_json::json!({
-            "layer_ordinal": effect_image_present.then_some(gpu_statistics.gpu_effect_image_last_layer_ordinal),
-            "layer_width": effect_image_present.then_some(gpu_statistics.gpu_effect_image_last_width),
-            "layer_height": effect_image_present.then_some(gpu_statistics.gpu_effect_image_last_height),
-            "image_diagnostic_id": effect_image_present.then_some(gpu_statistics.gpu_effect_image_last_diagnostic_id),
+            "frame_bindings": (event == "native_commit" && surface.presenter.state() == PresenterState::GpuReady).then(|| gpu.map(LiveGpuPresenter::effect_image_bindings).unwrap_or_default()),
+            "binding_fields": ["layer_ordinal", "width", "height", "image_diagnostic_id"],
+            "counter_scope": "process_aggregate_at_record",
             "cache_created_count": gpu_statistics.gpu_effect_image_handle_creations,
             "cache_reused_count": gpu_statistics.gpu_effect_image_handle_reuses,
             "cache_replaced_count": gpu_statistics.gpu_effect_image_handle_replacements,
@@ -1717,9 +1731,28 @@ impl State {
 
     #[cfg(feature = "gpu-renderer")]
     fn trace_native_reproducer_event(&mut self, index: usize, event: &'static str) {
-        let Some(record) = self.native_reproducer_record(index, event) else {
+        let record = if event == "frame_callback" {
+            let surface = &self.surfaces[index];
+            surface
+                .diagnostic_committed_record
+                .as_ref()
+                .map(|committed| {
+                    callback_trace_record(
+                        committed,
+                        surface.summary.gpu.frame_callbacks_requested,
+                        surface.summary.gpu.frame_callbacks_completed,
+                        u64::from(surface.scheduler.frame_callback_outstanding()),
+                    )
+                })
+        } else {
+            self.native_reproducer_record(index, event)
+        };
+        let Some(record) = record else {
             return;
         };
+        if event == "native_commit" {
+            self.surfaces[index].diagnostic_committed_record = Some(record.clone());
+        }
         let result = self
             .native_reproducer_trace
             .as_mut()
@@ -2495,7 +2528,8 @@ impl State {
                 visited.insert(surface.owner);
                 let values = [(StateBindingKey::ClockTime, snapshot.display_text.clone())];
                 #[cfg(feature = "gpu-renderer")]
-                let diagnostic_updates_before = runtime.diagnostic_component_clock_update_count();
+                let diagnostic_updates_before =
+                    runtime.measurements().conservative_full_repaint_requests;
                 match runtime.apply_bound_text(&values) {
                     Ok(binding) => {
                         elements = elements.saturating_add(binding.changed_elements);
@@ -2507,9 +2541,9 @@ impl State {
                                 surface.diagnostic_clock_sequence = snapshot.sequence;
                                 surface.diagnostic_clock_provider_generation =
                                     clock_provider_generation;
-                                surface.diagnostic_conservative_full_repaint_requested = runtime
-                                    .diagnostic_component_clock_update_count()
-                                    > diagnostic_updates_before;
+                                surface.diagnostic_conservative_full_repaint_requested =
+                                    runtime.measurements().conservative_full_repaint_requests
+                                        > diagnostic_updates_before;
                                 diagnostic_changed_documents.insert(surface.owner);
                             }
                         }
@@ -2841,6 +2875,7 @@ impl State {
                 wayland_surface.frame(qh, CallbackData::Frame { owner, generation });
                 wayland_surface.commit();
                 self.surfaces[index].scheduler.frame_committed();
+                self.surfaces[index].diagnostic_committed_record = None;
                 self.surfaces[index].diagnostic_pending_revision_initiator =
                     DiagnosticRevisionInitiator::RendererRecovery;
                 self.surfaces[index].scheduler.mark_dirty();
@@ -5875,6 +5910,23 @@ delegate_noop!(State: ignore wp_viewport::WpViewport);
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "gpu-renderer")]
+    #[test]
+    fn callback_metadata_stays_with_its_surface_commit() {
+        let panel = serde_json::json!({"event":"native_commit","surface":{"surface_owner":2},"state":{"displayed_clock_value":"10:01"},"effect":{"frame_bindings":[]},"render":{"scene_revision":3},"presentation":{"native_commit_serial":7}});
+        let overlay = serde_json::json!({"event":"native_commit","surface":{"surface_owner":3},"state":{"displayed_clock_value":"10:02"},"effect":{"frame_bindings":[[0,80,40,99]]},"render":{"scene_revision":9},"presentation":{"native_commit_serial":12}});
+        let overlay_callback = super::callback_trace_record(&overlay, 12, 12, 0);
+        let panel_callback = super::callback_trace_record(&panel, 7, 7, 0);
+        assert_eq!(panel_callback["effect"], panel["effect"]);
+        assert_eq!(panel_callback["state"], panel["state"]);
+        assert_eq!(panel_callback["render"], panel["render"]);
+        assert_eq!(panel_callback["presentation"]["native_commit_serial"], 7);
+        assert_eq!(overlay_callback["effect"], overlay["effect"]);
+        assert_eq!(
+            panel_callback["presentation"]["outstanding_callback_count"],
+            0
+        );
+    }
     use super::*;
 
     #[test]
