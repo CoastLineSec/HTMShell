@@ -18,6 +18,8 @@ use stylo::stylesheets::{
 use url::Url;
 
 const MAX_STYLESHEET_BYTES: u64 = 1024 * 1024;
+// Bound both our token walk and the recursive semantic parser that follows it.
+const MAX_COMPONENT_CSS_NESTING: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct CssParseIssue {
@@ -266,7 +268,7 @@ fn stable_css_hash(bytes: &[u8]) -> u64 {
 }
 
 fn forbidden_component_css_token(css: &str) -> Option<ComponentCssError> {
-    fn visit(parser: &mut Parser<'_, '_>, found: &mut Option<ComponentCssError>) {
+    fn visit(parser: &mut Parser<'_, '_>, found: &mut Option<ComponentCssError>, depth: usize) {
         let mut consecutive_colons = 0u8;
         while found.is_none() {
             let location = parser.current_source_location();
@@ -345,8 +347,19 @@ fn forbidden_component_css_token(css: &str) -> Option<ComponentCssError> {
                     | Token::SquareBracketBlock
                     | Token::CurlyBracketBlock
             ) {
+                if depth == MAX_COMPONENT_CSS_NESTING {
+                    *found = Some(ComponentCssError {
+                        kind: ComponentCssErrorKind::Parse,
+                        line: location.line,
+                        column: location.column,
+                        message: format!(
+                            "component CSS nesting exceeds {MAX_COMPONENT_CSS_NESTING} blocks"
+                        ),
+                    });
+                    break;
+                }
                 let _ = parser.parse_nested_block(|nested| {
-                    visit(nested, found);
+                    visit(nested, found, depth + 1);
                     Ok::<(), cssparser::ParseError<'_, ()>>(())
                 });
             }
@@ -356,7 +369,7 @@ fn forbidden_component_css_token(css: &str) -> Option<ComponentCssError> {
     let mut input = ParserInput::new(css);
     let mut parser = Parser::new(&mut input);
     let mut found = None;
-    visit(&mut parser, &mut found);
+    visit(&mut parser, &mut found, 0);
     found
 }
 
@@ -590,4 +603,16 @@ mod tests {
             .is_ok()
         );
     }
+}
+#[test]
+fn component_css_nesting_is_bounded_before_semantic_parsing() {
+    let nested = |depth: usize| format!("{}x{}", "f(".repeat(depth), ")".repeat(depth));
+    assert!(forbidden_component_css_token(&nested(MAX_COMPONENT_CSS_NESTING)).is_none());
+    for depth in [MAX_COMPONENT_CSS_NESTING + 1, 10_000] {
+        let error = forbidden_component_css_token(&nested(depth)).unwrap();
+        assert_eq!(error.kind, ComponentCssErrorKind::Parse);
+        assert!(error.message.contains("nesting exceeds"));
+    }
+    let css = format!(".card {{ --deep: {}; }}", nested(10_000));
+    assert!(prepare_component_author_stylesheet(&css, "components/deep.css").is_err());
 }
