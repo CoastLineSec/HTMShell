@@ -1490,7 +1490,7 @@ fn maximum_expanded_node_boundary_is_enforced() {
     fixture.write_shell("[]", &format!("[{}]", exports(5)), &uses(5));
     fixture.write(
         "components/all.html",
-        source(&[9_999, 9_999, 9_999, 9_999, 9_995]),
+        source(&[9_999, 9_999, 9_999, 9_999, 9_994]),
     );
     let snapshot = PackageSnapshotLoader::new()
         .load_headless(&fixture.root)
@@ -1505,10 +1505,9 @@ fn maximum_expanded_node_boundary_is_enforced() {
             .expanded_nodes,
         MAX_COMPONENT_EXPANDED_NODES
     );
-
     fixture.write(
         "components/all.html",
-        source(&[9_999, 9_999, 9_999, 9_999, 9_996]),
+        source(&[9_999, 9_999, 9_999, 9_999, 9_995]),
     );
     assert_eq!(
         PackageSnapshotLoader::new()

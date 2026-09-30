@@ -5376,7 +5376,9 @@ fn validate_prepared_expansion(
                             ));
                         }
                         increment_state_consumer_binding_count(&mut state.state_consumer_bindings)?;
-                    } else if *consumer_kind != ComponentInputConsumerKind::BooleanEnabled {
+                    }
+                    // Both literal and live consumers materialize a text child.
+                    if *consumer_kind != ComponentInputConsumerKind::BooleanEnabled {
                         add_expanded(state, 1)?;
                     }
                     visit(
@@ -5510,7 +5512,8 @@ fn validate_prepared_expansion(
         resources,
         instances: 0,
         referenced: BTreeSet::new(),
-        expanded: 0,
+        // The DOM document node is present even though it has no template node.
+        expanded: 1,
         maximum_depth: 0,
         paths: Vec::new(),
         resource_reference_values: 0,

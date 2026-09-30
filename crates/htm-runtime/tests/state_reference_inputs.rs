@@ -616,7 +616,7 @@ fn state_values_and_consumer_bindings_accept_the_exact_limits() {
 
     // Component hosts and root nodes also count toward the independent expanded-node limit.
     // The counter's exact 50,000/50,001 boundary is covered in the component unit tests.
-    let consumer_count = 48;
+    let consumer_count = 24;
     let consumer_instances = 1_000;
     let consumers = (0..consumer_count)
         .map(|_| r#"<span data-htm-element="state-text" data-htm-bind="input.time"></span>"#)
@@ -656,6 +656,35 @@ fn state_values_and_consumer_bindings_accept_the_exact_limits() {
             .state_consumer_bindings,
         consumer_instances * consumer_count
     );
+    // Candidate acceptance must cover the constructed DOM, not just binding counts.
+    LiveDocument::load_surface_snapshot(
+        Arc::clone(&snapshot),
+        panel,
+        LiveDocumentKind::Panel,
+        480,
+        96,
+    )
+    .unwrap();
+
+    let overflowing_consumers = consumers.repeat(2);
+    let mut loader = PackageSnapshotLoader::new();
+    let first = loader
+        .load_manifest(maximum_bindings.root.join("shell.json"))
+        .unwrap();
+    maximum_bindings.write(
+        "components/components.html",
+        format!(
+            r#"<template data-htm-component="state-consumers">{overflowing_consumers}</template>"#
+        ),
+    );
+    assert_eq!(
+        loader
+            .load_manifest(maximum_bindings.root.join("shell.json"))
+            .unwrap_err()
+            .kind(),
+        PackageErrorKind::ComponentExpandedNodeLimit
+    );
+    assert!(Arc::ptr_eq(loader.current().unwrap(), &first));
 }
 
 #[test]
