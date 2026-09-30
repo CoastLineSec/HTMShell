@@ -2345,12 +2345,32 @@ struct RawComponentInput {
     name: String,
     #[serde(rename = "type")]
     input_type: String,
+    #[serde(default, deserialize_with = "deserialize_present")]
     required: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_present")]
     default: Option<serde_json::Value>,
-    #[serde(rename = "resourceTypes")]
+    #[serde(
+        rename = "resourceTypes",
+        default,
+        deserialize_with = "deserialize_present"
+    )]
     resource_types: Option<Vec<String>>,
-    #[serde(rename = "valueType")]
+    #[serde(
+        rename = "valueType",
+        default,
+        deserialize_with = "deserialize_present"
+    )]
     value_type: Option<String>,
+}
+
+// Missing is distinct from an authored value, including JSON null. Typed fields
+// reject null; JSON-valued defaults retain it for family-specific validation.
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -6182,6 +6202,44 @@ mod tests {
         fn read_bounded(&self, _path: &Path, _max_bytes: u64) -> io::Result<Vec<u8>> {
             Ok(vec![0])
         }
+    }
+
+    #[test]
+    fn component_input_null_fields_cannot_masquerade_as_absent() {
+        let owner = PackageId::parse("org.example.test").unwrap();
+        let component = ComponentName::parse("test-component").unwrap();
+        for (declaration, expected) in [
+            (
+                r#"{"name":"value","type":"state-reference","valueType":"string","required":true,"default":null}"#,
+                PackageErrorKind::ComponentStateReferenceDefaultForbidden,
+            ),
+            (
+                r#"{"name":"value","type":"resource-reference","resourceTypes":["raster"],"required":true,"default":null}"#,
+                PackageErrorKind::ComponentResourceReferenceDefaultForbidden,
+            ),
+        ] {
+            let raw: RawComponentInput = serde_json::from_str(declaration).unwrap();
+            assert_eq!(raw.default, Some(serde_json::Value::Null));
+            assert_eq!(
+                validate_component_inputs(vec![raw], &owner, &component)
+                    .unwrap_err()
+                    .kind(),
+                expected
+            );
+        }
+        for input_type in ["string", "resource-reference", "state-reference"] {
+            for field in ["required", "resourceTypes", "valueType"] {
+                let declaration =
+                    format!(r#"{{"name":"value","type":"{input_type}","{field}":null}}"#);
+                assert!(
+                    serde_json::from_str::<RawComponentInput>(&declaration).is_err(),
+                    "{declaration}"
+                );
+            }
+        }
+        let literal: RawComponentInput =
+            serde_json::from_str(r#"{"name":"value","type":"string","default":null}"#).unwrap();
+        assert!(validate_component_inputs(vec![literal], &owner, &component).is_err());
     }
 
     #[test]
