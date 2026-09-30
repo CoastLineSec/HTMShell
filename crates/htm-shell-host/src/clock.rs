@@ -255,6 +255,7 @@ struct ActiveDeclaration {
     resolved_zone: Option<ResolvedZone>,
     last_text: Option<String>,
     last_datetime: Option<String>,
+    last_enabled: Option<bool>,
     next_deadline: Option<Timestamp>,
 }
 
@@ -460,6 +461,7 @@ impl<S: ClockSource> ClockService<S> {
                             enabled: false,
                             sequence: self.sequence,
                         });
+                        entry.last_enabled = Some(false);
                     }
                     entry
                 }
@@ -470,6 +472,7 @@ impl<S: ClockSource> ClockService<S> {
                         resolved_zone,
                         last_text: None,
                         last_datetime: None,
+                        last_enabled: None,
                         next_deadline: None,
                     }
                 }
@@ -759,9 +762,11 @@ impl<S: ClockSource> ClockService<S> {
                 .get_mut(&id)
                 .expect("declaration remains present");
             let changed = entry.last_text.as_ref() != Some(&rendered.0)
-                || entry.last_datetime.as_ref() != Some(&rendered.1);
+                || entry.last_datetime.as_ref() != Some(&rendered.1)
+                || entry.last_enabled != Some(entry.declaration.enabled);
             entry.last_text = Some(rendered.0.clone());
             entry.last_datetime = Some(rendered.1.clone());
+            entry.last_enabled = Some(entry.declaration.enabled);
             if changed {
                 update.declarations.push(ClockDeclarationUpdate {
                     id: id.clone(),
@@ -1305,6 +1310,39 @@ mod tests {
         assert!(update.is_empty());
         assert!(service.summary().unchanged_values_suppressed >= 2);
         service.shutdown().unwrap();
+    }
+
+    #[test]
+    fn reenable_publishes_even_when_formatted_value_is_unchanged() {
+        for format in ["%T", "%H:%M", "%H", "%F"] {
+            let mut service = ClockService::with_source(FakeClockSource {
+                samples: VecDeque::from([
+                    sample("2026-01-01T10:00:00Z", TimeZone::UTC),
+                    sample("2026-01-01T10:00:00Z", TimeZone::UTC),
+                ]),
+            });
+            let enabled = declaration(1, "clock", format, ClockTimeZone::Utc, true);
+            let initial = service
+                .reconcile(1, 0, vec![enabled.clone()])
+                .unwrap()
+                .unwrap();
+            let mut disabled = enabled.clone();
+            disabled.enabled = false;
+            let off = service.reconcile(1, 0, vec![disabled]).unwrap().unwrap();
+            assert!(!off.declarations[0].enabled);
+            let on = service.reconcile(1, 0, vec![enabled]).unwrap().unwrap();
+            assert!(on.declarations[0].enabled);
+            assert_eq!(
+                on.declarations[0].display_text,
+                initial.declarations[0].display_text
+            );
+            assert_eq!(
+                on.declarations[0].datetime,
+                initial.declarations[0].datetime
+            );
+            assert_eq!(service.summary().timer_descriptors, 1);
+            service.shutdown().unwrap();
+        }
     }
 
     #[test]
