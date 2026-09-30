@@ -70,6 +70,25 @@ fn document(content: &str) -> String {
     )
 }
 
+#[test]
+fn image_set_strings_reject_in_inline_component_styles() {
+    for image in ["image-set", "-webkit-image-set"] {
+        let fixture = Fixture::new();
+        fixture.write_package(
+            &format!("[{}]", export("image-card", "[]", "[]")),
+            &definition(
+                "image-card",
+                &format!(r#"<div style='background-image: {image}("outside.png" 1x)'>image</div>"#),
+            ),
+            "",
+        );
+        assert_eq!(
+            load_error(&fixture),
+            PackageErrorKind::ComponentResourceNotSupported
+        );
+    }
+}
+
 fn export(name: &str, slots: &str, styles: &str) -> String {
     format!(
         r#"{{"name":"{name}","source":"components/components.html","inputs":[],"slots":{slots},"styles":{styles}}}"#

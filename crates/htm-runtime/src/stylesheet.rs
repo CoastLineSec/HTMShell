@@ -267,6 +267,10 @@ fn stable_css_hash(bytes: &[u8]) -> u64 {
     hash
 }
 
+pub(crate) fn component_inline_style_is_forbidden(css: &str) -> bool {
+    forbidden_component_css_token(css).is_some()
+}
+
 fn forbidden_component_css_token(css: &str) -> Option<ComponentCssError> {
     fn visit(parser: &mut Parser<'_, '_>, found: &mut Option<ComponentCssError>, depth: usize) {
         let mut consecutive_colons = 0u8;
@@ -292,6 +296,15 @@ fn forbidden_component_css_token(css: &str) -> Option<ComponentCssError> {
                     ComponentCssErrorKind::UrlResource,
                     "CSS URL resources are not supported in component stylesheets",
                 )),
+                Token::Function(name)
+                    if name.eq_ignore_ascii_case("image-set")
+                        || name.eq_ignore_ascii_case("-webkit-image-set") =>
+                {
+                    Some((
+                        ComponentCssErrorKind::UrlResource,
+                        "CSS image-set resources are not supported in component stylesheets",
+                    ))
+                }
                 Token::Ident(name)
                     if consecutive_colons == 1 && name.eq_ignore_ascii_case("host") =>
                 {
@@ -568,6 +581,14 @@ mod tests {
     fn component_stylesheet_rejects_resource_and_scope_features_by_token_or_ast() {
         let cases = [
             ("@import \"theme.css\";", ComponentCssErrorKind::Import),
+            (
+                ".card { background-image: image-set(\"image.png\" 1x); }",
+                ComponentCssErrorKind::UrlResource,
+            ),
+            (
+                ".card { --image: -webkit-image-set(\"image.png\" 1x); }",
+                ComponentCssErrorKind::UrlResource,
+            ),
             (
                 ".card { background-image: url(image.png); }",
                 ComponentCssErrorKind::UrlResource,

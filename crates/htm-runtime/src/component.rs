@@ -3193,6 +3193,7 @@ fn validate_component_input_consumer(
             if lowercase.contains("url")
                 || lowercase.contains("@import")
                 || attribute.value.contains('\\')
+                || crate::stylesheet::component_inline_style_is_forbidden(&attribute.value)
             {
                 return Err(component_error(
                     PackageErrorKind::ComponentResourceNotSupported,
@@ -3375,7 +3376,11 @@ fn validate_static_component_element(
         }
         if name == "style" {
             let lowercase = value.to_ascii_lowercase();
-            if lowercase.contains("url") || lowercase.contains("@import") || value.contains('\\') {
+            if lowercase.contains("url")
+                || lowercase.contains("@import")
+                || value.contains('\\')
+                || crate::stylesheet::component_inline_style_is_forbidden(value)
+            {
                 return Err(component_error(
                     PackageErrorKind::ComponentResourceNotSupported,
                     owner,
